@@ -20,6 +20,7 @@ interface StudentsState {
   loadStudents: () => Promise<void>
   updateStudentStatus: (id: string, status: StudentStatus) => Promise<void>
   refreshStudent: (id: string) => Promise<void>
+  deleteStudent: (id: string) => Promise<void>
 }
 
 function applyFilter(students: Student[], filter: FilterType, search: string): Student[] {
@@ -123,6 +124,21 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
       })
     } catch (error) {
       console.error('Failed to refresh student:', error)
+    }
+  },
+
+  deleteStudent: async (id: string) => {
+    const { students, filter, searchQuery } = get()
+    const remaining = students.filter((s) => s.id !== id)
+    set({
+      students: remaining,
+      filteredStudents: applyFilter(remaining, filter, searchQuery),
+    })
+    try {
+      await api.deleteStudent(id)
+    } catch (error) {
+      // revert
+      set({ students, filteredStudents: applyFilter(students, filter, searchQuery) })
     }
   },
 }))

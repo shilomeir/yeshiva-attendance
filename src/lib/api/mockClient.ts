@@ -66,6 +66,38 @@ export class MockApiClient implements IApiClient {
     })
   }
 
+  async addStudent(data: { fullName: string; idNumber: string; phone: string }): Promise<Student> {
+    const student: Student = {
+      id: uuidv4(),
+      fullName: data.fullName,
+      idNumber: data.idNumber,
+      phone: data.phone,
+      deviceToken: null,
+      currentStatus: 'ON_CAMPUS',
+      lastSeen: new Date().toISOString(),
+      lastLocation: null,
+      pendingApproval: false,
+      createdAt: new Date().toISOString(),
+    }
+    await db.students.add(student)
+    return student
+  }
+
+  async deleteStudent(id: string): Promise<void> {
+    await db.students.delete(id)
+    await db.events.where('studentId').equals(id).delete()
+  }
+
+  async getLongAbsentStudents(days: number = 7): Promise<Student[]> {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - days)
+    const cutoffISO = cutoff.toISOString()
+    const students = await db.students.toArray()
+    return students.filter(
+      (s) => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen !== null && s.lastSeen < cutoffISO
+    )
+  }
+
   // ---- EVENTS ----
 
   async getEvents(studentId: string): Promise<Event[]> {
@@ -267,8 +299,14 @@ export class MockApiClient implements IApiClient {
     const offCampus = students.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
     const overdue = students.filter((s) => s.currentStatus === 'OVERDUE').length
     const pending = students.filter((s) => s.pendingApproval).length
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - 7)
+    const cutoffISO = cutoff.toISOString()
+    const longAbsent = students.filter(
+      (s) => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen !== null && s.lastSeen < cutoffISO
+    ).length
 
-    return { total, onCampus, offCampus, overdue, pending }
+    return { total, onCampus, offCampus, overdue, pending, longAbsent }
   }
 
   async getDailyPresence(days: number = 7): Promise<DailyPresenceData[]> {

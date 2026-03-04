@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Users, UserCheck, UserX, AlertTriangle, Clock } from 'lucide-react'
+import { Users, UserCheck, UserX, AlertTriangle, CalendarOff, Phone } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
-import { ReasonBreakdown } from '@/components/analytics/ReasonBreakdown'
 import { PeakHoursChart } from '@/components/analytics/PeakHoursChart'
 import { api } from '@/lib/api'
-import type { DashboardStats } from '@/types'
+import type { DashboardStats, Student } from '@/types'
 
 const STAT_CARDS = [
   {
@@ -40,14 +39,19 @@ const STAT_CARDS = [
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
     const load = async () => {
       setIsLoading(true)
       try {
-        const data = await api.getDashboardStats()
+        const [data, absent] = await Promise.all([
+          api.getDashboardStats(),
+          api.getLongAbsentStudents(7),
+        ])
         setStats(data)
+        setLongAbsentStudents(absent)
       } catch {
         console.error('Failed to load dashboard stats')
       } finally {
@@ -56,7 +60,6 @@ export function DashboardPage() {
     }
     load()
 
-    // Refresh every 60 seconds
     const interval = setInterval(load, 60000)
     return () => clearInterval(interval)
   }, [])
@@ -94,6 +97,51 @@ export function DashboardPage() {
         ))}
       </div>
 
+      {/* Long absent alert — only shown when relevant */}
+      {!isLoading && longAbsentStudents.length > 0 && (
+        <Card className="border-red-200 bg-red-50/50 dark:border-red-900/50 dark:bg-red-950/10">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <div className="rounded-lg bg-red-100 p-2 dark:bg-red-900/30">
+                <CalendarOff className="h-5 w-5 text-[var(--red)]" />
+              </div>
+              <div>
+                <CardTitle className="text-base text-[var(--red)]">
+                  לא נוכחים 7 ימים ומעלה
+                </CardTitle>
+                <p className="text-xs text-[var(--text-muted)]">
+                  {longAbsentStudents.length} תלמידים לא נרשמו כנוכחים מזה שבוע
+                </p>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <ul className="divide-y divide-red-100 dark:divide-red-900/30">
+              {longAbsentStudents.slice(0, 8).map((s) => (
+                <li key={s.id} className="flex items-center justify-between py-2.5">
+                  <div>
+                    <p className="font-medium text-[var(--text)]">{s.fullName}</p>
+                    <p className="text-xs text-[var(--text-muted)]">ת.ז. {s.idNumber}</p>
+                  </div>
+                  <a
+                    href={`tel:${s.phone}`}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-sm font-medium text-[var(--blue)] shadow-sm hover:bg-blue-50 transition-colors dark:bg-slate-800 dark:hover:bg-slate-700"
+                  >
+                    <Phone className="h-3.5 w-3.5" />
+                    {s.phone}
+                  </a>
+                </li>
+              ))}
+              {longAbsentStudents.length > 8 && (
+                <li className="pt-2 text-center text-xs text-[var(--text-muted)]">
+                  ועוד {longAbsentStudents.length - 8} נוספים — ראה בדף תלמידים
+                </li>
+              )}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Charts */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
@@ -107,22 +155,13 @@ export function DashboardPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">סיבות יציאה</CardTitle>
+            <CardTitle className="text-base">שעות עומס (יציאות לפי שעה)</CardTitle>
           </CardHeader>
           <CardContent>
-            <ReasonBreakdown />
+            <PeakHoursChart />
           </CardContent>
         </Card>
       </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">שעות עומס (יציאות לפי שעה)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <PeakHoursChart />
-        </CardContent>
-      </Card>
     </div>
   )
 }

@@ -99,6 +99,7 @@ export interface DashboardStats {
   offCampus: number
   overdue: number
   pending: number
+  longAbsent: number // students not on campus for 7+ days
 }
 
 export interface DailyPresenceData {

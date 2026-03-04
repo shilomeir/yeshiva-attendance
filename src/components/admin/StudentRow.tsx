@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { MoreVertical, Edit2 } from 'lucide-react'
+import { Edit2, Trash2 } from 'lucide-react'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Button } from '@/components/ui/button'
 import { StatusOverrideModal } from '@/components/admin/StatusOverrideModal'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
+import { useStudentsStore } from '@/store/studentsStore'
 import type { Student } from '@/types'
 
 interface StudentRowProps {
@@ -34,6 +35,13 @@ function getAvatarColor(id: string): string {
 
 export function StudentRow({ student, onUpdate }: StudentRowProps) {
   const [showOverride, setShowOverride] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const { deleteStudent } = useStudentsStore()
+
+  const handleDelete = async () => {
+    await deleteStudent(student.id)
+    onUpdate()
+  }
 
   return (
     <>
@@ -66,7 +74,7 @@ export function StudentRow({ student, onUpdate }: StudentRowProps) {
         {/* Status badge */}
         <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
 
-        {/* Action button */}
+        {/* Edit status */}
         <Button
           variant="ghost"
           size="icon"
@@ -76,6 +84,34 @@ export function StudentRow({ student, onUpdate }: StudentRowProps) {
         >
           <Edit2 className="h-4 w-4" />
         </Button>
+
+        {/* Delete */}
+        {confirmDelete ? (
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              onClick={handleDelete}
+              className="rounded px-2 py-1 text-xs font-medium text-white bg-[var(--red)] hover:opacity-90 transition-opacity"
+            >
+              מחק
+            </button>
+            <button
+              onClick={() => setConfirmDelete(false)}
+              className="rounded px-2 py-1 text-xs font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)]"
+            >
+              ביטול
+            </button>
+          </div>
+        ) : (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setConfirmDelete(true)}
+            className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--red)]"
+            title="מחיקת תלמיד"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        )}
       </div>
 
       <StatusOverrideModal

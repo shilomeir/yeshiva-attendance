@@ -28,8 +28,8 @@ const LAST_NAMES = [
   'פז', 'צמח', 'קם', 'רענן', 'שגיא', 'תג', 'אגם', 'בצלאל', 'גבור', 'דן',
 ]
 
-const REASONS = ['קניות', 'רופא', 'נסיעה הביתה', 'סידורים', 'ביקור משפחה', 'אחר']
-const STATUSES: StudentStatus[] = ['ON_CAMPUS', 'OFF_CAMPUS', 'OVERDUE', 'ON_CAMPUS', 'ON_CAMPUS']
+// All students default to ON_CAMPUS — they check out explicitly when leaving
+const STATUSES: StudentStatus[] = ['ON_CAMPUS']
 
 function randomItem<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]
@@ -72,7 +72,7 @@ function generateEvents(studentId: string, count: number): Event[] {
       studentId,
       type,
       timestamp: date.toISOString(),
-      reason: isCheckOut ? randomItem(REASONS) : null,
+      reason: null,
       expectedReturn: isCheckOut
         ? new Date(date.getTime() + (1 + Math.floor(Math.random() * 4)) * 3600000).toISOString()
         : null,

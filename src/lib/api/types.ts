@@ -75,6 +75,11 @@ export interface IApiClient {
   // Recurring absences
   getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]>
 
+  // Student management
+  addStudent(data: { fullName: string; idNumber: string; phone: string }): Promise<Student>
+  deleteStudent(id: string): Promise<void>
+  getLongAbsentStudents(days?: number): Promise<Student[]>
+
   // Analytics
   getDashboardStats(): Promise<DashboardStats>
   getDailyPresence(days?: number): Promise<DailyPresenceData[]>
