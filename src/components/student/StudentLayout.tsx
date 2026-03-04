@@ -26,11 +26,14 @@ export function StudentLayout() {
       <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]">
         <SyncStatusBar />
         <div className="flex items-center justify-between px-4 py-3">
-          <div>
-            <h1 className="text-base font-semibold text-[var(--text)]">
-              {currentUser?.fullName ?? 'תלמיד'}
-            </h1>
-            <p className="text-xs text-[var(--text-muted)]">ישיבת שבי חברון</p>
+          <div className="flex items-center gap-2">
+            <img src="/logo.png" alt="לוגו" className="h-9 w-auto" draggable={false} />
+            <div>
+              <h1 className="text-base font-semibold text-[var(--text)]">
+                {currentUser?.fullName ?? 'תלמיד'}
+              </h1>
+              <p className="text-xs text-[var(--text-muted)]">ישיבת שבי חברון</p>
+            </div>
           </div>
           <div className="flex items-center gap-1">
             <ThemeToggle />

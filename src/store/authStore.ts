@@ -72,9 +72,9 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'yeshiva-auth',
+      // Only persist deviceToken — currentUser & isAdmin reset on every page load
+      // so the user always lands on the login screen when reopening the app
       partialize: (state) => ({
-        currentUser: state.currentUser,
-        isAdmin: state.isAdmin,
         deviceToken: state.deviceToken,
       }),
     }

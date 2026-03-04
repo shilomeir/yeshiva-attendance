@@ -72,3 +72,17 @@
 button, a, [role="button"] {
   transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
+
+/* ── Splash screen animations ─────────────────────────────────────────── */
+@keyframes splashBounceIn {
+  0%   { opacity: 0; transform: scale(0.6) translateY(40px); }
+  60%  { opacity: 1; transform: scale(1.05) translateY(-6px); }
+  80%  { transform: scale(0.97) translateY(2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes splashShimmer {
+  0%   { opacity: 0; transform: scaleX(0.2); }
+  40%  { opacity: 1; transform: scaleX(1); }
+  100% { opacity: 0; transform: scaleX(0.2); }
+}

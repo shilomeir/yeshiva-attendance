@@ -49,9 +49,12 @@ export function AdminLayout() {
       >
         {/* Sidebar header */}
         <div className="flex items-center justify-between border-b border-[var(--border)] p-4">
-          <div>
-            <h1 className="font-bold text-[var(--text)]">ישיבת שבי חברון</h1>
-            <p className="text-xs text-[var(--text-muted)]">פאנל ניהול</p>
+          <div className="flex items-center gap-2">
+            <img src="/logo.png" alt="לוגו" className="h-10 w-auto" draggable={false} />
+            <div>
+              <h1 className="font-bold text-[var(--text)]">ישיבת שבי חברון</h1>
+              <p className="text-xs text-[var(--text-muted)]">פאנל ניהול</p>
+            </div>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}

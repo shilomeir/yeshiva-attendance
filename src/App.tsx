@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { LoginScreen } from '@/components/auth/LoginScreen'
 import { StudentLayout } from '@/components/student/StudentLayout'
 import { AdminLayout } from '@/components/admin/AdminLayout'
+import { SplashScreen } from '@/components/shared/SplashScreen'
 import { HomePage } from '@/pages/student/HomePage'
 import { AbsenceRequestPage } from '@/pages/student/AbsenceRequestPage'
 import { HistoryPage } from '@/pages/student/HistoryPage'
@@ -30,6 +31,7 @@ function AdminGuard({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const { initialize } = useSyncStore()
+  const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
     const cleanup = initialize()
@@ -37,45 +39,50 @@ export default function App() {
   }, [initialize])
 
   return (
-    <Routes>
-      {/* Auth */}
-      <Route path="/login" element={<LoginScreen />} />
+    <>
+      {/* Splash screen overlays everything on first load */}
+      {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
-      {/* Student routes */}
-      <Route
-        path="/student"
-        element={
-          <StudentGuard>
-            <StudentLayout />
-          </StudentGuard>
-        }
-      >
-        <Route index element={<HomePage />} />
-        <Route path="requests" element={<AbsenceRequestPage />} />
-        <Route path="history" element={<HistoryPage />} />
-      </Route>
+      <Routes>
+        {/* Auth */}
+        <Route path="/login" element={<LoginScreen />} />
 
-      {/* Admin routes */}
-      <Route
-        path="/admin"
-        element={
-          <AdminGuard>
-            <AdminLayout />
-          </AdminGuard>
-        }
-      >
-        <Route index element={<DashboardPage />} />
-        <Route path="students" element={<StudentsPage />} />
-        <Route path="calendar" element={<CalendarPage />} />
-        <Route path="audit" element={<AuditLogPage />} />
-        <Route path="sms" element={<SmsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="rollcall" element={<RollCallPage />} />
-      </Route>
+        {/* Student routes */}
+        <Route
+          path="/student"
+          element={
+            <StudentGuard>
+              <StudentLayout />
+            </StudentGuard>
+          }
+        >
+          <Route index element={<HomePage />} />
+          <Route path="requests" element={<AbsenceRequestPage />} />
+          <Route path="history" element={<HistoryPage />} />
+        </Route>
 
-      {/* Default redirect */}
-      <Route path="/" element={<Navigate to="/login" replace />} />
-      <Route path="*" element={<Navigate to="/login" replace />} />
-    </Routes>
+        {/* Admin routes */}
+        <Route
+          path="/admin"
+          element={
+            <AdminGuard>
+              <AdminLayout />
+            </AdminGuard>
+          }
+        >
+          <Route index element={<DashboardPage />} />
+          <Route path="students" element={<StudentsPage />} />
+          <Route path="calendar" element={<CalendarPage />} />
+          <Route path="audit" element={<AuditLogPage />} />
+          <Route path="sms" element={<SmsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="rollcall" element={<RollCallPage />} />
+        </Route>
+
+        {/* Default redirect */}
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </>
   )
 }
