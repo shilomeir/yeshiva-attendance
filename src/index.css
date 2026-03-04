@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #EAF4FF;
+  --bg-2: #D6ECFF;
+  --text: #0F172A;
+  --text-muted: #64748B;
+  --border: #CBD5E1;
+  --surface: #FFFFFF;
+  --blue: #3B82F6;
+  --purple: #8B5CF6;
+  --green: #22C55E;
+  --orange: #F97316;
+  --red: #EF4444;
+}
+
+.dark {
+  --bg: #0B0B0F;
+  --bg-2: #14141A;
+  --text: #FFFFFF;
+  --text-muted: #94A3B8;
+  --border: #26262F;
+  --surface: #1A1A24;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    direction: rtl;
+    min-height: 100vh;
+  }
+  html {
+    direction: rtl;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-2);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Smooth transitions for theme */
+*, *::before, *::after {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+/* Override for animations that shouldn't transition */
+button, a, [role="button"] {
+  transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}

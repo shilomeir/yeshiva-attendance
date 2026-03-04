@@ -1,0 +1,340 @@
+import { v4 as uuidv4 } from 'uuid'
+import { db } from '@/lib/db/schema'
+import { parseSmsMessage } from '@/lib/sms/parser'
+import type {
+  Student,
+  Event,
+  SmsEvent,
+  AdminOverride,
+  AbsenceRequest,
+  RecurringAbsence,
+  StudentStatus,
+  DashboardStats,
+  DailyPresenceData,
+  ReasonData,
+  HourlyData,
+} from '@/types'
+import type {
+  IApiClient,
+  GetStudentsOptions,
+  CreateEventPayload,
+  CreateAbsenceRequestPayload,
+} from './types'
+
+export class MockApiClient implements IApiClient {
+  // ---- STUDENTS ----
+
+  async getStudents(options: GetStudentsOptions = {}): Promise<Student[]> {
+    const { filter = 'ALL', search = '', limit, offset = 0 } = options
+
+    let students = await db.students.orderBy('fullName').toArray()
+
+    if (filter === 'OFF_CAMPUS') {
+      students = students.filter((s) => s.currentStatus === 'OFF_CAMPUS')
+    } else if (filter === 'PENDING') {
+      students = students.filter((s) => s.pendingApproval)
+    } else if (filter === 'OVERDUE') {
+      students = students.filter((s) => s.currentStatus === 'OVERDUE')
+    }
+
+    if (search) {
+      const q = search.toLowerCase()
+      students = students.filter(
+        (s) =>
+          s.fullName.toLowerCase().includes(q) ||
+          s.idNumber.includes(q) ||
+          s.phone.includes(q)
+      )
+    }
+
+    const paginated = students.slice(offset, limit ? offset + limit : undefined)
+    return paginated
+  }
+
+  async getStudent(id: string): Promise<Student | null> {
+    return (await db.students.get(id)) ?? null
+  }
+
+  async getStudentByIdNumber(idNumber: string): Promise<Student | null> {
+    return (await db.students.where('idNumber').equals(idNumber).first()) ?? null
+  }
+
+  async updateStudentStatus(id: string, status: StudentStatus): Promise<void> {
+    await db.students.update(id, {
+      currentStatus: status,
+      lastSeen: new Date().toISOString(),
+    })
+  }
+
+  // ---- EVENTS ----
+
+  async getEvents(studentId: string): Promise<Event[]> {
+    const events = await db.events
+      .where('studentId')
+      .equals(studentId)
+      .toArray()
+    // Sort by timestamp descending (newest first)
+    return events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+  }
+
+  async createEvent(payload: CreateEventPayload): Promise<Event> {
+    const now = new Date().toISOString()
+    const event: Event = {
+      id: uuidv4(),
+      studentId: payload.studentId,
+      type: payload.type,
+      timestamp: now,
+      reason: payload.reason ?? null,
+      expectedReturn: payload.expectedReturn ?? null,
+      gpsLat: payload.gpsLat ?? null,
+      gpsLng: payload.gpsLng ?? null,
+      gpsStatus: payload.gpsStatus ?? 'PENDING',
+      distanceFromCampus: payload.distanceFromCampus ?? null,
+      note: payload.note ?? null,
+      syncedAt: null,
+    }
+
+    await db.events.add(event)
+
+    // Update student status
+    const newStatus: StudentStatus = payload.type === 'CHECK_OUT' ? 'OFF_CAMPUS' : 'ON_CAMPUS'
+    await db.students.update(payload.studentId, {
+      currentStatus: newStatus,
+      lastSeen: now,
+      ...(payload.gpsLat && payload.gpsLng
+        ? { lastLocation: { lat: payload.gpsLat, lng: payload.gpsLng } }
+        : {}),
+    })
+
+    // Add to sync queue
+    await db.syncQueue.add({
+      id: uuidv4(),
+      tableName: 'events',
+      operation: 'INSERT',
+      payload: event as unknown as Record<string, unknown>,
+      clientTimestamp: now,
+      retryCount: 0,
+    })
+
+    return event
+  }
+
+  async getRecentEvents(limit: number = 50): Promise<Event[]> {
+    const events = await db.events.orderBy('timestamp').reverse().limit(limit).toArray()
+    return events
+  }
+
+  // ---- SMS ----
+
+  async getSmsEvents(): Promise<SmsEvent[]> {
+    return db.smsEvents.orderBy('timestamp').reverse().toArray()
+  }
+
+  async createSmsEvent(raw: string, studentPhone?: string): Promise<SmsEvent> {
+    const now = new Date().toISOString()
+    const parsed = parseSmsMessage(raw)
+
+    let studentId: string | null = null
+    if (studentPhone) {
+      const student = await db.students.where('phone').equals(studentPhone).first()
+      studentId = student?.id ?? null
+    }
+
+    const smsEvent: SmsEvent = {
+      id: uuidv4(),
+      studentId,
+      rawMessage: raw,
+      parsedCorrectly: parsed !== null,
+      parsedType: parsed?.type ?? null,
+      parsedTime: parsed?.time ?? null,
+      parsedReason: parsed?.reason ?? null,
+      timestamp: now,
+      webhookError: null,
+    }
+
+    await db.smsEvents.add(smsEvent)
+
+    // If parsed correctly and student found, create event
+    if (parsed && studentId) {
+      const eventType = parsed.type
+      await this.createEvent({
+        studentId,
+        type: eventType,
+        reason: parsed.reason ?? null,
+        note: `מ-SMS: ${raw}`,
+      })
+    }
+
+    return smsEvent
+  }
+
+  // ---- ADMIN OVERRIDES ----
+
+  async getAdminOverrides(): Promise<AdminOverride[]> {
+    return db.adminOverrides.orderBy('timestamp').reverse().toArray()
+  }
+
+  async createAdminOverride(
+    studentId: string,
+    newStatus: StudentStatus,
+    note?: string
+  ): Promise<AdminOverride> {
+    const student = await db.students.get(studentId)
+    if (!student) throw new Error('Student not found')
+
+    const now = new Date().toISOString()
+    const override: AdminOverride = {
+      id: uuidv4(),
+      studentId,
+      adminId: 'admin',
+      action: 'STATUS_OVERRIDE',
+      previousStatus: student.currentStatus,
+      newStatus,
+      timestamp: now,
+      note: note ?? null,
+    }
+
+    await db.adminOverrides.add(override)
+    await db.students.update(studentId, {
+      currentStatus: newStatus,
+      lastSeen: now,
+    })
+
+    return override
+  }
+
+  // ---- ABSENCE REQUESTS ----
+
+  async getAbsenceRequests(
+    options: { studentId?: string; status?: AbsenceRequest['status'] } = {}
+  ): Promise<AbsenceRequest[]> {
+    let requests = await db.absenceRequests.orderBy('createdAt').reverse().toArray()
+
+    if (options.studentId) {
+      requests = requests.filter((r) => r.studentId === options.studentId)
+    }
+    if (options.status) {
+      requests = requests.filter((r) => r.status === options.status)
+    }
+
+    return requests
+  }
+
+  async createAbsenceRequest(payload: CreateAbsenceRequestPayload): Promise<AbsenceRequest> {
+    const request: AbsenceRequest = {
+      id: uuidv4(),
+      studentId: payload.studentId,
+      date: payload.date,
+      reason: payload.reason,
+      startTime: payload.startTime,
+      endTime: payload.endTime,
+      status: 'PENDING',
+      adminNote: null,
+      createdAt: new Date().toISOString(),
+    }
+
+    await db.absenceRequests.add(request)
+    return request
+  }
+
+  async updateAbsenceRequestStatus(
+    id: string,
+    status: AbsenceRequest['status'],
+    adminNote?: string
+  ): Promise<void> {
+    await db.absenceRequests.update(id, {
+      status,
+      adminNote: adminNote ?? null,
+    })
+  }
+
+  // ---- RECURRING ABSENCES ----
+
+  async getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]> {
+    return db.recurringAbsences
+      .where('studentId')
+      .equals(studentId)
+      .filter((r) => r.isActive)
+      .toArray()
+  }
+
+  // ---- ANALYTICS ----
+
+  async getDashboardStats(): Promise<DashboardStats> {
+    const students = await db.students.toArray()
+    const total = students.length
+    const onCampus = students.filter((s) => s.currentStatus === 'ON_CAMPUS').length
+    const offCampus = students.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
+    const overdue = students.filter((s) => s.currentStatus === 'OVERDUE').length
+    const pending = students.filter((s) => s.pendingApproval).length
+
+    return { total, onCampus, offCampus, overdue, pending }
+  }
+
+  async getDailyPresence(days: number = 7): Promise<DailyPresenceData[]> {
+    const result: DailyPresenceData[] = []
+    const now = new Date()
+
+    for (let i = days - 1; i >= 0; i--) {
+      const date = new Date(now)
+      date.setDate(date.getDate() - i)
+      const dateStr = date.toISOString().split('T')[0]
+
+      const dayStart = new Date(dateStr + 'T00:00:00.000Z')
+      const dayEnd = new Date(dateStr + 'T23:59:59.999Z')
+
+      const checkOuts = await db.events
+        .where('timestamp')
+        .between(dayStart.toISOString(), dayEnd.toISOString())
+        .filter((e) => e.type === 'CHECK_OUT')
+        .count()
+
+      const total = await db.students.count()
+
+      result.push({
+        date: dateStr,
+        onCampus: Math.max(0, total - checkOuts),
+        offCampus: checkOuts,
+      })
+    }
+
+    return result
+  }
+
+  async getReasonBreakdown(): Promise<ReasonData[]> {
+    const events = await db.events
+      .where('type')
+      .equals('CHECK_OUT')
+      .toArray()
+
+    const reasonMap: Record<string, number> = {}
+    for (const event of events) {
+      const reason = event.reason ?? 'אחר'
+      reasonMap[reason] = (reasonMap[reason] ?? 0) + 1
+    }
+
+    return Object.entries(reasonMap)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
+  }
+
+  async getHourlyDepartures(): Promise<HourlyData[]> {
+    const events = await db.events
+      .where('type')
+      .equals('CHECK_OUT')
+      .toArray()
+
+    const hourMap: Record<number, number> = {}
+    for (let h = 0; h < 24; h++) hourMap[h] = 0
+
+    for (const event of events) {
+      const hour = new Date(event.timestamp).getHours()
+      hourMap[hour] = (hourMap[hour] ?? 0) + 1
+    }
+
+    return Object.entries(hourMap).map(([hour, count]) => ({
+      hour: Number(hour),
+      count,
+    }))
+  }
+}
