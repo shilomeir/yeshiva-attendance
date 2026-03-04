@@ -257,6 +257,7 @@ export class MockApiClient implements IApiClient {
       id: uuidv4(),
       studentId: payload.studentId,
       date: payload.date,
+      endDate: payload.endDate ?? null,
       reason: payload.reason,
       startTime: payload.startTime,
       endTime: payload.endTime,

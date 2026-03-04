@@ -84,7 +84,8 @@ export interface RecurringAbsence {
 export interface AbsenceRequest {
   id: string
   studentId: string
-  date: string // YYYY-MM-DD
+  date: string // YYYY-MM-DD (start date)
+  endDate: string | null // YYYY-MM-DD (end date, null = same-day)
   reason: string
   startTime: string // HH:MM
   endTime: string // HH:MM

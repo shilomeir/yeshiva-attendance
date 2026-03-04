@@ -1,6 +1,4 @@
 import { useEffect, useState } from 'react'
-import { format } from 'date-fns'
-import { he } from 'date-fns/locale'
 import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -14,7 +12,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Calendar } from '@/components/ui/calendar'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
@@ -34,16 +31,39 @@ const STATUS_CONFIG = {
   REJECTED: { label: 'נדחה', icon: XCircle, color: 'text-[var(--red)]', variant: 'danger' as const },
 }
 
+/** Returns today's YYYY-MM-DD string */
+function todayStr(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** Formats YYYY-MM-DD to a readable Hebrew-style date */
+function formatDate(dateStr: string): string {
+  const [year, month, day] = dateStr.split('-')
+  const monthNames = [
+    'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
+    'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר',
+  ]
+  return `${parseInt(day)} ב${monthNames[parseInt(month) - 1]} ${year}`
+}
+
 export function AbsenceRequestPage() {
   const { currentUser } = useAuthStore()
   const [requests, setRequests] = useState<AbsenceRequest[]>([])
   const [showForm, setShowForm] = useState(false)
-  const [selectedDate, setSelectedDate] = useState<Date | undefined>()
+
+  // Form fields
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [reason, setReason] = useState('')
   const [startTime, setStartTime] = useState('08:00')
   const [endTime, setEndTime] = useState('20:00')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+
+  // Validation: endDate must be >= startDate
+  const endDateMin = startDate || todayStr()
+  const isEndBeforeStart = endDate !== '' && startDate !== '' && endDate < startDate
 
   const loadRequests = async () => {
     if (!currentUser) return
@@ -64,13 +84,14 @@ export function AbsenceRequestPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!currentUser || !selectedDate || !reason) return
+    if (!currentUser || !startDate || !reason || isEndBeforeStart) return
 
     setIsSubmitting(true)
     try {
       await api.createAbsenceRequest({
         studentId: currentUser.id,
-        date: format(selectedDate, 'yyyy-MM-dd'),
+        date: startDate,
+        endDate: endDate && endDate !== startDate ? endDate : undefined,
         reason,
         startTime,
         endTime,
@@ -78,7 +99,8 @@ export function AbsenceRequestPage() {
 
       toast({ title: 'הבקשה נשלחה בהצלחה', description: 'מנהל הישיבה יאשר את הבקשה בהקדם' })
 
-      setSelectedDate(undefined)
+      setStartDate('')
+      setEndDate('')
       setReason('')
       setStartTime('08:00')
       setEndTime('20:00')
@@ -90,6 +112,8 @@ export function AbsenceRequestPage() {
       setIsSubmitting(false)
     }
   }
+
+  const canSubmit = startDate && reason && !isEndBeforeStart && !isSubmitting
 
   return (
     <div className="flex flex-col gap-4 p-4 pt-6">
@@ -110,25 +134,36 @@ export function AbsenceRequestPage() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-              {/* Date picker */}
-              <div className="flex flex-col gap-2">
-                <Label>תאריך</Label>
-                <div className="rounded-lg border border-[var(--border)] overflow-hidden">
-                  <Calendar
-                    mode="single"
-                    selected={selectedDate}
-                    onSelect={setSelectedDate}
-                    disabled={(date) => date < new Date()}
-                    locale={he}
-                    className="w-full"
+
+              {/* Date range */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="startDate">מתאריך</Label>
+                  <Input
+                    id="startDate"
+                    type="date"
+                    value={startDate}
+                    min={todayStr()}
+                    onChange={(e) => {
+                      setStartDate(e.target.value)
+                      // Reset endDate if it became invalid
+                      if (endDate && endDate < e.target.value) setEndDate('')
+                    }}
                   />
                 </div>
-                {selectedDate && (
-                  <p className="flex items-center gap-1.5 text-sm text-[var(--blue)]">
-                    <CalendarIcon className="h-4 w-4" />
-                    {format(selectedDate, 'EEEE, d בMMMM yyyy', { locale: he })}
-                  </p>
-                )}
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="endDate">עד תאריך</Label>
+                  <Input
+                    id="endDate"
+                    type="date"
+                    value={endDate}
+                    min={endDateMin}
+                    onChange={(e) => setEndDate(e.target.value)}
+                  />
+                  {isEndBeforeStart && (
+                    <p className="text-xs text-[var(--red)]">תאריך חזרה לא יכול להיות לפני תאריך יציאה</p>
+                  )}
+                </div>
               </div>
 
               {/* Reason */}
@@ -168,11 +203,7 @@ export function AbsenceRequestPage() {
                 </div>
               </div>
 
-              <Button
-                type="submit"
-                disabled={!selectedDate || !reason || isSubmitting}
-                className="w-full"
-              >
+              <Button type="submit" disabled={!canSubmit} className="w-full">
                 {isSubmitting ? 'שולח...' : 'שליחת בקשה'}
               </Button>
             </form>
@@ -197,14 +228,18 @@ export function AbsenceRequestPage() {
           {requests.map((req) => {
             const config = STATUS_CONFIG[req.status]
             const StatusIcon = config.icon
+            // Build date range label
+            const dateLabel =
+              req.endDate && req.endDate !== req.date
+                ? `${formatDate(req.date)} — ${formatDate(req.endDate)}`
+                : formatDate(req.date)
+
             return (
               <Card key={req.id}>
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-[var(--text)]">
-                        {format(new Date(req.date), 'EEEE, d בMMMM', { locale: he })}
-                      </p>
+                      <p className="font-medium text-[var(--text)]">{dateLabel}</p>
                       <p className="mt-0.5 text-sm text-[var(--text-muted)]">{req.reason}</p>
                       <div className="mt-1 flex items-center gap-1 text-xs text-[var(--text-muted)]">
                         <Clock className="h-3.5 w-3.5" />

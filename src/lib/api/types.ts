@@ -33,7 +33,8 @@ export interface CreateEventPayload {
 
 export interface CreateAbsenceRequestPayload {
   studentId: string
-  date: string
+  date: string        // YYYY-MM-DD start date
+  endDate?: string    // YYYY-MM-DD end date (optional, multi-day)
   reason: string
   startTime: string
   endTime: string
