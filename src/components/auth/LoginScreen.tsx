@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { BookOpen, Shield, Loader2 } from 'lucide-react'
+import { Shield, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -31,13 +31,8 @@ export function LoginScreen() {
     <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--bg)] px-4">
       {/* Header */}
       <div className="mb-8 flex flex-col items-center gap-3">
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--blue)] shadow-lg">
-          <BookOpen className="h-9 w-9 text-white" />
-        </div>
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-[var(--text)]">ישיבת שבי חברון</h1>
-          <p className="text-sm text-[var(--text-muted)]">מערכת נוכחות</p>
-        </div>
+        <img src="/logo.png" alt="ישיבת שבי חברון" className="h-28 w-auto" draggable={false} />
+        <p className="text-sm text-[var(--text-muted)]">מערכת נוכחות</p>
       </div>
 
       {/* Login Card */}
