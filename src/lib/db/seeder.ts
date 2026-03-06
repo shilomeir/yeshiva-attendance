@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './schema'
-import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
+import { GRADE_LEVELS, getClasses, DEFAULT_CLASS } from '@/lib/constants/grades'
 import type { Student, Event, StudentStatus, EventType } from '@/types'
 
 const FIRST_NAMES = [
@@ -107,7 +107,16 @@ function buildClassSlots(): { grade: string; classId: string; count: number }[] 
 
 export async function seedDatabase(): Promise<void> {
   const existingCount = await db.students.count()
-  if (existingCount > 0) return
+
+  if (existingCount > 0) {
+    // If all students are in DEFAULT_CLASS they came from the old DB migration — re-seed.
+    const nonDefaultCount = await db.students.where('classId').notEqual(DEFAULT_CLASS).count()
+    if (nonDefaultCount > 0) return // already properly distributed
+
+    // Clear stale data and fall through to re-seed
+    await db.students.clear()
+    await db.events.clear()
+  }
 
   const students: Student[] = []
   const allEvents: Event[] = []

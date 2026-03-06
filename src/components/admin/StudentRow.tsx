@@ -5,13 +5,12 @@ import { Button } from '@/components/ui/button'
 import { StatusOverrideModal } from '@/components/admin/StatusOverrideModal'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { useStudentsStore } from '@/store/studentsStore'
-import { api } from '@/lib/api'
-import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
 import type { Student } from '@/types'
 
 interface StudentRowProps {
   student: Student
   onUpdate: () => void
+  onEditClass: (student: Student) => void
 }
 
 function getInitials(name: string): string {
@@ -35,105 +34,13 @@ function getAvatarColor(id: string): string {
   return colors[Math.abs(hash) % colors.length]
 }
 
-// ── Class Edit Modal ──────────────────────────────────────────────────────────
-
-function ClassEditModal({
-  student,
-  onClose,
-  onSaved,
-}: {
-  student: Student
-  onClose: () => void
-  onSaved: () => void
-}) {
-  const [selectedGrade, setSelectedGrade] = useState(student.grade)
-  const [selectedClass, setSelectedClass] = useState(student.classId)
-  const [saving, setSaving] = useState(false)
-
-  const classOptions = getClasses(selectedGrade)
-
-  const handleGradeChange = (newGrade: string) => {
-    setSelectedGrade(newGrade)
-    setSelectedClass(getClasses(newGrade)[0])
-  }
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await api.updateStudentGrade(student.id, selectedGrade, selectedClass)
-      onSaved()
-      onClose()
-    } catch {
-      // ignore
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-xs rounded-2xl bg-[var(--surface)] p-5 shadow-xl">
-        <h3 className="mb-4 text-base font-bold text-[var(--text)]">
-          עריכת כיתה — {student.fullName}
-        </h3>
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">שכבה</label>
-            <select
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-              value={selectedGrade}
-              onChange={(e) => handleGradeChange(e.target.value)}
-              dir="rtl"
-            >
-              {GRADE_LEVELS.map((g) => (
-                <option key={g.name} value={g.name}>{g.name}</option>
-              ))}
-            </select>
-          </div>
-          {classOptions.length > 1 && (
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium text-[var(--text)]">כיתה</label>
-              <select
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-                value={selectedClass}
-                onChange={(e) => setSelectedClass(e.target.value)}
-                dir="rtl"
-              >
-                {classOptions.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </div>
-          )}
-          <div className="mt-1 flex gap-2">
-            <Button type="button" variant="ghost" className="flex-1" onClick={onClose}>
-              ביטול
-            </Button>
-            <Button className="flex-1" onClick={handleSave} disabled={saving}>
-              {saving ? 'שומר...' : 'שמור'}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Student Row ───────────────────────────────────────────────────────────────
-
-export function StudentRow({ student, onUpdate }: StudentRowProps) {
+export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) {
   const [showOverride, setShowOverride] = useState(false)
-  const [showClassEdit, setShowClassEdit] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const { deleteStudent, refreshStudent } = useStudentsStore()
+  const { deleteStudent } = useStudentsStore()
 
   const handleDelete = async () => {
     await deleteStudent(student.id)
-    onUpdate()
-  }
-
-  const handleClassSaved = async () => {
-    await refreshStudent(student.id)
     onUpdate()
   }
 
@@ -177,11 +84,11 @@ export function StudentRow({ student, onUpdate }: StudentRowProps) {
         {/* Status badge */}
         <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
 
-        {/* Edit class */}
+        {/* Edit class — modal rendered at page level to avoid virtualizer clipping */}
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => setShowClassEdit(true)}
+          onClick={() => onEditClass(student)}
           className="shrink-0 h-8 w-8 text-[var(--text-muted)]"
           title="עריכת כיתה"
         >
@@ -234,14 +141,6 @@ export function StudentRow({ student, onUpdate }: StudentRowProps) {
         onClose={() => setShowOverride(false)}
         onSuccess={onUpdate}
       />
-
-      {showClassEdit && (
-        <ClassEditModal
-          student={student}
-          onClose={() => setShowClassEdit(false)}
-          onSaved={handleClassSaved}
-        />
-      )}
     </>
   )
 }
