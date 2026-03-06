@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import {
   Users, UserCheck, UserX, AlertTriangle, CalendarOff, Phone,
   AlertOctagon, CheckCircle2, XCircle,
@@ -250,7 +250,7 @@ export function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Class stats table */}
+          {/* Class stats table — grouped by grade */}
           <Card>
             <CardHeader>
               <CardTitle className="text-base">נתוני כיתות</CardTitle>
@@ -260,38 +260,82 @@ export function DashboardPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[var(--border)] bg-[var(--bg-2)]">
-                      <th className="px-4 py-2.5 text-right font-medium text-[var(--text-muted)]">כיתה</th>
+                      <th className="px-4 py-2.5 text-right font-medium text-[var(--text-muted)]">שכבה / כיתה</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">סה"כ</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--green)]">בישיבה</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--orange)]">מחוץ</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--red)]">באיחור</th>
-                      <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">% היעדרות</th>
+                      <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">היעדרות</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {classStats.map((cs) => {
-                      const absenceRate = cs.total > 0
-                        ? ((cs.offCampus + cs.overdue) / cs.total) * 100
-                        : 0
-                      const isHighAbsence = absenceRate > 20
+                    {GRADE_LEVELS.map((level) => {
+                      const gradeClasses = classStats
+                        .filter((cs) => cs.grade === level.name)
+                        .sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
+                      if (gradeClasses.length === 0) return null
+
+                      const gTotal     = gradeClasses.reduce((s, cs) => s + cs.total, 0)
+                      const gOnCampus  = gradeClasses.reduce((s, cs) => s + cs.onCampus, 0)
+                      const gOffCampus = gradeClasses.reduce((s, cs) => s + cs.offCampus, 0)
+                      const gOverdue   = gradeClasses.reduce((s, cs) => s + cs.overdue, 0)
+                      const gAbsRate   = gTotal > 0 ? ((gOffCampus + gOverdue) / gTotal) * 100 : 0
+                      const gHighAbs   = gAbsRate > 20
+                      const multiClass = gradeClasses.length > 1
+
                       return (
-                        <tr
-                          key={cs.classId}
-                          className={`border-b border-[var(--border)] ${isHighAbsence ? 'bg-red-50/50 dark:bg-red-950/10' : ''}`}
-                        >
-                          <td className="px-4 py-2.5 font-medium text-[var(--text)]">
-                            {cs.classId}
-                          </td>
-                          <td className="px-3 py-2.5 text-center text-[var(--text-muted)]">{cs.total}</td>
-                          <td className="px-3 py-2.5 text-center text-[var(--green)]">{cs.onCampus}</td>
-                          <td className="px-3 py-2.5 text-center text-[var(--orange)]">{cs.offCampus}</td>
-                          <td className="px-3 py-2.5 text-center text-[var(--red)]">{cs.overdue}</td>
-                          <td className="px-3 py-2.5 text-center">
-                            <span className={`font-medium ${isHighAbsence ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
-                              {absenceRate.toFixed(0)}%
-                            </span>
-                          </td>
-                        </tr>
+                        <Fragment key={level.name}>
+                          {/* Grade summary row */}
+                          <tr className="border-b border-[var(--border)] bg-[var(--bg-2)]">
+                            <td className="px-4 py-2.5 font-bold text-[var(--text)]">
+                              <span>{level.name}</span>
+                              {gHighAbs && (
+                                <span className="mr-2 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-[var(--red)] dark:bg-red-900/30">
+                                  ⚠ {gAbsRate.toFixed(0)}%
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-center font-semibold text-[var(--text)]">{gTotal}</td>
+                            <td className="px-3 py-2.5 text-center font-semibold text-[var(--green)]">{gOnCampus}</td>
+                            <td className="px-3 py-2.5 text-center font-semibold text-[var(--orange)]">{gOffCampus}</td>
+                            <td className="px-3 py-2.5 text-center font-semibold text-[var(--red)]">{gOverdue}</td>
+                            <td className="px-3 py-2.5 text-center">
+                              <span className={`font-semibold ${gHighAbs ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
+                                {gAbsRate.toFixed(0)}%
+                              </span>
+                            </td>
+                          </tr>
+
+                          {/* Per-class rows — only for multi-class grades */}
+                          {multiClass && gradeClasses.map((cs) => {
+                            const absRate = cs.total > 0
+                              ? ((cs.offCampus + cs.overdue) / cs.total) * 100
+                              : 0
+                            const highAbs = absRate > 20
+                            const classLabel = cs.classId.includes(' כיתה ')
+                              ? `כיתה ${cs.classId.split(' כיתה ')[1]}`
+                              : cs.classId
+                            return (
+                              <tr
+                                key={cs.classId}
+                                className={`border-b border-[var(--border)] last:border-b-0 ${highAbs ? 'bg-red-50/40 dark:bg-red-950/10' : ''}`}
+                              >
+                                <td className="py-2 pl-4 pr-10 text-[var(--text-muted)]">
+                                  {classLabel}
+                                </td>
+                                <td className="px-3 py-2 text-center text-[var(--text-muted)]">{cs.total}</td>
+                                <td className="px-3 py-2 text-center text-[var(--green)]">{cs.onCampus}</td>
+                                <td className="px-3 py-2 text-center text-[var(--orange)]">{cs.offCampus}</td>
+                                <td className="px-3 py-2 text-center text-[var(--red)]">{cs.overdue}</td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className={`font-medium ${highAbs ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
+                                    {absRate.toFixed(0)}%
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </Fragment>
                       )
                     })}
                   </tbody>

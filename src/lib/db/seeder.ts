@@ -228,14 +228,11 @@ export async function seedDatabase(): Promise<void> {
     // If all students are in DEFAULT_CLASS they came from the old DB migration — re-seed.
     const nonDefaultCount = await db.students.where('classId').notEqual(DEFAULT_CLASS).count()
     if (nonDefaultCount > 0) {
-      // Students are already distributed across classes.
-      // Check if there is any status diversity (i.e. not all ON_CAMPUS).
-      const offCampusCount = await db.students
-        .where('currentStatus')
-        .notEqual('ON_CAMPUS')
-        .count()
-      if (offCampusCount > 0) return // already has realistic distribution — done
-      // All ON_CAMPUS means old seeder version — fall through to re-seed
+      // Students are distributed across classes.
+      // The new seeder always seeds absence requests — if none exist this is an old seeder run.
+      const requestCount = await db.absenceRequests.count()
+      if (requestCount > 0) return // new seeder already ran — skip
+      // Zero absence requests → old seeder version (all ON_CAMPUS, no requests) — re-seed
     }
 
     // Clear stale data and re-seed
