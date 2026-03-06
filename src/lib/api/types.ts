@@ -10,11 +10,14 @@ import type {
   DailyPresenceData,
   ReasonData,
   HourlyData,
+  ClassStat,
 } from '@/types'
 
 export interface GetStudentsOptions {
   filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
   search?: string
+  grade?: string
+  classId?: string
   limit?: number
   offset?: number
 }
@@ -38,6 +41,7 @@ export interface CreateAbsenceRequestPayload {
   reason: string
   startTime: string
   endTime: string
+  isUrgent?: boolean
 }
 
 export interface IApiClient {
@@ -46,6 +50,7 @@ export interface IApiClient {
   getStudent(id: string): Promise<Student | null>
   getStudentByIdNumber(idNumber: string): Promise<Student | null>
   updateStudentStatus(id: string, status: StudentStatus): Promise<void>
+  updateStudentGrade(id: string, grade: string, classId: string): Promise<void>
 
   // Events
   getEvents(studentId: string): Promise<Event[]>
@@ -72,12 +77,13 @@ export interface IApiClient {
     status: AbsenceRequest['status'],
     adminNote?: string
   ): Promise<void>
+  getUrgentRequests(): Promise<AbsenceRequest[]>
 
   // Recurring absences
   getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]>
 
   // Student management
-  addStudent(data: { fullName: string; idNumber: string; phone: string }): Promise<Student>
+  addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student>
   deleteStudent(id: string): Promise<void>
   getLongAbsentStudents(days?: number): Promise<Student[]>
 
@@ -86,4 +92,5 @@ export interface IApiClient {
   getDailyPresence(days?: number): Promise<DailyPresenceData[]>
   getReasonBreakdown(): Promise<ReasonData[]>
   getHourlyDepartures(): Promise<HourlyData[]>
+  getClassStats(): Promise<ClassStat[]>
 }

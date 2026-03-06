@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid'
 import { db } from '@/lib/db/schema'
 import { parseSmsMessage } from '@/lib/sms/parser'
+import { DEFAULT_GRADE, DEFAULT_CLASS } from '@/lib/constants/grades'
 import type {
   Student,
   Event,
@@ -13,6 +14,7 @@ import type {
   DailyPresenceData,
   ReasonData,
   HourlyData,
+  ClassStat,
 } from '@/types'
 import type {
   IApiClient,
@@ -25,7 +27,7 @@ export class MockApiClient implements IApiClient {
   // ---- STUDENTS ----
 
   async getStudents(options: GetStudentsOptions = {}): Promise<Student[]> {
-    const { filter = 'ALL', search = '', limit, offset = 0 } = options
+    const { filter = 'ALL', search = '', grade, classId, limit, offset = 0 } = options
 
     let students = await db.students.orderBy('fullName').toArray()
 
@@ -35,6 +37,13 @@ export class MockApiClient implements IApiClient {
       students = students.filter((s) => s.pendingApproval)
     } else if (filter === 'OVERDUE') {
       students = students.filter((s) => s.currentStatus === 'OVERDUE')
+    }
+
+    if (grade) {
+      students = students.filter((s) => s.grade === grade)
+    }
+    if (classId) {
+      students = students.filter((s) => s.classId === classId)
     }
 
     if (search) {
@@ -66,7 +75,11 @@ export class MockApiClient implements IApiClient {
     })
   }
 
-  async addStudent(data: { fullName: string; idNumber: string; phone: string }): Promise<Student> {
+  async updateStudentGrade(id: string, grade: string, classId: string): Promise<void> {
+    await db.students.update(id, { grade, classId })
+  }
+
+  async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
     const student: Student = {
       id: uuidv4(),
       fullName: data.fullName,
@@ -78,6 +91,8 @@ export class MockApiClient implements IApiClient {
       lastLocation: null,
       pendingApproval: false,
       createdAt: new Date().toISOString(),
+      grade: data.grade,
+      classId: data.classId,
     }
     await db.students.add(student)
     return student
@@ -264,6 +279,7 @@ export class MockApiClient implements IApiClient {
       status: 'PENDING',
       adminNote: null,
       createdAt: new Date().toISOString(),
+      isUrgent: payload.isUrgent ?? false,
     }
 
     await db.absenceRequests.add(request)
@@ -279,6 +295,11 @@ export class MockApiClient implements IApiClient {
       status,
       adminNote: adminNote ?? null,
     })
+  }
+
+  async getUrgentRequests(): Promise<AbsenceRequest[]> {
+    const requests = await db.absenceRequests.toArray()
+    return requests.filter((r) => r.isUrgent && r.status === 'PENDING')
   }
 
   // ---- RECURRING ABSENCES ----
@@ -375,5 +396,34 @@ export class MockApiClient implements IApiClient {
       hour: Number(hour),
       count,
     }))
+  }
+
+  async getClassStats(): Promise<ClassStat[]> {
+    const students = await db.students.toArray()
+
+    // Group by classId
+    const classMap = new Map<string, { grade: string; classId: string; students: Student[] }>()
+    for (const s of students) {
+      const key = s.classId
+      if (!classMap.has(key)) {
+        classMap.set(key, { grade: s.grade ?? DEFAULT_GRADE, classId: s.classId ?? DEFAULT_CLASS, students: [] })
+      }
+      classMap.get(key)!.students.push(s)
+    }
+
+    const stats: ClassStat[] = []
+    for (const [, { grade, classId, students: classStudents }] of classMap) {
+      const total = classStudents.length
+      const onCampus = classStudents.filter((s) => s.currentStatus === 'ON_CAMPUS').length
+      const offCampus = classStudents.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
+      const overdue = classStudents.filter((s) => s.currentStatus === 'OVERDUE').length
+      stats.push({ grade, classId, total, onCampus, offCampus, overdue })
+    }
+
+    // Sort by grade name then classId
+    return stats.sort((a, b) => {
+      if (a.grade !== b.grade) return a.grade.localeCompare(b.grade, 'he')
+      return a.classId.localeCompare(b.classId, 'he')
+    })
   }
 }

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './schema'
+import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
 import type { Student, Event, StudentStatus, EventType } from '@/types'
 
 const FIRST_NAMES = [
@@ -9,10 +10,10 @@ const FIRST_NAMES = [
   'ישעיה', 'יחזקאל', 'עמוס', 'הושע', 'מיכה', 'נחום', 'חבקוק', 'צפניה', 'חגי', 'זכריה',
   'מלאכי', 'עובדיה', 'יואל', 'יונה', 'מרדכי', 'עקיבא', 'שמריה', 'אליהו', 'אלישע', 'גדליה',
   'ברוך', 'חנוך', 'מתתיהו', 'שמואל', 'שאול', 'יהונתן', 'עמינדב', 'נחשון', 'אליצור', 'שלומיאל',
-  'אלידד', 'חמואל', 'גמליאל', 'אביהוד', 'אחיעזר', 'פגעיאל', 'אחירע', 'נהשון', 'אביעזר', 'רון',
-  'ניר', 'גל', 'תום', 'עידן', 'איתי', 'בר', 'שי', 'עמית', 'אור', 'לירון',
-  'אוהד', 'אייל', 'גיל', 'הראל', 'זיו', 'טל', 'יובל', 'כפיר', 'מאור', 'נדב',
-  'ספיר', 'עוז', 'פלג', 'צור', 'קרן', 'שקד', 'תמיר', 'אדיר', 'בועז', 'גדעון',
+  'אלידד', 'חמואל', 'גמליאל', 'אביהוד', 'אחיעזר', 'פגעיאל', 'אחירע', 'אביעזר', 'רון', 'ניר',
+  'גל', 'תום', 'עידן', 'איתי', 'בר', 'שי', 'עמית', 'אור', 'לירון', 'אוהד',
+  'אייל', 'גיל', 'הראל', 'זיו', 'טל', 'יובל', 'כפיר', 'מאור', 'נדב', 'עוז',
+  'פלג', 'צור', 'תמיר', 'אדיר', 'בועז', 'גדעון', 'חיים', 'טוביה', 'ירון', 'כרמי',
 ]
 
 const LAST_NAMES = [
@@ -24,11 +25,11 @@ const LAST_NAMES = [
   'שמחי', 'ברברה', 'אזולאי', 'בן שושן', 'אבוטבול', 'אביב', 'שטרית', 'אלמוג', 'שלוסברג', 'ניסים',
   'גבריאל', 'גל', 'גלעד', 'חן', 'טוב', 'ים', 'כנען', 'מגן', 'נחל', 'עברי',
   'צבי', 'קדמי', 'רז', 'שחר', 'תמר', 'אלי', 'בר', 'גוט', 'דר', 'הגר',
-  'ויס', 'זהב', 'חי', 'טוביה', 'ירון', 'כרמי', 'מור', 'נעם', 'סיני', 'ענבל',
-  'פז', 'צמח', 'קם', 'רענן', 'שגיא', 'תג', 'אגם', 'בצלאל', 'גבור', 'דן',
+  'ויס', 'זהב', 'חי', 'ירון', 'כרמי', 'מור', 'נעם', 'סיני', 'ענבל', 'פז',
+  'צמח', 'קם', 'רענן', 'שגיא', 'אגם', 'בצלאל', 'גבור', 'דן', 'הראל', 'זמיר',
 ]
 
-// All students default to ON_CAMPUS — they check out explicitly when leaving
+// All students default to ON_CAMPUS
 const STATUSES: StudentStatus[] = ['ON_CAMPUS']
 
 function randomItem<T>(arr: T[]): T {
@@ -89,6 +90,21 @@ function generateEvents(studentId: string, count: number): Event[] {
   return events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
 }
 
+/**
+ * Build a flat list of (grade, classId, capacity) slots for all 16 classes.
+ * שיעור א': 6×25=150  שיעור ב': 4×25=100  שיעור ג': 3×25=75
+ * שיעור ד': 1×25=25   אברכים: 1×50=50    בוגרצים: 1×50=50   = 450 total
+ */
+function buildClassSlots(): { grade: string; classId: string; count: number }[] {
+  return GRADE_LEVELS.flatMap((level) =>
+    getClasses(level.name).map((classId) => ({
+      grade: level.name,
+      classId,
+      count: level.capacity,
+    }))
+  )
+}
+
 export async function seedDatabase(): Promise<void> {
   const existingCount = await db.students.count()
   if (existingCount > 0) return
@@ -96,47 +112,52 @@ export async function seedDatabase(): Promise<void> {
   const students: Student[] = []
   const allEvents: Event[] = []
 
-  for (let i = 0; i < 400; i++) {
-    const firstName = randomItem(FIRST_NAMES)
-    const lastName = randomItem(LAST_NAMES)
-    const status = randomItem(STATUSES)
-    const studentId = uuidv4()
+  const slots = buildClassSlots() // 16 slots, total 450
 
-    const student: Student = {
-      id: studentId,
-      fullName: `${firstName} ${lastName}`,
-      idNumber: randomIdNumber(),
-      phone: randomPhone(),
-      deviceToken: Math.random() > 0.1 ? uuidv4() : null,
-      currentStatus: status,
-      lastSeen: status !== 'ON_CAMPUS' ? randomDateInPast(3) : randomDateInPast(1),
-      lastLocation:
-        Math.random() > 0.3
-          ? {
-              lat: 31.5253 + (Math.random() - 0.5) * 0.02,
-              lng: 35.1056 + (Math.random() - 0.5) * 0.02,
-            }
-          : null,
-      pendingApproval: Math.random() < 0.05,
-      createdAt: randomDateInPast(365),
+  for (const slot of slots) {
+    for (let i = 0; i < slot.count; i++) {
+      const firstName = randomItem(FIRST_NAMES)
+      const lastName = randomItem(LAST_NAMES)
+      const status = randomItem(STATUSES)
+      const studentId = uuidv4()
+
+      const student: Student = {
+        id: studentId,
+        fullName: `${firstName} ${lastName}`,
+        idNumber: randomIdNumber(),
+        phone: randomPhone(),
+        deviceToken: Math.random() > 0.1 ? uuidv4() : null,
+        currentStatus: status,
+        lastSeen: status !== 'ON_CAMPUS' ? randomDateInPast(3) : randomDateInPast(1),
+        lastLocation:
+          Math.random() > 0.3
+            ? {
+                lat: 31.5253 + (Math.random() - 0.5) * 0.02,
+                lng: 35.1056 + (Math.random() - 0.5) * 0.02,
+              }
+            : null,
+        pendingApproval: Math.random() < 0.05,
+        createdAt: randomDateInPast(365),
+        grade: slot.grade,
+        classId: slot.classId,
+      }
+
+      students.push(student)
+
+      const eventCount = Math.floor(Math.random() * 15) + 2
+      const events = generateEvents(studentId, eventCount)
+      allEvents.push(...events)
     }
-
-    students.push(student)
-
-    const eventCount = Math.floor(Math.random() * 15) + 2
-    const events = generateEvents(studentId, eventCount)
-    allEvents.push(...events)
   }
 
-  // Use bulk puts with smaller batches to avoid memory issues
+  // Bulk insert in batches of 50
   const BATCH_SIZE = 50
   for (let i = 0; i < students.length; i += BATCH_SIZE) {
     await db.students.bulkPut(students.slice(i, i + BATCH_SIZE))
   }
-
   for (let i = 0; i < allEvents.length; i += BATCH_SIZE) {
     await db.events.bulkPut(allEvents.slice(i, i + BATCH_SIZE))
   }
 
-  console.log(`Seeded ${students.length} students and ${allEvents.length} events`)
+  console.log(`Seeded ${students.length} students across 16 classes and ${allEvents.length} events`)
 }

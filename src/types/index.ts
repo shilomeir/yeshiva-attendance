@@ -22,6 +22,8 @@ export interface Student {
   lastLocation: { lat: number; lng: number } | null
   pendingApproval: boolean
   createdAt: string // ISO date string
+  grade: string    // e.g. "שיעור א'"
+  classId: string  // e.g. "שיעור א' כיתה 1" (single-class grades: same as grade name)
 }
 
 export interface Event {
@@ -91,6 +93,7 @@ export interface AbsenceRequest {
   endTime: string // HH:MM
   status: AbsenceRequestStatus
   adminNote: string | null
+  isUrgent: boolean // exceptional/urgent request requiring admin approval
   createdAt: string // ISO date string
 }
 
@@ -101,6 +104,15 @@ export interface DashboardStats {
   overdue: number
   pending: number
   longAbsent: number // students not on campus for 7+ days
+}
+
+export interface ClassStat {
+  grade: string
+  classId: string
+  total: number
+  onCampus: number
+  offCampus: number
+  overdue: number
 }
 
 export interface DailyPresenceData {

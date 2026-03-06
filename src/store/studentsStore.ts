@@ -10,6 +10,8 @@ interface StudentsState {
   error: string | null
   filter: FilterType
   searchQuery: string
+  selectedGrade: string | null
+  selectedClass: string | null
 
   // Derived
   filteredStudents: Student[]
@@ -17,13 +19,21 @@ interface StudentsState {
   // Actions
   setFilter: (filter: FilterType) => void
   setSearch: (query: string) => void
+  setGrade: (grade: string | null) => void
+  setClass: (classId: string | null) => void
   loadStudents: () => Promise<void>
   updateStudentStatus: (id: string, status: StudentStatus) => Promise<void>
   refreshStudent: (id: string) => Promise<void>
   deleteStudent: (id: string) => Promise<void>
 }
 
-function applyFilter(students: Student[], filter: FilterType, search: string): Student[] {
+function applyFilter(
+  students: Student[],
+  filter: FilterType,
+  search: string,
+  grade: string | null,
+  classId: string | null
+): Student[] {
   let result = students
 
   if (filter === 'OFF_CAMPUS') {
@@ -32,6 +42,13 @@ function applyFilter(students: Student[], filter: FilterType, search: string): S
     result = result.filter((s) => s.pendingApproval)
   } else if (filter === 'OVERDUE') {
     result = result.filter((s) => s.currentStatus === 'OVERDUE')
+  }
+
+  if (grade) {
+    result = result.filter((s) => s.grade === grade)
+  }
+  if (classId) {
+    result = result.filter((s) => s.classId === classId)
   }
 
   if (search) {
@@ -53,21 +70,40 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
   error: null,
   filter: 'ALL',
   searchQuery: '',
+  selectedGrade: null,
+  selectedClass: null,
   filteredStudents: [],
 
   setFilter: (filter) => {
-    const { students, searchQuery } = get()
+    const { students, searchQuery, selectedGrade, selectedClass } = get()
     set({
       filter,
-      filteredStudents: applyFilter(students, filter, searchQuery),
+      filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
     })
   },
 
   setSearch: (query) => {
-    const { students, filter } = get()
+    const { students, filter, selectedGrade, selectedClass } = get()
     set({
       searchQuery: query,
-      filteredStudents: applyFilter(students, filter, query),
+      filteredStudents: applyFilter(students, filter, query, selectedGrade, selectedClass),
+    })
+  },
+
+  setGrade: (grade) => {
+    const { students, filter, searchQuery } = get()
+    set({
+      selectedGrade: grade,
+      selectedClass: null, // reset class when grade changes
+      filteredStudents: applyFilter(students, filter, searchQuery, grade, null),
+    })
+  },
+
+  setClass: (classId) => {
+    const { students, filter, searchQuery, selectedGrade } = get()
+    set({
+      selectedClass: classId,
+      filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, classId),
     })
   },
 
@@ -75,10 +111,10 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
     set({ isLoading: true, error: null })
     try {
       const students = await api.getStudents()
-      const { filter, searchQuery } = get()
+      const { filter, searchQuery, selectedGrade, selectedClass } = get()
       set({
         students,
-        filteredStudents: applyFilter(students, filter, searchQuery),
+        filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
         isLoading: false,
       })
     } catch (error) {
@@ -87,8 +123,7 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
   },
 
   updateStudentStatus: async (id: string, status: StudentStatus) => {
-    // Optimistic update
-    const { students, filter, searchQuery } = get()
+    const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
     const updatedStudents = students.map((s) =>
       s.id === id
         ? { ...s, currentStatus: status, lastSeen: new Date().toISOString() }
@@ -96,16 +131,15 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
     )
     set({
       students: updatedStudents,
-      filteredStudents: applyFilter(updatedStudents, filter, searchQuery),
+      filteredStudents: applyFilter(updatedStudents, filter, searchQuery, selectedGrade, selectedClass),
     })
 
     try {
       await api.updateStudentStatus(id, status)
     } catch (error) {
-      // Revert on error
       set({
         students,
-        filteredStudents: applyFilter(students, filter, searchQuery),
+        filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
         error: 'שגיאה בעדכון הסטטוס',
       })
     }
@@ -116,11 +150,11 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
       const updated = await api.getStudent(id)
       if (!updated) return
 
-      const { students, filter, searchQuery } = get()
+      const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
       const updatedStudents = students.map((s) => (s.id === id ? updated : s))
       set({
         students: updatedStudents,
-        filteredStudents: applyFilter(updatedStudents, filter, searchQuery),
+        filteredStudents: applyFilter(updatedStudents, filter, searchQuery, selectedGrade, selectedClass),
       })
     } catch (error) {
       console.error('Failed to refresh student:', error)
@@ -128,17 +162,16 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
   },
 
   deleteStudent: async (id: string) => {
-    const { students, filter, searchQuery } = get()
+    const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
     const remaining = students.filter((s) => s.id !== id)
     set({
       students: remaining,
-      filteredStudents: applyFilter(remaining, filter, searchQuery),
+      filteredStudents: applyFilter(remaining, filter, searchQuery, selectedGrade, selectedClass),
     })
     try {
       await api.deleteStudent(id)
     } catch (error) {
-      // revert
-      set({ students, filteredStudents: applyFilter(students, filter, searchQuery) })
+      set({ students, filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass) })
     }
   },
 }))

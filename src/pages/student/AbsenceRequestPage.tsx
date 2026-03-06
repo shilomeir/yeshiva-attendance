@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react'
+import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle, AlertOctagon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -31,13 +31,11 @@ const STATUS_CONFIG = {
   REJECTED: { label: 'נדחה', icon: XCircle, color: 'text-[var(--red)]', variant: 'danger' as const },
 }
 
-/** Returns today's YYYY-MM-DD string */
 function todayStr(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-/** Formats YYYY-MM-DD to a readable Hebrew-style date */
 function formatDate(dateStr: string): string {
   const [year, month, day] = dateStr.split('-')
   const monthNames = [
@@ -58,10 +56,10 @@ export function AbsenceRequestPage() {
   const [reason, setReason] = useState('')
   const [startTime, setStartTime] = useState('08:00')
   const [endTime, setEndTime] = useState('20:00')
+  const [isUrgent, setIsUrgent] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
 
-  // Validation: endDate must be >= startDate
   const endDateMin = startDate || todayStr()
   const isEndBeforeStart = endDate !== '' && startDate !== '' && endDate < startDate
 
@@ -95,15 +93,22 @@ export function AbsenceRequestPage() {
         reason,
         startTime,
         endTime,
+        isUrgent,
       })
 
-      toast({ title: 'הבקשה נשלחה בהצלחה', description: 'מנהל הישיבה יאשר את הבקשה בהקדם' })
+      toast({
+        title: isUrgent ? 'בקשה חריגה נשלחה' : 'הבקשה נשלחה בהצלחה',
+        description: isUrgent
+          ? 'הבקשה מסומנת כחריגה ותועבר לאישור מיידי'
+          : 'מנהל הישיבה יאשר את הבקשה בהקדם',
+      })
 
       setStartDate('')
       setEndDate('')
       setReason('')
       setStartTime('08:00')
       setEndTime('20:00')
+      setIsUrgent(false)
       setShowForm(false)
       await loadRequests()
     } catch {
@@ -135,6 +140,32 @@ export function AbsenceRequestPage() {
           <CardContent>
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
 
+              {/* Urgent toggle */}
+              <button
+                type="button"
+                onClick={() => setIsUrgent((v) => !v)}
+                className={`flex items-center gap-2 rounded-xl border-2 px-4 py-3 text-sm font-medium transition-colors ${
+                  isUrgent
+                    ? 'border-orange-400 bg-orange-50 text-orange-700 dark:bg-orange-950/20 dark:text-orange-400'
+                    : 'border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-muted)] hover:border-orange-300'
+                }`}
+              >
+                <AlertOctagon className={`h-5 w-5 ${isUrgent ? 'text-orange-500' : 'text-[var(--text-muted)]'}`} />
+                <span>בקשה חריגה (דחופה)</span>
+                {isUrgent && (
+                  <span className="mr-auto rounded-full bg-orange-500 px-2 py-0.5 text-xs text-white">
+                    פעיל
+                  </span>
+                )}
+              </button>
+
+              {/* Urgent warning */}
+              {isUrgent && (
+                <div className="rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-700 dark:bg-orange-950/20 dark:text-orange-400">
+                  ⚠️ בקשה חריגה מועברת לאישור מיידי של הנהלת הישיבה. יש להשתמש רק במקרים דחופים.
+                </div>
+              )}
+
               {/* Date range */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-2">
@@ -146,7 +177,6 @@ export function AbsenceRequestPage() {
                     min={todayStr()}
                     onChange={(e) => {
                       setStartDate(e.target.value)
-                      // Reset endDate if it became invalid
                       if (endDate && endDate < e.target.value) setEndDate('')
                     }}
                   />
@@ -203,8 +233,12 @@ export function AbsenceRequestPage() {
                 </div>
               </div>
 
-              <Button type="submit" disabled={!canSubmit} className="w-full">
-                {isSubmitting ? 'שולח...' : 'שליחת בקשה'}
+              <Button
+                type="submit"
+                disabled={!canSubmit}
+                className={`w-full ${isUrgent ? 'bg-orange-500 hover:bg-orange-600' : ''}`}
+              >
+                {isSubmitting ? 'שולח...' : isUrgent ? 'שליחת בקשה חריגה' : 'שליחת בקשה'}
               </Button>
             </form>
           </CardContent>
@@ -228,18 +262,25 @@ export function AbsenceRequestPage() {
           {requests.map((req) => {
             const config = STATUS_CONFIG[req.status]
             const StatusIcon = config.icon
-            // Build date range label
             const dateLabel =
               req.endDate && req.endDate !== req.date
                 ? `${formatDate(req.date)} — ${formatDate(req.endDate)}`
                 : formatDate(req.date)
 
             return (
-              <Card key={req.id}>
+              <Card key={req.id} className={req.isUrgent ? 'border-orange-300 dark:border-orange-700' : ''}>
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-[var(--text)]">{dateLabel}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-[var(--text)]">{dateLabel}</p>
+                        {req.isUrgent && (
+                          <span className="flex items-center gap-0.5 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-600 dark:bg-orange-900/30">
+                            <AlertOctagon className="h-2.5 w-2.5" />
+                            חריגה
+                          </span>
+                        )}
+                      </div>
                       <p className="mt-0.5 text-sm text-[var(--text-muted)]">{req.reason}</p>
                       <div className="mt-1 flex items-center gap-1 text-xs text-[var(--text-muted)]">
                         <Clock className="h-3.5 w-3.5" />
