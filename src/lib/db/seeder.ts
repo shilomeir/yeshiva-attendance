@@ -1,7 +1,14 @@
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './schema'
 import { GRADE_LEVELS, getClasses, DEFAULT_CLASS } from '@/lib/constants/grades'
-import type { Student, Event, StudentStatus, EventType } from '@/types'
+import type {
+  Student,
+  Event,
+  StudentStatus,
+  EventType,
+  AbsenceRequest,
+  AbsenceRequestStatus,
+} from '@/types'
 
 const FIRST_NAMES = [
   'אברהם', 'יצחק', 'יעקב', 'משה', 'אהרן', 'דוד', 'שלמה', 'יוסף', 'בנימין', 'לוי',
@@ -29,8 +36,24 @@ const LAST_NAMES = [
   'צמח', 'קם', 'רענן', 'שגיא', 'אגם', 'בצלאל', 'גבור', 'דן', 'הראל', 'זמיר',
 ]
 
-// All students default to ON_CAMPUS
-const STATUSES: StudentStatus[] = ['ON_CAMPUS']
+const ABSENCE_REASONS = [
+  'נסיעה הביתה לסוף שבוע',
+  'ביקור משפחה',
+  'טיפול רפואי',
+  'אירוע משפחתי',
+  'אחר',
+]
+
+/**
+ * Weighted status distribution:
+ *  ~75% ON_CAMPUS · ~20% OFF_CAMPUS · ~5% OVERDUE
+ */
+function weightedStatus(): StudentStatus {
+  const r = Math.random()
+  if (r < 0.75) return 'ON_CAMPUS'
+  if (r < 0.95) return 'OFF_CAMPUS'
+  return 'OVERDUE'
+}
 
 function randomItem<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]
@@ -53,6 +76,17 @@ function randomDateInPast(days: number): string {
   date.setDate(date.getDate() - Math.floor(Math.random() * days))
   date.setHours(Math.floor(Math.random() * 12) + 6, Math.floor(Math.random() * 60))
   return date.toISOString()
+}
+
+/** Returns a YYYY-MM-DD string for N days ago (0 = today). */
+function dateStrDaysAgo(daysAgo: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - Math.max(0, daysAgo))
+  return d.toISOString().slice(0, 10)
+}
+
+function padHour(h: number): string {
+  return `${String(h).padStart(2, '0')}:00`
 }
 
 function generateEvents(studentId: string, count: number): Event[] {
@@ -91,6 +125,88 @@ function generateEvents(studentId: string, count: number): Event[] {
 }
 
 /**
+ * Generate absence requests for a student based on their current status.
+ *
+ * OFF_CAMPUS  → ~68% APPROVED · ~17% PENDING (some urgent) · ~8% REJECTED · ~7% none
+ * OVERDUE     → ~60% APPROVED (returned late) · ~40% none
+ * ON_CAMPUS   → ~8% have an old APPROVED/REJECTED request (historical)
+ */
+function generateAbsenceRequests(
+  studentId: string,
+  status: StudentStatus,
+): AbsenceRequest[] {
+  let reqStatus: AbsenceRequestStatus | null = null
+  let isUrgent = false
+
+  if (status === 'OFF_CAMPUS') {
+    const r = Math.random()
+    if (r < 0.68) {
+      reqStatus = 'APPROVED'
+    } else if (r < 0.85) {
+      reqStatus = 'PENDING'
+      isUrgent = Math.random() < 0.30 // 30% of pending OFF_CAMPUS are urgent
+    } else if (r < 0.93) {
+      reqStatus = 'REJECTED'
+    }
+    // ~7%: no request at all
+  } else if (status === 'OVERDUE') {
+    if (Math.random() < 0.60) reqStatus = 'APPROVED'
+  } else {
+    // ON_CAMPUS: occasional historical request
+    if (Math.random() < 0.08) {
+      reqStatus = Math.random() < 0.65 ? 'APPROVED' : 'REJECTED'
+    }
+  }
+
+  if (!reqStatus) return []
+
+  // Start date: recent for active absence, older for historical ON_CAMPUS
+  const startDaysAgo =
+    status === 'ON_CAMPUS'
+      ? Math.floor(Math.random() * 12) + 2
+      : Math.floor(Math.random() * 3)
+
+  const dateStr = dateStrDaysAgo(startDaysAgo)
+
+  // Multi-day: ~30% chance — end date is 1-2 days after start
+  let endDate: string | null = null
+  if (Math.random() < 0.30) {
+    const extraDays = Math.floor(Math.random() * 2) + 1
+    const endDaysAgo = Math.max(0, startDaysAgo - extraDays)
+    const candidate = dateStrDaysAgo(endDaysAgo)
+    if (candidate > dateStr) endDate = candidate
+  }
+
+  const adminNote: string | null =
+    reqStatus === 'REJECTED'
+      ? randomItem(['הבקשה לא אושרה, אנא פנה למשגיח', 'נא לתאם מראש', null])
+      : null
+
+  const startHour = 7 + Math.floor(Math.random() * 4)   // 07–10
+  const endHour   = 18 + Math.floor(Math.random() * 5)   // 18–22
+
+  const createdAt = new Date()
+  createdAt.setDate(createdAt.getDate() - startDaysAgo)
+  createdAt.setHours(Math.max(0, createdAt.getHours() - Math.floor(Math.random() * 6) - 1))
+
+  return [
+    {
+      id: uuidv4(),
+      studentId,
+      date: dateStr,
+      endDate,
+      reason: randomItem(ABSENCE_REASONS),
+      startTime: padHour(startHour),
+      endTime: padHour(endHour),
+      status: reqStatus,
+      adminNote,
+      isUrgent,
+      createdAt: createdAt.toISOString(),
+    },
+  ]
+}
+
+/**
  * Build a flat list of (grade, classId, capacity) slots for all 16 classes.
  * שיעור א': 6×25=150  שיעור ב': 4×25=100  שיעור ג': 3×25=75
  * שיעור ד': 1×25=25   אברכים: 1×50=50    בוגרצים: 1×50=50   = 450 total
@@ -111,15 +227,26 @@ export async function seedDatabase(): Promise<void> {
   if (existingCount > 0) {
     // If all students are in DEFAULT_CLASS they came from the old DB migration — re-seed.
     const nonDefaultCount = await db.students.where('classId').notEqual(DEFAULT_CLASS).count()
-    if (nonDefaultCount > 0) return // already properly distributed
+    if (nonDefaultCount > 0) {
+      // Students are already distributed across classes.
+      // Check if there is any status diversity (i.e. not all ON_CAMPUS).
+      const offCampusCount = await db.students
+        .where('currentStatus')
+        .notEqual('ON_CAMPUS')
+        .count()
+      if (offCampusCount > 0) return // already has realistic distribution — done
+      // All ON_CAMPUS means old seeder version — fall through to re-seed
+    }
 
-    // Clear stale data and fall through to re-seed
+    // Clear stale data and re-seed
     await db.students.clear()
     await db.events.clear()
+    await db.absenceRequests.clear()
   }
 
   const students: Student[] = []
   const allEvents: Event[] = []
+  const allAbsenceRequests: AbsenceRequest[] = []
 
   const slots = buildClassSlots() // 16 slots, total 450
 
@@ -127,7 +254,7 @@ export async function seedDatabase(): Promise<void> {
     for (let i = 0; i < slot.count; i++) {
       const firstName = randomItem(FIRST_NAMES)
       const lastName = randomItem(LAST_NAMES)
-      const status = randomItem(STATUSES)
+      const status = weightedStatus()
       const studentId = uuidv4()
 
       const student: Student = {
@@ -154,8 +281,9 @@ export async function seedDatabase(): Promise<void> {
       students.push(student)
 
       const eventCount = Math.floor(Math.random() * 15) + 2
-      const events = generateEvents(studentId, eventCount)
-      allEvents.push(...events)
+      allEvents.push(...generateEvents(studentId, eventCount))
+
+      allAbsenceRequests.push(...generateAbsenceRequests(studentId, status))
     }
   }
 
@@ -167,6 +295,20 @@ export async function seedDatabase(): Promise<void> {
   for (let i = 0; i < allEvents.length; i += BATCH_SIZE) {
     await db.events.bulkPut(allEvents.slice(i, i + BATCH_SIZE))
   }
+  for (let i = 0; i < allAbsenceRequests.length; i += BATCH_SIZE) {
+    await db.absenceRequests.bulkPut(allAbsenceRequests.slice(i, i + BATCH_SIZE))
+  }
 
-  console.log(`Seeded ${students.length} students across 16 classes and ${allEvents.length} events`)
+  const onCampus   = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
+  const offCampus  = students.filter(s => s.currentStatus === 'OFF_CAMPUS').length
+  const overdue    = students.filter(s => s.currentStatus === 'OVERDUE').length
+  const urgent     = allAbsenceRequests.filter(r => r.isUrgent).length
+  const pending    = allAbsenceRequests.filter(r => r.status === 'PENDING').length
+
+  console.log(
+    `Seeded ${students.length} students ` +
+    `(${onCampus} ON_CAMPUS · ${offCampus} OFF_CAMPUS · ${overdue} OVERDUE) ` +
+    `across 16 classes, ${allEvents.length} events, ` +
+    `${allAbsenceRequests.length} absence requests (${urgent} urgent · ${pending} pending)`
+  )
 }
