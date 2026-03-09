@@ -1,4 +1,5 @@
-import { MockApiClient } from './mockClient'
+import { SupabaseApiClient } from './supabaseClient'
 
-export const api = new MockApiClient()
+export const api = new SupabaseApiClient()
+
 export type { IApiClient } from './types'
