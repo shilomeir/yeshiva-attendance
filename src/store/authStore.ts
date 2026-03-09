@@ -2,13 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getDeviceToken } from '@/lib/auth/deviceToken'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import type { Student } from '@/types'
-
-const ADMIN_PIN_KEY = 'yeshiva_admin_pin'
-
-function getAdminPin(): string {
-  return localStorage.getItem(ADMIN_PIN_KEY) ?? '1234'
-}
 
 interface AuthState {
   currentUser: Student | null
@@ -16,10 +11,9 @@ interface AuthState {
   deviceToken: string
   isLoading: boolean
   error: string | null
-
   login: (idNumber: string) => Promise<boolean>
-  loginAdmin: (pin: string) => boolean
-  changeAdminPin: (oldPin: string, newPin: string) => boolean
+  loginAdmin: (pin: string) => Promise<boolean>
+  changeAdminPin: (oldPin: string, newPin: string) => Promise<boolean>
   logout: () => void
   clearError: () => void
 }
@@ -50,17 +44,30 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      loginAdmin: (pin: string) => {
-        if (pin === getAdminPin()) {
+      loginAdmin: async (pin: string) => {
+        const { data } = await supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', 'admin_pin')
+          .single()
+        if (data?.value === pin) {
           set({ isAdmin: true, currentUser: null })
           return true
         }
         return false
       },
 
-      changeAdminPin: (oldPin: string, newPin: string) => {
-        if (oldPin !== getAdminPin()) return false
-        localStorage.setItem(ADMIN_PIN_KEY, newPin)
+      changeAdminPin: async (oldPin: string, newPin: string) => {
+        const { data } = await supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', 'admin_pin')
+          .single()
+        if (data?.value !== oldPin) return false
+        await supabase
+          .from('app_settings')
+          .update({ value: newPin })
+          .eq('key', 'admin_pin')
         return true
       },
 
