@@ -23,7 +23,6 @@ function loadSettings(): Settings {
 
 export function SettingsPage() {
   const { changeAdminPin } = useAuthStore()
-
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [isDirty, setIsDirty] = useState(false)
 
@@ -40,7 +39,7 @@ export function SettingsPage() {
     toast({ title: 'ההגדרות נשמרו בהצלחה' })
   }
 
-  const handleChangePin = (e: React.FormEvent) => {
+  const handleChangePin = async (e: React.FormEvent) => {
     e.preventDefault()
     setPinError('')
 
@@ -53,7 +52,7 @@ export function SettingsPage() {
       return
     }
 
-    const success = changeAdminPin(oldPin, newPin)
+    const success = await changeAdminPin(oldPin, newPin)
     if (!success) {
       setPinError('הסיסמה הנוכחית שגויה')
       return
@@ -97,12 +96,7 @@ export function SettingsPage() {
             />
             <span className="text-sm text-[var(--text-muted)]">דקות</span>
           </div>
-          <Button
-            onClick={saveSettings}
-            disabled={!isDirty}
-            className="mt-4"
-            size="sm"
-          >
+          <Button onClick={saveSettings} disabled={!isDirty} className="mt-4" size="sm">
             <Save className="h-4 w-4" />
             שמור
           </Button>
@@ -141,7 +135,6 @@ export function SettingsPage() {
                 </button>
               </div>
             </div>
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="newPin">סיסמה חדשה</Label>
               <Input
@@ -153,7 +146,6 @@ export function SettingsPage() {
                 autoComplete="new-password"
               />
             </div>
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="confirmPin">אישור סיסמה חדשה</Label>
               <Input
@@ -165,11 +157,9 @@ export function SettingsPage() {
                 autoComplete="new-password"
               />
             </div>
-
             {pinError && (
               <p className="text-sm text-[var(--red)]" role="alert">{pinError}</p>
             )}
-
             <Button
               type="submit"
               disabled={!oldPin || !newPin || !confirmPin}
