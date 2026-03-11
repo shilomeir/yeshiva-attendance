@@ -6,9 +6,8 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
+import { supabase } from '@/lib/supabase'
 import type { Student } from '@/types'
-
-const LOCATION_HEARTBEAT_MS = 5 * 60 * 1000 // every 5 minutes
 
 export function HomePage() {
   const { currentUser } = useAuthStore()
@@ -20,24 +19,28 @@ export function HomePage() {
     if (updated) setStudent(updated)
   }
 
-  // Send location to server so admin's "ביקורת מיקום" shows up-to-date position
-  const sendLocationHeartbeat = async () => {
-    if (!currentUser) return
-    const result = await getCurrentPosition()
-    if (isGPSResult(result)) {
-      await api.updateStudentLocation(currentUser.id, result.lat, result.lng)
-    }
-  }
-
   useEffect(() => {
     refreshStudent()
   }, [currentUser?.id])
 
+  // Listen for admin location-audit broadcasts and respond with current GPS
   useEffect(() => {
     if (!currentUser) return
-    sendLocationHeartbeat()
-    const interval = setInterval(sendLocationHeartbeat, LOCATION_HEARTBEAT_MS)
-    return () => clearInterval(interval)
+
+    const channel = supabase.channel('location-requests')
+
+    channel
+      .on('broadcast', { event: 'request_location' }, async () => {
+        const result = await getCurrentPosition()
+        if (isGPSResult(result)) {
+          await api.updateStudentLocation(currentUser.id, result.lat, result.lng)
+        }
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [currentUser?.id])
 
   if (!student) return null
