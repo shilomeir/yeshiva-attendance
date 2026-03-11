@@ -79,6 +79,13 @@ export class MockApiClient implements IApiClient {
     await db.students.update(id, { grade, classId })
   }
 
+  async updateStudentLocation(id: string, lat: number, lng: number): Promise<void> {
+    await db.students.update(id, {
+      lastLocation: { lat, lng },
+      lastSeen: new Date().toISOString(),
+    })
+  }
+
   async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
     const student: Student = {
       id: uuidv4(),
