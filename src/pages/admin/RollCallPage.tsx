@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   MapPin,
   RefreshCw,
@@ -11,9 +11,9 @@ import {
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
 import type { Student } from '@/types'
 
@@ -73,35 +73,96 @@ function LocationBadge({ cls }: { cls: LocationClass }) {
   )
 }
 
+// How long to wait for students to respond (ms)
+const LOCATION_RESPONSE_TIMEOUT_MS = 15000
+
 export function RollCallPage() {
   const [students, setStudents] = useState<StudentWithLocation[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isWaiting, setIsWaiting] = useState(false)
   const [lastRun, setLastRun] = useState<Date | null>(null)
   const [search, setSearch] = useState('')
   const [filterClass, setFilterClass] = useState<LocationClass | 'הכל'>('הכל')
+  const waitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const enrichAndSet = useCallback((all: Student[]) => {
+    const enriched: StudentWithLocation[] = all.map((s) => {
+      const dist = getDistance(s)
+      return { ...s, distanceMeters: dist, locationClass: classifyDistance(dist) }
+    })
+    enriched.sort((a, b) => {
+      const orderDiff = CLASS_CONFIG[a.locationClass].order - CLASS_CONFIG[b.locationClass].order
+      if (orderDiff !== 0) return orderDiff
+      return a.fullName.localeCompare(b.fullName, 'he')
+    })
+    setStudents(enriched)
+  }, [])
 
   const runRollCall = useCallback(async () => {
     setIsLoading(true)
+    setIsWaiting(false)
+    if (waitTimerRef.current) clearTimeout(waitTimerRef.current)
+
     try {
-      const all = await api.getStudents()
-      const enriched: StudentWithLocation[] = all.map((s) => {
-        const dist = getDistance(s)
-        return { ...s, distanceMeters: dist, locationClass: classifyDistance(dist) }
+      // 1. Broadcast to all connected student apps to send their GPS now
+      const channel = supabase.channel('location-requests')
+      await new Promise<void>((resolve) => {
+        channel.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            channel.send({ type: 'broadcast', event: 'request_location', payload: {} })
+            resolve()
+          }
+        })
       })
-      // Sort: בישיבה → קרוב → רחוק → לא ידוע, then by name
-      enriched.sort((a, b) => {
-        const orderDiff = CLASS_CONFIG[a.locationClass].order - CLASS_CONFIG[b.locationClass].order
-        if (orderDiff !== 0) return orderDiff
-        return a.fullName.localeCompare(b.fullName, 'he')
-      })
-      setStudents(enriched)
+      supabase.removeChannel(channel)
+
+      // 2. Load current data immediately (some may already have lastLocation)
+      const initial = await api.getStudents()
+      enrichAndSet(initial)
       setLastRun(new Date())
-    } finally {
       setIsLoading(false)
+
+      // 3. Wait for students to respond, refreshing after timeout
+      setIsWaiting(true)
+      waitTimerRef.current = setTimeout(async () => {
+        const updated = await api.getStudents()
+        enrichAndSet(updated)
+        setLastRun(new Date())
+        setIsWaiting(false)
+      }, LOCATION_RESPONSE_TIMEOUT_MS)
+    } catch {
+      setIsLoading(false)
+      setIsWaiting(false)
     }
+  }, [enrichAndSet])
+
+  // Listen for realtime updates on the students table to refresh on each location update
+  useEffect(() => {
+    const channel = supabase
+      .channel('students-location-updates')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'students' },
+        (payload) => {
+          const updated = payload.new as Student
+          setStudents((prev) =>
+            prev.map((s) => {
+              if (s.id !== updated.id) return s
+              const dist = getDistance(updated)
+              return { ...updated, distanceMeters: dist, locationClass: classifyDistance(dist) }
+            })
+          )
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
-  useEffect(() => { runRollCall() }, [runRollCall])
+  useEffect(() => {
+    runRollCall()
+    return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }
+  }, [runRollCall])
 
   const counts: Record<LocationClass, number> = {
     'בישיבה': students.filter((s) => s.locationClass === 'בישיבה').length,
@@ -159,9 +220,9 @@ export function RollCallPage() {
             <Download className="h-4 w-4" />
             ייצא CSV
           </Button>
-          <Button onClick={runRollCall} disabled={isLoading} size="sm">
-            <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
-            רענן ביקורת
+          <Button onClick={runRollCall} disabled={isLoading || isWaiting} size="sm">
+            <RefreshCw className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
+            {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'רענן ביקורת'}
           </Button>
         </div>
       </div>

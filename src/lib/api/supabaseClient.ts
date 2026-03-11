@@ -53,15 +53,32 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async createEvent(payload: CreateEventPayload): Promise<Event> {
+    const now = new Date().toISOString()
     const event = {
-      id: uuidv4(), studentId: payload.studentId, type: payload.type, timestamp: new Date().toISOString(),
+      id: uuidv4(), studentId: payload.studentId, type: payload.type, timestamp: now,
       reason: payload.reason ?? null, expectedReturn: payload.expectedReturn ?? null,
       gpsLat: payload.gpsLat ?? null, gpsLng: payload.gpsLng ?? null, gpsStatus: payload.gpsStatus ?? 'PENDING',
-      distanceFromCampus: payload.distanceFromCampus ?? null, note: payload.note ?? null, syncedAt: new Date().toISOString(),
+      distanceFromCampus: payload.distanceFromCampus ?? null, note: payload.note ?? null, syncedAt: now,
     }
     const { data, error } = await supabase.from('events').insert(event).select().single()
     if (error) throw error
+
+    // Update student's last known location and lastSeen timestamp
+    const studentUpdate: Record<string, unknown> = { lastSeen: now }
+    if (payload.gpsLat && payload.gpsLng) {
+      studentUpdate.lastLocation = { lat: payload.gpsLat, lng: payload.gpsLng }
+    }
+    await supabase.from('students').update(studentUpdate).eq('id', payload.studentId)
+
     return data as Event
+  }
+
+  async updateStudentLocation(id: string, lat: number, lng: number): Promise<void> {
+    const { error } = await supabase
+      .from('students')
+      .update({ lastLocation: { lat, lng }, lastSeen: new Date().toISOString() })
+      .eq('id', id)
+    if (error) throw error
   }
 
   async getRecentEvents(limit = 50): Promise<Event[]> {

@@ -51,6 +51,7 @@ export interface IApiClient {
   getStudentByIdNumber(idNumber: string): Promise<Student | null>
   updateStudentStatus(id: string, status: StudentStatus): Promise<void>
   updateStudentGrade(id: string, grade: string, classId: string): Promise<void>
+  updateStudentLocation(id: string, lat: number, lng: number): Promise<void>
 
   // Events
   getEvents(studentId: string): Promise<Event[]>
