@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core'
 import type { GPSStatus } from '@/types'
 
 // Campus coordinates: Yeshivat Shvi Hevron
@@ -32,9 +33,49 @@ function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
   return R * c
 }
 
+/** Get current GPS position — works both in browser (PWA) and native Android APK */
 export async function getCurrentPosition(): Promise<GPSResult | GPSError> {
+  if (Capacitor.isNativePlatform()) {
+    return getNativePosition()
+  }
+  return getWebPosition()
+}
+
+/** Native path: uses @capacitor/geolocation for precise Android GPS */
+async function getNativePosition(): Promise<GPSResult | GPSError> {
+  try {
+    const { Geolocation } = await import('@capacitor/geolocation')
+
+    const perm = await Geolocation.requestPermissions()
+    if (perm.location !== 'granted' && perm.coarseLocation !== 'granted') {
+      return { status: 'DENIED_BY_USER', message: 'Location permission denied' }
+    }
+
+    const position = await Geolocation.getCurrentPosition({
+      enableHighAccuracy: true,
+      timeout: 10000,
+    })
+
+    const { latitude, longitude, accuracy } = position.coords
+    const distance = haversineDistance(CAMPUS_LAT, CAMPUS_LNG, latitude, longitude)
+
+    return {
+      lat: latitude,
+      lng: longitude,
+      accuracy: accuracy ?? 0,
+      status: 'GRANTED',
+      distanceFromCampus: Math.round(distance),
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown GPS error'
+    return { status: 'UNAVAILABLE', message }
+  }
+}
+
+/** Web path: uses browser navigator.geolocation (original implementation unchanged) */
+function getWebPosition(): Promise<GPSResult | GPSError> {
   if (!('geolocation' in navigator)) {
-    return { status: 'UNAVAILABLE', message: 'Geolocation not supported' }
+    return Promise.resolve({ status: 'UNAVAILABLE', message: 'Geolocation not supported' })
   }
 
   return new Promise((resolve) => {

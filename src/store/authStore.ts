@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 import { getDeviceToken } from '@/lib/auth/deviceToken'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
+import { registerPushNotifications } from '@/lib/native/pushNotifications'
 import type { Student } from '@/types'
 
 interface AuthState {
@@ -37,6 +38,8 @@ export const useAuthStore = create<AuthState>()(
           }
           // No device binding — any device can log in with ID number
           set({ currentUser: student, isAdmin: false, isLoading: false })
+          // Register FCM push notifications for background location requests (native APK only)
+          registerPushNotifications(student.id)
           return true
         } catch (error) {
           set({ error: 'שגיאה בהתחברות. נסה שוב.', isLoading: false })

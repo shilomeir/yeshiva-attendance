@@ -81,6 +81,14 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
   }
 
+  async updateStudentFcmToken(id: string, token: string): Promise<void> {
+    const { error } = await supabase
+      .from('students')
+      .update({ fcm_token: token })
+      .eq('id', id)
+    if (error) throw error
+  }
+
   async getRecentEvents(limit = 50): Promise<Event[]> {
     const { data, error } = await supabase.from('events').select('*').order('timestamp', { ascending: false }).limit(limit)
     if (error) throw error

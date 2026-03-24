@@ -433,4 +433,9 @@ export class MockApiClient implements IApiClient {
       return a.classId.localeCompare(b.classId, 'he')
     })
   }
+
+  // FCM token — no-op in mock/dev mode (only used in native APK)
+  async updateStudentFcmToken(_id: string, _token: string): Promise<void> {
+    // noop in browser/dev mode
+  }
 }
