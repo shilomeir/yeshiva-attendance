@@ -14,8 +14,10 @@ import { AuditLogPage } from '@/pages/admin/AuditLogPage'
 import { SmsPage } from '@/pages/admin/SmsPage'
 import { SettingsPage } from '@/pages/admin/SettingsPage'
 import { RollCallPage } from '@/pages/admin/RollCallPage'
+import { PendingRequestsPage } from '@/pages/admin/PendingRequestsPage'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
+import { useStudentsStore } from '@/store/studentsStore'
 
 function StudentGuard({ children }: { children: React.ReactNode }) {
   const { currentUser } = useAuthStore()
@@ -31,12 +33,18 @@ function AdminGuard({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const { initialize } = useSyncStore()
+  const { subscribeToRealtime } = useStudentsStore()
   const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
     const cleanup = initialize()
     return cleanup
   }, [initialize])
+
+  useEffect(() => {
+    const cleanup = subscribeToRealtime()
+    return cleanup
+  }, [subscribeToRealtime])
 
   return (
     <>
@@ -77,6 +85,7 @@ export default function App() {
           <Route path="sms" element={<SmsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="rollcall" element={<RollCallPage />} />
+          <Route path="requests" element={<PendingRequestsPage />} />
         </Route>
 
         {/* Default redirect */}

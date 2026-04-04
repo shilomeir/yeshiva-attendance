@@ -9,7 +9,7 @@ export type EventType =
   | 'SMS_IN'
   | 'SMS_OUT'
 
-export type AbsenceRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
+export type AbsenceRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED'
 
 export interface Student {
   id: string

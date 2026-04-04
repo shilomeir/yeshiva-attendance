@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { api } from '@/lib/api'
-import { db } from '@/lib/db/schema'
+import { supabase } from '@/lib/supabase'
 import { toast } from '@/hooks/use-toast'
 import type { AbsenceRequest, Student } from '@/types'
 
@@ -23,7 +23,7 @@ export function AbsenceRequestsList() {
     setIsLoading(true)
     try {
       const pending = await api.getAbsenceRequests({ status: 'PENDING' })
-      const students = await db.students.toArray()
+      const students = await api.getStudents()
       const studentMap = new Map(students.map((s) => [s.id, s]))
 
       setRequests(
@@ -41,6 +41,16 @@ export function AbsenceRequestsList() {
 
   useEffect(() => {
     loadRequests()
+  }, [])
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('absence-requests-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => {
+        loadRequests()
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
   const handleApprove = async (req: RequestWithStudent) => {

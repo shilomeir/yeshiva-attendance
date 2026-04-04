@@ -1,34 +1,21 @@
 import { useEffect, useState } from 'react'
-import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle, AlertOctagon } from 'lucide-react'
+import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle, AlertOctagon, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import type { AbsenceRequest } from '@/types'
-
-const REASONS = [
-  'נסיעה הביתה לסוף שבוע',
-  'ביקור משפחה',
-  'טיפול רפואי',
-  'אירוע משפחתי',
-  'אחר',
-]
 
 const STATUS_CONFIG = {
   PENDING: { label: 'ממתין לאישור', icon: AlertCircle, color: 'text-[var(--orange)]', variant: 'warning' as const },
   APPROVED: { label: 'אושר', icon: CheckCircle, color: 'text-[var(--green)]', variant: 'success' as const },
   REJECTED: { label: 'נדחה', icon: XCircle, color: 'text-[var(--red)]', variant: 'danger' as const },
+  CANCELLED: { label: 'בוטל', icon: XCircle, color: 'text-[var(--text-muted)]', variant: 'secondary' as const },
 }
 
 function todayStr(): string {
@@ -80,6 +67,18 @@ export function AbsenceRequestPage() {
     loadRequests()
   }, [currentUser?.id])
 
+  // Realtime subscription for own requests
+  useEffect(() => {
+    if (!currentUser) return
+    const channel = supabase
+      .channel(`student-requests-${currentUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests', filter: `studentId=eq.${currentUser.id}` }, () => {
+        loadRequests()
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [currentUser?.id])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!currentUser || !startDate || !reason || isEndBeforeStart) return
@@ -115,6 +114,16 @@ export function AbsenceRequestPage() {
       toast({ title: 'שגיאה בשליחת הבקשה', variant: 'destructive' })
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  const handleCancel = async (id: string) => {
+    try {
+      await api.cancelAbsenceRequest(id)
+      toast({ title: 'הבקשה בוטלה' })
+      setRequests((prev) => prev.map((r) => r.id === id ? { ...r, status: 'CANCELLED' as const } : r))
+    } catch {
+      toast({ title: 'שגיאה בביטול הבקשה', variant: 'destructive' })
     }
   }
 
@@ -198,17 +207,14 @@ export function AbsenceRequestPage() {
 
               {/* Reason */}
               <div className="flex flex-col gap-2">
-                <Label>סיבה</Label>
-                <Select value={reason} onValueChange={setReason}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="בחר סיבה..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {REASONS.map((r) => (
-                      <SelectItem key={r} value={r}>{r}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="reason">סיבה</Label>
+                <Input
+                  id="reason"
+                  type="text"
+                  placeholder="תאר את סיבת ההיעדרות..."
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                />
               </div>
 
               {/* Time range */}
@@ -292,10 +298,21 @@ export function AbsenceRequestPage() {
                         </p>
                       )}
                     </div>
-                    <Badge variant={config.variant} className="flex items-center gap-1 shrink-0">
-                      <StatusIcon className="h-3 w-3" />
-                      {config.label}
-                    </Badge>
+                    <div className="flex flex-col items-end gap-2 shrink-0">
+                      <Badge variant={config.variant} className="flex items-center gap-1">
+                        <StatusIcon className="h-3 w-3" />
+                        {config.label}
+                      </Badge>
+                      {(req.status === 'PENDING' || req.status === 'APPROVED') && (
+                        <button
+                          onClick={() => handleCancel(req.id)}
+                          className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-red-50 hover:text-[var(--red)] transition-colors dark:hover:bg-red-950/20"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          ביטול
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </CardContent>
               </Card>

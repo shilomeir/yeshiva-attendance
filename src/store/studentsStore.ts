@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import type { Student, StudentStatus } from '@/types'
 
 type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
@@ -25,6 +26,7 @@ interface StudentsState {
   updateStudentStatus: (id: string, status: StudentStatus) => Promise<void>
   refreshStudent: (id: string) => Promise<void>
   deleteStudent: (id: string) => Promise<void>
+  subscribeToRealtime: () => () => void
 }
 
 function applyFilter(
@@ -173,5 +175,30 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
     } catch (error) {
       set({ students, filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass) })
     }
+  },
+
+  subscribeToRealtime: () => {
+    const channel = supabase
+      .channel('students-global-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'students' }, (payload) => {
+        const newStudent = payload.new as Student
+        const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
+        const updated = [...students, newStudent]
+        set({ students: updated, filteredStudents: applyFilter(updated, filter, searchQuery, selectedGrade, selectedClass) })
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students' }, (payload) => {
+        const updatedStudent = payload.new as Student
+        const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
+        const updated = students.map((s) => s.id === updatedStudent.id ? updatedStudent : s)
+        set({ students: updated, filteredStudents: applyFilter(updated, filter, searchQuery, selectedGrade, selectedClass) })
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'students' }, (payload) => {
+        const deletedId = (payload.old as { id: string }).id
+        const { students, filter, searchQuery, selectedGrade, selectedClass } = get()
+        const updated = students.filter((s) => s.id !== deletedId)
+        set({ students: updated, filteredStudents: applyFilter(updated, filter, searchQuery, selectedGrade, selectedClass) })
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
   },
 }))

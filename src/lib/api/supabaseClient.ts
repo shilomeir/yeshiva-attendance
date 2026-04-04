@@ -65,6 +65,8 @@ export class SupabaseApiClient implements IApiClient {
 
     // Update student's last known location and lastSeen timestamp
     const studentUpdate: Record<string, unknown> = { lastSeen: now }
+    if (payload.type === 'CHECK_IN') studentUpdate.currentStatus = 'ON_CAMPUS'
+    if (payload.type === 'CHECK_OUT') studentUpdate.currentStatus = 'OFF_CAMPUS'
     if (payload.gpsLat && payload.gpsLng) {
       studentUpdate.lastLocation = { lat: payload.gpsLat, lng: payload.gpsLng }
     }
@@ -115,9 +117,12 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async createAdminOverride(studentId: string, newStatus: StudentStatus, note?: string): Promise<AdminOverride> {
-    const override = { id: uuidv4(), studentId, adminId: 'admin', action: 'manual_override', previousStatus: 'ON_CAMPUS' as StudentStatus, newStatus, timestamp: new Date().toISOString(), note: note ?? null }
+    const student = await this.getStudent(studentId)
+    const previousStatus: StudentStatus = student?.currentStatus ?? 'ON_CAMPUS'
+    const override = { id: uuidv4(), studentId, adminId: 'admin', action: 'manual_override', previousStatus, newStatus, timestamp: new Date().toISOString(), note: note ?? null }
     const { data, error } = await supabase.from('admin_overrides').insert(override).select().single()
     if (error) throw error
+    await supabase.from('students').update({ currentStatus: newStatus }).eq('id', studentId)
     return data as AdminOverride
   }
 
@@ -138,8 +143,30 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async updateAbsenceRequestStatus(id: string, status: AbsenceRequest['status'], adminNote?: string): Promise<void> {
+    // Fetch request first to get studentId for audit log
+    const { data: req } = await supabase.from('absence_requests').select('studentId').eq('id', id).single()
+
     const { error } = await supabase.from('absence_requests').update({ status, adminNote: adminNote ?? null }).eq('id', id)
     if (error) throw error
+
+    // Create audit record for approve/reject actions
+    if ((status === 'APPROVED' || status === 'REJECTED') && req) {
+      const student = await this.getStudent(req.studentId)
+      const currentStatus = student?.currentStatus ?? 'ON_CAMPUS'
+      const auditNote = adminNote
+        ? adminNote
+        : status === 'APPROVED' ? 'בקשת היעדרות אושרה' : 'בקשת היעדרות נדחתה'
+      await supabase.from('admin_overrides').insert({
+        id: uuidv4(),
+        studentId: req.studentId,
+        adminId: 'admin',
+        action: status === 'APPROVED' ? 'approve_absence_request' : 'reject_absence_request',
+        previousStatus: currentStatus,
+        newStatus: currentStatus,
+        timestamp: new Date().toISOString(),
+        note: auditNote,
+      })
+    }
   }
 
   async getUrgentRequests(): Promise<AbsenceRequest[]> {
@@ -241,4 +268,36 @@ export class SupabaseApiClient implements IApiClient {
     }
     return Array.from(map.values())
   }
-             }
+
+  async getClassOutsideCount(classId: string): Promise<number> {
+    // Count students currently outside — but exclude those who left via an approved urgent request
+    // (urgent requests don't consume a quota slot)
+    const { data: outsideStudents, error } = await supabase
+      .from('students')
+      .select('id')
+      .eq('classId', classId)
+      .in('currentStatus', ['OFF_CAMPUS', 'OVERDUE'])
+    if (error) throw error
+    if (!outsideStudents || outsideStudents.length === 0) return 0
+
+    const today = new Date().toISOString().split('T')[0]
+    const outsideIds = outsideStudents.map((s) => s.id)
+
+    // Find students outside because of an approved urgent exception today → they don't count
+    const { data: urgentApproved } = await supabase
+      .from('absence_requests')
+      .select('studentId')
+      .in('studentId', outsideIds)
+      .eq('isUrgent', true)
+      .eq('status', 'APPROVED')
+      .eq('date', today)
+
+    const urgentExemptIds = new Set((urgentApproved ?? []).map((r: { studentId: string }) => r.studentId))
+    return outsideStudents.filter((s) => !urgentExemptIds.has(s.id)).length
+  }
+
+  async cancelAbsenceRequest(id: string): Promise<void> {
+    const { error } = await supabase.from('absence_requests').update({ status: 'CANCELLED' }).eq('id', id)
+    if (error) throw error
+  }
+}

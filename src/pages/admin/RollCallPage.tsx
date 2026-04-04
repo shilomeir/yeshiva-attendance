@@ -78,11 +78,12 @@ const LOCATION_RESPONSE_TIMEOUT_MS = 15000
 
 export function RollCallPage() {
   const [students, setStudents] = useState<StudentWithLocation[]>([])
-  const [isLoading, setIsLoading] = useState(true)
+  const [isLoading, setIsLoading] = useState(false)
   const [isWaiting, setIsWaiting] = useState(false)
   const [lastRun, setLastRun] = useState<Date | null>(null)
   const [search, setSearch] = useState('')
   const [filterClass, setFilterClass] = useState<LocationClass | 'הכל'>('הכל')
+  const [showConfirm, setShowConfirm] = useState(false)
   const waitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const enrichAndSet = useCallback((all: Student[]) => {
@@ -165,10 +166,10 @@ export function RollCallPage() {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
+  // Cleanup timer on unmount only — do NOT auto-run on mount
   useEffect(() => {
-    runRollCall()
     return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }
-  }, [runRollCall])
+  }, [])
 
   const counts: Record<LocationClass, number> = {
     'בישיבה': students.filter((s) => s.locationClass === 'בישיבה').length,
@@ -214,11 +215,11 @@ export function RollCallPage() {
       {/* Header */}
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-[var(--text)]">ביקורת מיקום</h2>
+          <h2 className="text-2xl font-bold text-[var(--text)]">ביקורת פנימית</h2>
           <p className="text-sm text-[var(--text-muted)]">
             {lastRun
               ? `עודכן לאחרונה: ${lastRun.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}`
-              : 'טוען נתונים...'}
+              : 'לחץ על "הפעל ביקורת" כדי לאסוף מיקומים'}
           </p>
         </div>
         <div className="flex gap-2">
@@ -226,12 +227,39 @@ export function RollCallPage() {
             <Download className="h-4 w-4" />
             ייצא CSV
           </Button>
-          <Button onClick={runRollCall} disabled={isLoading || isWaiting} size="sm">
-            <RefreshCw className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
-            {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'רענן ביקורת'}
-          </Button>
+          {!showConfirm ? (
+            <Button onClick={() => setShowConfirm(true)} disabled={isLoading || isWaiting} size="sm">
+              <MapPin className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
+              {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'הפעל ביקורת'}
+            </Button>
+          ) : (
+            <div className="flex items-center gap-2 rounded-lg border border-orange-300 bg-orange-50 px-3 py-1.5 dark:border-orange-700 dark:bg-orange-950/20">
+              <span className="text-sm font-medium text-orange-700 dark:text-orange-400">לאסוף מיקומי תלמידים?</span>
+              <button
+                onClick={() => { setShowConfirm(false); runRollCall() }}
+                className="rounded-md bg-orange-500 px-3 py-1 text-xs font-bold text-white hover:bg-orange-600"
+              >
+                כן, הפעל
+              </button>
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="rounded-md border border-orange-300 px-2 py-1 text-xs text-orange-700 hover:bg-orange-100 dark:text-orange-400"
+              >
+                ביטול
+              </button>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Empty state when no roll call has been run */}
+      {students.length === 0 && !isLoading && (
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--border)] py-16 text-center">
+          <MapPin className="h-10 w-10 text-[var(--text-muted)] opacity-40" />
+          <p className="font-medium text-[var(--text-muted)]">לא בוצעה ביקורת עדיין</p>
+          <p className="text-sm text-[var(--text-muted)]">לחץ על "הפעל ביקורת" כדי לשלוח בקשת מיקום לכל התלמידים</p>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

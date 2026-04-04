@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { CheckCircle, LogOut, Loader2 } from 'lucide-react'
 import { OffCampusSheet } from '@/components/student/OffCampusSheet'
 import { api } from '@/lib/api'
-import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils/cn'
@@ -26,15 +25,14 @@ export function StatusButtons({ currentStatus, onStatusChange }: StatusButtonsPr
     setIsCheckingIn(true)
 
     try {
-      const gpsResult = await getCurrentPosition()
-
+      // GPS is collected ONLY during admin's ביקורת פנימית — not here
       await api.createEvent({
         studentId: currentUser.id,
         type: 'CHECK_IN',
-        gpsLat: isGPSResult(gpsResult) ? gpsResult.lat : null,
-        gpsLng: isGPSResult(gpsResult) ? gpsResult.lng : null,
-        gpsStatus: gpsResult.status,
-        distanceFromCampus: isGPSResult(gpsResult) ? gpsResult.distanceFromCampus : null,
+        gpsLat: null,
+        gpsLng: null,
+        gpsStatus: 'PENDING',
+        distanceFromCampus: null,
       })
 
       onStatusChange('ON_CAMPUS')

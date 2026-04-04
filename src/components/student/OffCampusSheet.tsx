@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Loader2, AlertTriangle, CalendarDays, Clock } from 'lucide-react'
+import { Loader2, AlertTriangle, CalendarDays, Clock, AlertOctagon } from 'lucide-react'
 import {
   Sheet,
   SheetContent,
@@ -12,10 +12,10 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { api } from '@/lib/api'
-import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { scheduleReturn } from '@/lib/notifications/scheduleReturn'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
+import { GRADE_LEVELS } from '@/lib/constants/grades'
 
 interface OffCampusSheetProps {
   open: boolean
@@ -25,7 +25,6 @@ interface OffCampusSheetProps {
 
 type DepartureMode = 'today' | 'multiday'
 
-/** Returns YYYY-MM-DD string for a Date (local timezone) */
 function toDateInput(d: Date): string {
   const yyyy = d.getFullYear()
   const mm = String(d.getMonth() + 1).padStart(2, '0')
@@ -33,22 +32,39 @@ function toDateInput(d: Date): string {
   return `${yyyy}-${mm}-${dd}`
 }
 
+function getQuotaForGrade(gradeName: string): number {
+  const level = GRADE_LEVELS.find((g) => g.name === gradeName)
+  if (!level) return 3
+  return level.capacity >= 50 ? 6 : 3
+}
+
 export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps) {
   const { currentUser } = useAuthStore()
   const navigate = useNavigate()
 
   const [mode, setMode] = useState<DepartureMode>('today')
+  const [reason, setReason] = useState('')
   const [returnTime, setReturnTime] = useState('')
   const [returnDate, setReturnDate] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [outsideCount, setOutsideCount] = useState<number | null>(null)
+  const [quota, setQuota] = useState<number>(3)
 
-  // Date limits for multi-day
+  // Check quota when sheet opens
+  useEffect(() => {
+    if (!open || !currentUser) return
+    const q = getQuotaForGrade(currentUser.grade)
+    setQuota(q)
+    api.getClassOutsideCount(currentUser.classId).then(setOutsideCount).catch(() => setOutsideCount(null))
+  }, [open, currentUser])
+
+  const isFull = outsideCount !== null && outsideCount >= quota
+
   const todayStr = toDateInput(new Date())
   const maxDate = new Date()
   maxDate.setDate(maxDate.getDate() + 2)
   const maxDateStr = toDateInput(maxDate)
 
-  // Is the selected date beyond the 2-day limit?
   const isDateTooFar = mode === 'multiday' && returnDate !== '' && returnDate > maxDateStr
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -57,8 +73,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
 
     setIsSubmitting(true)
     try {
-      const gpsResult = await getCurrentPosition()
-
+      // GPS is collected ONLY during admin's ביקורת פנימית — not during student departures
       let expectedReturn: string | null = null
 
       if (mode === 'today' && returnTime) {
@@ -67,7 +82,6 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
         d.setHours(h, m, 0, 0)
         expectedReturn = d.toISOString()
       } else if (mode === 'multiday' && returnDate) {
-        // Parse date parts to avoid timezone offset issues
         const [year, month, day] = returnDate.split('-').map(Number)
         const d = new Date(year, month - 1, day)
         if (returnTime) {
@@ -82,12 +96,12 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       await api.createEvent({
         studentId: currentUser.id,
         type: 'CHECK_OUT',
-        reason: null,
+        reason: reason || null,
         expectedReturn,
-        gpsLat: isGPSResult(gpsResult) ? gpsResult.lat : null,
-        gpsLng: isGPSResult(gpsResult) ? gpsResult.lng : null,
-        gpsStatus: gpsResult.status,
-        distanceFromCampus: isGPSResult(gpsResult) ? gpsResult.distanceFromCampus : null,
+        gpsLat: null,
+        gpsLng: null,
+        gpsStatus: 'PENDING',
+        distanceFromCampus: null,
       })
 
       if (expectedReturn) {
@@ -115,8 +129,10 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
 
   const resetForm = () => {
     setMode('today')
+    setReason('')
     setReturnTime('')
     setReturnDate('')
+    setOutsideCount(null)
   }
 
   const handleClose = () => {
@@ -137,6 +153,29 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
           <SheetTitle>יציאה מהישיבה</SheetTitle>
           <SheetDescription>בחר את סוג היציאה</SheetDescription>
         </SheetHeader>
+
+        {/* Class full banner */}
+        {isFull && (
+          <div className="mb-5 flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20">
+            <div className="flex items-start gap-2">
+              <AlertOctagon className="mt-0.5 h-5 w-5 shrink-0 text-[var(--red)]" />
+              <div>
+                <p className="font-bold text-[var(--red)]">אוי אוי אוי... נגמר המקום</p>
+                <p className="mt-0.5 text-sm text-[var(--red)]">
+                  הכיתה מלאה — {outsideCount} מתוך {quota} חריגים כבר יצאו
+                </p>
+              </div>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleGoToRequests}
+              className="w-full bg-[var(--orange)] text-white hover:bg-orange-600"
+            >
+              הגשת בקשה חריגה (דחופה)
+            </Button>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           {/* Mode toggle */}
@@ -165,6 +204,18 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
             </button>
           </div>
 
+          {/* Reason (free text) */}
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="reason">סיבת היציאה (אופציונלי)</Label>
+            <Input
+              id="reason"
+              type="text"
+              placeholder="לדוגמה: ביקור משפחה, טיפול רפואי..."
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </div>
+
           {/* ── Today mode ── */}
           {mode === 'today' && (
             <div className="flex flex-col gap-2">
@@ -183,7 +234,6 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
           {mode === 'multiday' && (
             <>
               <div className="grid grid-cols-2 gap-3">
-                {/* Return date */}
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="returnDate" className="flex items-center gap-1.5">
                     <CalendarDays className="h-3.5 w-3.5" />
@@ -198,7 +248,6 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
                   />
                 </div>
 
-                {/* Return time */}
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="returnTimeMD" className="flex items-center gap-1.5">
                     <Clock className="h-3.5 w-3.5" />
@@ -213,7 +262,6 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
                 </div>
               </div>
 
-              {/* Too-far warning banner */}
               {isDateTooFar && (
                 <div className="flex flex-col gap-3 rounded-xl border border-orange-300 bg-orange-50 p-4 dark:border-orange-800 dark:bg-orange-950/20">
                   <div className="flex items-start gap-2">
@@ -251,6 +299,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
               className="flex-1 bg-[var(--orange)] hover:bg-orange-600"
               disabled={
                 isSubmitting ||
+                isFull ||
                 !!isDateTooFar ||
                 (mode === 'multiday' && returnDate === '')
               }

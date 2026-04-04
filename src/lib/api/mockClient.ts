@@ -438,4 +438,24 @@ export class MockApiClient implements IApiClient {
   async updateStudentFcmToken(_id: string, _token: string): Promise<void> {
     // noop in browser/dev mode
   }
+
+  async getClassOutsideCount(classId: string): Promise<number> {
+    const outside = await db.students
+      .where('classId').equals(classId)
+      .filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
+      .toArray()
+    if (outside.length === 0) return 0
+
+    const today = new Date().toISOString().split('T')[0]
+    const outsideIds = new Set(outside.map((s) => s.id))
+    const urgentApproved = await db.absenceRequests
+      .filter((r) => outsideIds.has(r.studentId) && r.isUrgent && r.status === 'APPROVED' && r.date === today)
+      .toArray()
+    const urgentExemptIds = new Set(urgentApproved.map((r) => r.studentId))
+    return outside.filter((s) => !urgentExemptIds.has(s.id)).length
+  }
+
+  async cancelAbsenceRequest(id: string): Promise<void> {
+    await db.absenceRequests.update(id, { status: 'CANCELLED' as const })
+  }
 }

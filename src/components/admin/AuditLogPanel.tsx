@@ -3,7 +3,6 @@ import { ArrowRight, User, Shield } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
-import { db } from '@/lib/db/schema'
 import { formatDateTimeHebrew } from '@/lib/utils/formatTime'
 import type { AdminOverride, Student } from '@/types'
 
@@ -25,7 +24,7 @@ export function AuditLogPanel() {
       const all = await api.getAdminOverrides()
       setTotal(all.length)
 
-      const students = await db.students.toArray()
+      const students = await api.getStudents()
       const studentMap = new Map(students.map((s) => [s.id, s]))
 
       const paged = all.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)

@@ -9,6 +9,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import { GRADE_LEVELS } from '@/lib/constants/grades'
 import type { DashboardStats, Student, AbsenceRequest, ClassStat } from '@/types'
 
@@ -62,8 +63,26 @@ export function DashboardPage() {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 60000)
-    return () => clearInterval(interval)
+
+    // Subscribe to realtime changes to auto-refresh dashboard
+    const studentsChannel = supabase
+      .channel('dashboard-students-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => {
+        loadData()
+      })
+      .subscribe()
+
+    const requestsChannel = supabase
+      .channel('dashboard-requests-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => {
+        loadData()
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(studentsChannel)
+      supabase.removeChannel(requestsChannel)
+    }
   }, [])
 
   const handleUrgent = async (id: string, status: 'APPROVED' | 'REJECTED') => {

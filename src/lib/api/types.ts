@@ -95,4 +95,6 @@ export interface IApiClient {
   getReasonBreakdown(): Promise<ReasonData[]>
   getHourlyDepartures(): Promise<HourlyData[]>
   getClassStats(): Promise<ClassStat[]>
+  getClassOutsideCount(classId: string): Promise<number>
+  cancelAbsenceRequest(id: string): Promise<void>
 }

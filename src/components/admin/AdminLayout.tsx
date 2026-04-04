@@ -10,6 +10,7 @@ import {
   Menu,
   X,
   MapPin,
+  ClipboardList,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
@@ -21,8 +22,9 @@ import { cn } from '@/lib/utils/cn'
 const NAV_ITEMS = [
   { to: '/admin', icon: LayoutDashboard, label: 'לוח בקרה', end: true },
   { to: '/admin/students', icon: Users, label: 'תלמידים' },
-  { to: '/admin/rollcall', icon: MapPin, label: 'ביקורת מיקום' },
+  { to: '/admin/rollcall', icon: MapPin, label: 'ביקורת פנימית' },
   { to: '/admin/calendar', icon: Calendar, label: 'לוח שנה' },
+  { to: '/admin/requests', icon: ClipboardList, label: 'בקשות ממתינות' },
   { to: '/admin/audit', icon: FileText, label: 'לוג ביקורת' },
   { to: '/admin/sms', icon: MessageSquare, label: 'SMS' },
   { to: '/admin/settings', icon: Settings, label: 'הגדרות' },
