@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  PieChart, Pie, Cell,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
@@ -27,24 +28,47 @@ export function DashboardPage() {
   const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
   const [urgentRequests, setUrgentRequests] = useState<UrgentWithStudent[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
+  const [offCampusBreakdown, setOffCampusBreakdown] = useState({ withApproval: 0, withUrgent: 0, noApproval: 0 })
   const [isLoading, setIsLoading] = useState(true)
 
   const loadData = async () => {
     setIsLoading(true)
+    // Silently transition any overdue students before refreshing stats
+    api.markOverdueStudents().catch(() => {})
     try {
-      const [data, absent, urgent, clsStats] = await Promise.all([
+      const [data, absent, urgent, clsStats, allStudents, approvedRequests] = await Promise.all([
         api.getDashboardStats(),
         api.getLongAbsentStudents(7),
         api.getUrgentRequests(),
         api.getClassStats(),
+        api.getStudents(),
+        api.getAbsenceRequests({ status: 'APPROVED' }),
       ])
       setStats(data)
       setLongAbsentStudents(absent)
       setClassStats(clsStats)
 
+      // Calculate off-campus breakdown
+      const todayStr = new Date().toISOString().split('T')[0]
+      const outsideStudents = allStudents.filter(
+        (s: Student) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE'
+      )
+      const validApproved = approvedRequests.filter(
+        (r: AbsenceRequest) => r.date <= todayStr && (!r.endDate || r.endDate >= todayStr)
+      )
+      const approvedSet = new Set(validApproved.map((r: AbsenceRequest) => r.studentId))
+      const urgentSet = new Set(
+        validApproved.filter((r: AbsenceRequest) => r.isUrgent).map((r: AbsenceRequest) => r.studentId)
+      )
+      setOffCampusBreakdown({
+        withApproval: outsideStudents.filter((s: Student) => approvedSet.has(s.id) && !urgentSet.has(s.id)).length,
+        withUrgent: outsideStudents.filter((s: Student) => urgentSet.has(s.id)).length,
+        noApproval: outsideStudents.filter((s: Student) => !approvedSet.has(s.id)).length,
+      })
+
       // Enrich urgent requests with student info
       const enriched = await Promise.all(
-        urgent.map(async (req) => {
+        urgent.map(async (req: AbsenceRequest) => {
           const student = await api.getStudent(req.studentId)
           return {
             ...req,
@@ -79,9 +103,15 @@ export function DashboardPage() {
       })
       .subscribe()
 
+    // Poll for OVERDUE transitions every 60 seconds
+    const overdueInterval = setInterval(() => {
+      api.markOverdueStudents().catch(() => {})
+    }, 60000)
+
     return () => {
       supabase.removeChannel(studentsChannel)
       supabase.removeChannel(requestsChannel)
+      clearInterval(overdueInterval)
     }
   }, [])
 
@@ -89,6 +119,24 @@ export function DashboardPage() {
     await api.updateAbsenceRequestStatus(id, status)
     setUrgentRequests((prev) => prev.filter((r) => r.id !== id))
   }
+
+  // Hero block — % on campus
+  const onCampusPct = stats && stats.total > 0
+    ? Math.round((stats.onCampus / stats.total) * 100)
+    : 0
+  const heroColor = onCampusPct >= 80
+    ? { text: 'text-[var(--green)]', bar: 'bg-green-500', bg: 'bg-green-50 dark:bg-green-950/20', border: 'border-green-200 dark:border-green-800/40' }
+    : onCampusPct >= 60
+    ? { text: 'text-[var(--orange)]', bar: 'bg-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/20', border: 'border-orange-200 dark:border-orange-800/40' }
+    : { text: 'text-[var(--red)]', bar: 'bg-red-500', bg: 'bg-red-50 dark:bg-red-950/20', border: 'border-red-200 dark:border-red-800/40' }
+
+  // Pie chart data — 4 categories
+  const pieData = stats ? [
+    { name: 'בישיבה', value: stats.onCampus, color: '#22C55E' },
+    { name: 'בחוץ באישור', value: offCampusBreakdown.withApproval, color: '#3B82F6' },
+    { name: 'בחוץ חריג', value: offCampusBreakdown.withUrgent, color: '#F97316' },
+    { name: 'בחוץ ללא אישור', value: offCampusBreakdown.noApproval, color: '#EF4444' },
+  ].filter((d) => d.value > 0) : []
 
   // Aggregate class stats by grade for the bar chart
   const gradeChartData = GRADE_LEVELS.map((level) => {
@@ -108,6 +156,87 @@ export function DashboardPage() {
         <p className="text-sm text-[var(--text-muted)]">סקירה כללית של נוכחות התלמידים</p>
       </div>
 
+      {/* Hero — % on campus */}
+      <Card className={`border ${heroColor.border} ${heroColor.bg}`}>
+        <CardContent className="p-5">
+          <div className="flex items-end gap-4">
+            <span className={`text-6xl font-extrabold leading-none ${heroColor.text}`}>
+              {isLoading ? '—' : `${onCampusPct}%`}
+            </span>
+            <div className="mb-1 flex flex-col gap-0.5">
+              <span className="text-base font-semibold text-[var(--text)]">מתוך התלמידים בישיבה כרגע</span>
+              {stats && (
+                <span className="text-sm text-[var(--text-muted)]">
+                  {stats.onCampus} מתוך {stats.total} תלמידים
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="mt-4 h-3 w-full overflow-hidden rounded-full bg-[var(--border)]">
+            <div
+              className={`h-full rounded-full transition-all duration-700 ${heroColor.bar}`}
+              style={{ width: `${isLoading ? 0 : onCampusPct}%` }}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Pie chart — student distribution */}
+      {!isLoading && pieData.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">התפלגות תלמידים</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-col items-center sm:flex-row sm:items-center sm:justify-center gap-4">
+              <PieChart width={220} height={200}>
+                <Pie
+                  data={pieData}
+                  cx={110}
+                  cy={95}
+                  innerRadius={55}
+                  outerRadius={90}
+                  paddingAngle={2}
+                  dataKey="value"
+                  startAngle={90}
+                  endAngle={-270}
+                >
+                  {pieData.map((entry, index) => (
+                    <Cell key={index} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    direction: 'rtl',
+                  }}
+                />
+              </PieChart>
+              {/* Legend */}
+              <div className="flex flex-col gap-2.5">
+                {pieData.map((entry) => (
+                  <div key={entry.name} className="flex items-center gap-2.5">
+                    <span
+                      className="inline-block h-3 w-3 rounded-full shrink-0"
+                      style={{ backgroundColor: entry.color }}
+                    />
+                    <span className="text-sm text-[var(--text)]">{entry.name}</span>
+                    <span className="text-sm font-bold text-[var(--text)]">{entry.value}</span>
+                    {stats && (
+                      <span className="text-xs text-[var(--text-muted)]">
+                        ({Math.round((entry.value / stats.total) * 100)}%)
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {STAT_CARDS.map(({ key, label, icon: Icon, color, bg }) => (
@@ -118,9 +247,12 @@ export function DashboardPage() {
                   <p className="text-sm text-[var(--text-muted)]">{label}</p>
                   <p className="mt-1 text-3xl font-bold text-[var(--text)]">
                     {isLoading ? '...' : (stats?.[key] ?? 0)}
+                    {key === 'overdue' && (stats?.overdue ?? 0) > 0 && (
+                      <span className="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--red)]" />
+                    )}
                   </p>
                 </div>
-                <div className={`rounded-lg p-2 ${bg}`}>
+                <div className={`rounded-lg p-2 ${bg} ${key === 'overdue' && (stats?.overdue ?? 0) > 0 ? 'animate-pulse' : ''}`}>
                   <Icon className={`h-5 w-5 ${color}`} />
                 </div>
               </div>
@@ -231,7 +363,7 @@ export function DashboardPage() {
       {/* Presence chart */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">נוכחות לאורך 7 ימים</CardTitle>
+          <CardTitle className="text-base">נוכחות — 4 ימים אחורה ו-4 ימים קדימה</CardTitle>
         </CardHeader>
         <CardContent>
           <PresenceChart />
@@ -285,6 +417,7 @@ export function DashboardPage() {
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--orange)]">מחוץ</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--red)]">באיחור</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">היעדרות</th>
+                      <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">מכסה</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -301,6 +434,14 @@ export function DashboardPage() {
                       const gAbsRate   = gTotal > 0 ? ((gOffCampus + gOverdue) / gTotal) * 100 : 0
                       const gHighAbs   = gAbsRate > 20
                       const multiClass = gradeClasses.length > 1
+
+                      // Grade-level quota: sum of per-class quotas
+                      const gradeQuota = gradeClasses.reduce((sum) => {
+                        const classQuota = level.capacity >= 50 ? 6 : 3
+                        return sum + classQuota
+                      }, 0)
+                      const gradeAbsCount = gOffCampus + gOverdue
+                      const gradeQuotaExceeded = gradeAbsCount >= gradeQuota
 
                       return (
                         <Fragment key={level.name}>
@@ -323,6 +464,11 @@ export function DashboardPage() {
                                 {gAbsRate.toFixed(0)}%
                               </span>
                             </td>
+                            <td className="px-3 py-2.5 text-center">
+                              <span className={`font-semibold ${gradeQuotaExceeded ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
+                                {gradeAbsCount}/{gradeQuota}
+                              </span>
+                            </td>
                           </tr>
 
                           {/* Per-class rows — only for multi-class grades */}
@@ -334,6 +480,9 @@ export function DashboardPage() {
                             const classLabel = cs.classId.includes(' כיתה ')
                               ? `כיתה ${cs.classId.split(' כיתה ')[1]}`
                               : cs.classId
+                            const classQuota = level.capacity >= 50 ? 6 : 3
+                            const classAbsCount = cs.offCampus + cs.overdue
+                            const classQuotaExceeded = classAbsCount >= classQuota
                             return (
                               <tr
                                 key={cs.classId}
@@ -349,6 +498,11 @@ export function DashboardPage() {
                                 <td className="px-3 py-2 text-center">
                                   <span className={`font-medium ${highAbs ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
                                     {absRate.toFixed(0)}%
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className={`font-medium ${classQuotaExceeded ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
+                                    {classAbsCount}/{classQuota}
                                   </span>
                                 </td>
                               </tr>

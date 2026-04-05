@@ -21,6 +21,7 @@ import type {
   GetStudentsOptions,
   CreateEventPayload,
   CreateAbsenceRequestPayload,
+  QuotaCheckResult,
 } from './types'
 
 export class MockApiClient implements IApiClient {
@@ -298,10 +299,34 @@ export class MockApiClient implements IApiClient {
     status: AbsenceRequest['status'],
     adminNote?: string
   ): Promise<void> {
-    await db.absenceRequests.update(id, {
-      status,
-      adminNote: adminNote ?? null,
-    })
+    await db.absenceRequests.update(id, { status, adminNote: adminNote ?? null })
+
+    // Write audit record for approve / reject / cancel
+    if (status === 'APPROVED' || status === 'REJECTED' || status === 'CANCELLED') {
+      const request = await db.absenceRequests.get(id)
+      if (request) {
+        const student = await db.students.get(request.studentId)
+        const currentStatus = student?.currentStatus ?? 'ON_CAMPUS'
+        const auditNote = adminNote
+          ? adminNote
+          : status === 'APPROVED' ? 'בקשת היעדרות אושרה'
+          : status === 'REJECTED' ? 'בקשת היעדרות נדחתה'
+          : 'בקשת היעדרות בוטלה ע"י מנהל'
+        const action = status === 'APPROVED' ? 'approve_absence_request'
+          : status === 'REJECTED' ? 'reject_absence_request'
+          : 'cancel_absence_request'
+        await db.adminOverrides.add({
+          id: uuidv4(),
+          studentId: request.studentId,
+          adminId: 'admin',
+          action,
+          previousStatus: currentStatus,
+          newStatus: currentStatus,
+          timestamp: new Date().toISOString(),
+          note: auditNote,
+        })
+      }
+    }
   }
 
   async getUrgentRequests(): Promise<AbsenceRequest[]> {
@@ -457,5 +482,58 @@ export class MockApiClient implements IApiClient {
 
   async cancelAbsenceRequest(id: string): Promise<void> {
     await db.absenceRequests.update(id, { status: 'CANCELLED' as const })
+  }
+
+  async markOverdueStudents(): Promise<number> {
+    const now = new Date()
+    const offCampus = await db.students
+      .filter((s) => s.currentStatus === 'OFF_CAMPUS')
+      .toArray()
+    if (offCampus.length === 0) return 0
+
+    let count = 0
+    for (const student of offCampus) {
+      const events = await db.events
+        .where('studentId').equals(student.id)
+        .and((e) => e.type === 'CHECK_OUT' && e.expectedReturn != null)
+        .toArray()
+      if (events.length === 0) continue
+      // Find most recent CHECK_OUT
+      const latest = events.sort((a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      )[0]
+      if (latest.expectedReturn && new Date(latest.expectedReturn) < now) {
+        await db.students.update(student.id, { currentStatus: 'OVERDUE' })
+        count++
+      }
+    }
+    return count
+  }
+
+  async createCheckoutWithQuotaCheck(
+    studentId: string,
+    classId: string,
+    grade: string,
+    reason: string | null,
+    expectedReturn: string | null
+  ): Promise<QuotaCheckResult> {
+    // Check quota client-side in mock
+    const count = await this.getClassOutsideCount(classId)
+    const quota = (grade === 'אברכים' || grade === 'בוגרצים') ? 6 : 3
+    if (count >= quota) {
+      return { success: false, error: 'quota_exceeded', current: count, quota }
+    }
+    // Create checkout event
+    const event = await this.createEvent({
+      studentId,
+      type: 'CHECK_OUT',
+      reason,
+      expectedReturn,
+      gpsLat: null,
+      gpsLng: null,
+      gpsStatus: 'PENDING',
+      distanceFromCampus: null,
+    })
+    return { success: true, eventId: event.id }
   }
 }

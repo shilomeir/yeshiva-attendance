@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { format } from 'date-fns'
 import { he } from 'date-fns/locale'
-import { Check, X, Clock, User, AlertOctagon } from 'lucide-react'
+import { Check, X, Clock, User, AlertOctagon, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -68,6 +68,16 @@ export function PendingRequestsPage() {
     }
   }
 
+  const handleCancel = async (req: RequestWithStudent) => {
+    try {
+      await api.updateAbsenceRequestStatus(req.id, 'CANCELLED', 'בוטל ע"י מנהל')
+      toast({ title: 'הבקשה בוטלה' })
+      setRequests((prev) => prev.filter((r) => r.id !== req.id))
+    } catch {
+      toast({ title: 'שגיאה בביטול הבקשה', variant: 'destructive' })
+    }
+  }
+
   const urgentRequests = requests.filter((r) => r.isUrgent)
   const regularRequests = requests.filter((r) => !r.isUrgent)
 
@@ -121,6 +131,14 @@ export function PendingRequestsPage() {
               אישור
             </Button>
           </div>
+
+          <button
+            onClick={() => handleCancel(req)}
+            className="flex items-center gap-1 self-end rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-red-50 hover:text-[var(--red)] transition-colors dark:hover:bg-red-950/20"
+          >
+            <Trash2 className="h-3 w-3" />
+            ביטול בקשה
+          </button>
         </div>
       </CardContent>
     </Card>

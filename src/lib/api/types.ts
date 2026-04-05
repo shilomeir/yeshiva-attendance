@@ -13,6 +13,14 @@ import type {
   ClassStat,
 } from '@/types'
 
+export interface QuotaCheckResult {
+  success: boolean
+  eventId?: string
+  error?: 'quota_exceeded' | 'server_error'
+  current?: number
+  quota?: number
+}
+
 export interface GetStudentsOptions {
   filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
   search?: string
@@ -97,4 +105,12 @@ export interface IApiClient {
   getClassStats(): Promise<ClassStat[]>
   getClassOutsideCount(classId: string): Promise<number>
   cancelAbsenceRequest(id: string): Promise<void>
+  markOverdueStudents(): Promise<number>
+  createCheckoutWithQuotaCheck(
+    studentId: string,
+    classId: string,
+    grade: string,
+    reason: string | null,
+    expectedReturn: string | null
+  ): Promise<QuotaCheckResult>
 }

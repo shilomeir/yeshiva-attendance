@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Loader2, AlertTriangle, CalendarDays, Clock, AlertOctagon } from 'lucide-react'
+import { Loader2, AlertTriangle, CalendarDays, Clock, AlertOctagon, User } from 'lucide-react'
 import {
   Sheet,
   SheetContent,
@@ -16,11 +16,28 @@ import { scheduleReturn } from '@/lib/notifications/scheduleReturn'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { GRADE_LEVELS } from '@/lib/constants/grades'
+import type { Student } from '@/types'
+
+interface ClassmateInfo extends Student {
+  expectedReturn: string | null
+}
+
+function formatReturnLabel(iso: string | null): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  if (isToday) {
+    return d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })
+  }
+  return d.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' })
+}
 
 interface OffCampusSheetProps {
   open: boolean
   onClose: () => void
   onSuccess: () => void
+  onCheckoutSuccess?: () => void  // Called after successful checkout for undo buffer
 }
 
 type DepartureMode = 'today' | 'multiday'
@@ -38,7 +55,7 @@ function getQuotaForGrade(gradeName: string): number {
   return level.capacity >= 50 ? 6 : 3
 }
 
-export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps) {
+export function OffCampusSheet({ open, onClose, onSuccess, onCheckoutSuccess }: OffCampusSheetProps) {
   const { currentUser } = useAuthStore()
   const navigate = useNavigate()
 
@@ -49,13 +66,35 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [outsideCount, setOutsideCount] = useState<number | null>(null)
   const [quota, setQuota] = useState<number>(3)
+  const [classmatesOutside, setClassmatesOutside] = useState<ClassmateInfo[]>([])
 
-  // Check quota when sheet opens
+  // Fetch live quota counter when sheet opens
   useEffect(() => {
     if (!open || !currentUser) return
     const q = getQuotaForGrade(currentUser.grade)
     setQuota(q)
-    api.getClassOutsideCount(currentUser.classId).then(setOutsideCount).catch(() => setOutsideCount(null))
+    api.getClassOutsideCount(currentUser.classId)
+      .then((count) => {
+        setOutsideCount(count)
+        // If class is already full, pre-load classmates list with return times
+        if (count >= q) {
+          api.getStudents({ filter: 'OFF_CAMPUS', classId: currentUser.classId })
+            .then(async (students) => {
+              const withReturn: ClassmateInfo[] = await Promise.all(
+                students.map(async (s) => {
+                  const events = await api.getEvents(s.id)
+                  const lastCheckout = events
+                    .filter((e) => e.type === 'CHECK_OUT')
+                    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
+                  return { ...s, expectedReturn: lastCheckout?.expectedReturn ?? null }
+                })
+              )
+              setClassmatesOutside(withReturn)
+            })
+            .catch(() => setClassmatesOutside([]))
+        }
+      })
+      .catch(() => setOutsideCount(null))
   }, [open, currentUser])
 
   const isFull = outsideCount !== null && outsideCount >= quota
@@ -93,16 +132,41 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
         expectedReturn = d.toISOString()
       }
 
-      await api.createEvent({
-        studentId: currentUser.id,
-        type: 'CHECK_OUT',
-        reason: reason || null,
+      const result = await api.createCheckoutWithQuotaCheck(
+        currentUser.id,
+        currentUser.classId,
+        currentUser.grade,
+        reason || null,
         expectedReturn,
-        gpsLat: null,
-        gpsLng: null,
-        gpsStatus: 'PENDING',
-        distanceFromCampus: null,
-      })
+      )
+
+      if (!result.success) {
+        // Quota exceeded — show toast and load classmates list
+        const current = result.current ?? 0
+        const q = result.quota ?? quota
+        toast({
+          title: `הכיתה מלאה — ${current} מתוך ${q} מקומות תפוסים`,
+          variant: 'destructive',
+        })
+        setOutsideCount(current)
+        setQuota(q)
+        // Load classmates who are outside with return times
+        api.getStudents({ filter: 'OFF_CAMPUS', classId: currentUser.classId })
+          .then(async (students) => {
+            const withReturn: ClassmateInfo[] = await Promise.all(
+              students.map(async (s) => {
+                const events = await api.getEvents(s.id)
+                const lastCheckout = events
+                  .filter((e) => e.type === 'CHECK_OUT')
+                  .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
+                return { ...s, expectedReturn: lastCheckout?.expectedReturn ?? null }
+              })
+            )
+            setClassmatesOutside(withReturn)
+          })
+          .catch(() => setClassmatesOutside([]))
+        return
+      }
 
       if (expectedReturn) {
         await scheduleReturn(currentUser.fullName, expectedReturn)
@@ -118,6 +182,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       toast({ title: 'היציאה נרשמה בהצלחה', description, variant: 'default' })
       resetForm()
       onSuccess()
+      onCheckoutSuccess?.()
       onClose()
     } catch (error) {
       console.error('Failed to record departure:', error)
@@ -133,6 +198,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
     setReturnTime('')
     setReturnDate('')
     setOutsideCount(null)
+    setClassmatesOutside([])
   }
 
   const handleClose = () => {
@@ -149,10 +215,20 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
   return (
     <Sheet open={open} onOpenChange={handleClose}>
       <SheetContent side="bottom" className="rounded-t-2xl pb-8">
-        <SheetHeader className="mb-6">
+        <SheetHeader className="mb-4">
           <SheetTitle>יציאה מהישיבה</SheetTitle>
           <SheetDescription>בחר את סוג היציאה</SheetDescription>
         </SheetHeader>
+
+        {/* Live quota counter */}
+        {outsideCount !== null && !isFull && (
+          <div className="mb-4 flex items-center justify-between rounded-lg bg-[var(--bg-2)] px-3 py-2 text-sm">
+            <span className="text-[var(--text-muted)]">מקומות תפוסים</span>
+            <span className="font-semibold text-[var(--text)]">
+              {outsideCount} מתוך {quota}
+            </span>
+          </div>
+        )}
 
         {/* Class full banner */}
         {isFull && (
@@ -162,10 +238,34 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
               <div>
                 <p className="font-bold text-[var(--red)]">אוי אוי אוי... נגמר המקום</p>
                 <p className="mt-0.5 text-sm text-[var(--red)]">
-                  הכיתה מלאה — {outsideCount} מתוך {quota} חריגים כבר יצאו
+                  הכיתה מלאה — {outsideCount} מתוך {quota} מקומות תפוסים
                 </p>
               </div>
             </div>
+
+            {/* List of classmates currently outside */}
+            {classmatesOutside.length > 0 && (
+              <div className="flex flex-col gap-1.5 rounded-lg bg-red-100/60 px-3 py-2 dark:bg-red-900/20">
+                {classmatesOutside.map((s) => {
+                  const returnLabel = formatReturnLabel(s.expectedReturn)
+                  return (
+                    <div key={s.id} className="flex items-center justify-between gap-2 text-sm text-[var(--red)]">
+                      <div className="flex items-center gap-2">
+                        <User className="h-3.5 w-3.5 shrink-0" />
+                        <span>{s.fullName}</span>
+                      </div>
+                      {returnLabel && (
+                        <span className="flex items-center gap-1 text-xs opacity-75">
+                          <Clock className="h-3 w-3" />
+                          {returnLabel}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
             <Button
               type="button"
               size="sm"

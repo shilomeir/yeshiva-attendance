@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, User, Shield } from 'lucide-react'
+import { User, Shield } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 import { formatDateTimeHebrew } from '@/lib/utils/formatTime'
 import type { AdminOverride, Student } from '@/types'
 
@@ -10,6 +10,37 @@ const PAGE_SIZE = 20
 
 interface OverrideWithStudent extends AdminOverride {
   student: Student | undefined
+}
+
+function translateStatus(status: string): string {
+  switch (status) {
+    case 'ON_CAMPUS': return 'בישיבה'
+    case 'OFF_CAMPUS': return 'מחוץ לישיבה'
+    case 'OVERDUE': return 'באיחור'
+    case 'PENDING': return 'ממתין'
+    default: return status
+  }
+}
+
+function describeAction(override: OverrideWithStudent): string {
+  const student = override.student?.fullName ?? 'לא ידוע'
+
+  switch (override.action) {
+    case 'approve_absence_request':
+      return `אושרה בקשת היעדרות של ${student}${override.note ? ` — ${override.note}` : ''}`
+    case 'reject_absence_request':
+      return `נדחתה בקשת היעדרות של ${student}${override.note ? ` — ${override.note}` : ''}`
+    case 'cancel_absence_request':
+      return `בוטלה בקשת היעדרות של ${student}${override.note ? ` — ${override.note}` : ''}`
+    case 'STATUS_OVERRIDE':
+    case 'manual_override': {
+      const from = translateStatus(override.previousStatus)
+      const to = translateStatus(override.newStatus)
+      return `עדכון ידני: ${student} שונה מ"${from}" ל"${to}"${override.note ? ` — ${override.note}` : ''}`
+    }
+    default:
+      return `${override.action}${override.note ? ` — ${override.note}` : ''}`
+  }
 }
 
 export function AuditLogPanel() {
@@ -40,6 +71,19 @@ export function AuditLogPanel() {
     loadData()
   }, [page])
 
+  // Realtime subscription — reload whenever admin_overrides changes
+  useEffect(() => {
+    const channel = supabase
+      .channel('audit-log-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_overrides' }, () => {
+        loadData()
+      })
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   return (
@@ -57,10 +101,9 @@ export function AuditLogPanel() {
             <table className="w-full text-sm">
               <thead className="bg-[var(--bg-2)]">
                 <tr>
-                  <th className="py-3 ps-4 text-start font-medium text-[var(--text-muted)]">תלמיד</th>
-                  <th className="py-3 text-start font-medium text-[var(--text-muted)]">שינוי</th>
-                  <th className="py-3 text-start font-medium text-[var(--text-muted)]">זמן</th>
-                  <th className="py-3 pe-4 text-start font-medium text-[var(--text-muted)]">הערה</th>
+                  <th className="py-3 ps-4 text-start font-medium text-[var(--text-muted)] w-[140px]">תלמיד</th>
+                  <th className="py-3 px-3 text-start font-medium text-[var(--text-muted)]">תיאור</th>
+                  <th className="py-3 pe-4 text-start font-medium text-[var(--text-muted)] whitespace-nowrap w-[130px]">זמן</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border)] bg-[var(--surface)]">
@@ -71,23 +114,16 @@ export function AuditLogPanel() {
                         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--bg-2)]">
                           <User className="h-3.5 w-3.5 text-[var(--text-muted)]" />
                         </div>
-                        <span className="font-medium text-[var(--text)] truncate max-w-[120px]">
+                        <span className="font-medium text-[var(--text)] truncate max-w-[100px]">
                           {override.student?.fullName ?? 'לא ידוע'}
                         </span>
                       </div>
                     </td>
-                    <td className="py-3">
-                      <div className="flex items-center gap-1.5">
-                        <StatusBadge status={override.previousStatus} />
-                        <ArrowRight className="h-3.5 w-3.5 text-[var(--text-muted)]" />
-                        <StatusBadge status={override.newStatus} />
-                      </div>
+                    <td className="py-3 px-3 text-[var(--text-muted)]">
+                      {describeAction(override)}
                     </td>
-                    <td className="py-3 text-[var(--text-muted)] whitespace-nowrap">
+                    <td className="py-3 pe-4 text-[var(--text-muted)] whitespace-nowrap">
                       {formatDateTimeHebrew(override.timestamp)}
-                    </td>
-                    <td className="py-3 pe-4 text-[var(--text-muted)] max-w-[150px] truncate">
-                      {override.note ?? '—'}
                     </td>
                   </tr>
                 ))}

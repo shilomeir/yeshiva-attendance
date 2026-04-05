@@ -1,10 +1,12 @@
 import { v4 as uuidv4 } from 'uuid'
 import { supabase } from '@/lib/supabase'
+import { db } from '@/lib/db/schema'
+import { notifyQueueChanged } from '@/lib/sync/syncEngine'
 import type {
   Student, Event, SmsEvent, AdminOverride, AbsenceRequest, RecurringAbsence,
   StudentStatus, DashboardStats, DailyPresenceData, ReasonData, HourlyData, ClassStat,
 } from '@/types'
-import type { IApiClient, GetStudentsOptions, CreateEventPayload, CreateAbsenceRequestPayload } from './types'
+import type { IApiClient, GetStudentsOptions, CreateEventPayload, CreateAbsenceRequestPayload, QuotaCheckResult } from './types'
 
 export class SupabaseApiClient implements IApiClient {
   async getStudents(options?: GetStudentsOptions): Promise<Student[]> {
@@ -54,22 +56,41 @@ export class SupabaseApiClient implements IApiClient {
 
   async createEvent(payload: CreateEventPayload): Promise<Event> {
     const now = new Date().toISOString()
-    const event = {
+    const event: Event = {
       id: uuidv4(), studentId: payload.studentId, type: payload.type, timestamp: now,
       reason: payload.reason ?? null, expectedReturn: payload.expectedReturn ?? null,
       gpsLat: payload.gpsLat ?? null, gpsLng: payload.gpsLng ?? null, gpsStatus: payload.gpsStatus ?? 'PENDING',
-      distanceFromCampus: payload.distanceFromCampus ?? null, note: payload.note ?? null, syncedAt: now,
+      distanceFromCampus: payload.distanceFromCampus ?? null, note: payload.note ?? null, syncedAt: null,
     }
-    const { data, error } = await supabase.from('events').insert(event).select().single()
+
+    const newStatus: StudentStatus = payload.type === 'CHECK_IN' ? 'ON_CAMPUS' : 'OFF_CAMPUS'
+    const locationUpdate = payload.gpsLat && payload.gpsLng
+      ? { lastLocation: { lat: payload.gpsLat, lng: payload.gpsLng } }
+      : {}
+
+    if (!navigator.onLine) {
+      // Offline path — persist locally and queue for sync when back online
+      await db.events.put(event)
+      await db.students.update(payload.studentId, { currentStatus: newStatus, lastSeen: now, ...locationUpdate })
+      await db.syncQueue.add({
+        id: uuidv4(), tableName: 'events', operation: 'INSERT',
+        payload: event as unknown as Record<string, unknown>,
+        clientTimestamp: now, retryCount: 0,
+      })
+      await db.syncQueue.add({
+        id: uuidv4(), tableName: 'students', operation: 'UPDATE',
+        payload: { id: payload.studentId, currentStatus: newStatus, lastSeen: now, ...locationUpdate } as Record<string, unknown>,
+        clientTimestamp: now, retryCount: 0,
+      })
+      await notifyQueueChanged()
+      return event
+    }
+
+    // Online path — write directly to Supabase
+    const { data, error } = await supabase.from('events').insert({ ...event, syncedAt: now }).select().single()
     if (error) throw error
 
-    // Update student's last known location and lastSeen timestamp
-    const studentUpdate: Record<string, unknown> = { lastSeen: now }
-    if (payload.type === 'CHECK_IN') studentUpdate.currentStatus = 'ON_CAMPUS'
-    if (payload.type === 'CHECK_OUT') studentUpdate.currentStatus = 'OFF_CAMPUS'
-    if (payload.gpsLat && payload.gpsLng) {
-      studentUpdate.lastLocation = { lat: payload.gpsLat, lng: payload.gpsLng }
-    }
+    const studentUpdate: Record<string, unknown> = { lastSeen: now, currentStatus: newStatus, ...locationUpdate }
     await supabase.from('students').update(studentUpdate).eq('id', payload.studentId)
 
     return data as Event
@@ -149,18 +170,23 @@ export class SupabaseApiClient implements IApiClient {
     const { error } = await supabase.from('absence_requests').update({ status, adminNote: adminNote ?? null }).eq('id', id)
     if (error) throw error
 
-    // Create audit record for approve/reject actions
-    if ((status === 'APPROVED' || status === 'REJECTED') && req) {
+    // Create audit record for approve / reject / cancel actions
+    if ((status === 'APPROVED' || status === 'REJECTED' || status === 'CANCELLED') && req) {
       const student = await this.getStudent(req.studentId)
       const currentStatus = student?.currentStatus ?? 'ON_CAMPUS'
       const auditNote = adminNote
         ? adminNote
-        : status === 'APPROVED' ? 'בקשת היעדרות אושרה' : 'בקשת היעדרות נדחתה'
+        : status === 'APPROVED' ? 'בקשת היעדרות אושרה'
+        : status === 'REJECTED' ? 'בקשת היעדרות נדחתה'
+        : 'בקשת היעדרות בוטלה ע"י מנהל'
+      const action = status === 'APPROVED' ? 'approve_absence_request'
+        : status === 'REJECTED' ? 'reject_absence_request'
+        : 'cancel_absence_request'
       await supabase.from('admin_overrides').insert({
         id: uuidv4(),
         studentId: req.studentId,
         adminId: 'admin',
-        action: status === 'APPROVED' ? 'approve_absence_request' : 'reject_absence_request',
+        action,
         previousStatus: currentStatus,
         newStatus: currentStatus,
         timestamp: new Date().toISOString(),
@@ -299,5 +325,29 @@ export class SupabaseApiClient implements IApiClient {
   async cancelAbsenceRequest(id: string): Promise<void> {
     const { error } = await supabase.from('absence_requests').update({ status: 'CANCELLED' }).eq('id', id)
     if (error) throw error
+  }
+
+  async markOverdueStudents(): Promise<number> {
+    const { data, error } = await supabase.rpc('mark_overdue_students')
+    if (error) throw error
+    return (data as number) ?? 0
+  }
+
+  async createCheckoutWithQuotaCheck(
+    studentId: string,
+    classId: string,
+    grade: string,
+    reason: string | null,
+    expectedReturn: string | null
+  ): Promise<QuotaCheckResult> {
+    const { data, error } = await supabase.rpc('create_checkout_with_quota_check', {
+      p_student_id: studentId,
+      p_class_id: classId,
+      p_grade: grade,
+      p_reason: reason,
+      p_expected_return: expectedReturn,
+    })
+    if (error) throw error
+    return data as QuotaCheckResult
   }
 }

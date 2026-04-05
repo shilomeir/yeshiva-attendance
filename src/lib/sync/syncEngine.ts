@@ -13,10 +13,16 @@ export function addSyncListener(listener: SyncListener): () => void {
   }
 }
 
-function notifyListeners(isSyncing: boolean, queueLength: number): void {
+function notifyListeners(syncing: boolean, queueLength: number): void {
   for (const listener of listeners) {
-    listener({ isSyncing, queueLength })
+    listener({ isSyncing: syncing, queueLength })
   }
+}
+
+/** Call after manually adding items to the sync queue to refresh the status bar. */
+export async function notifyQueueChanged(): Promise<void> {
+  const len = await getQueueLength()
+  notifyListeners(isSyncing, len)
 }
 
 export async function processQueue(): Promise<void> {
@@ -30,41 +36,37 @@ export async function processQueue(): Promise<void> {
   notifyListeners(true, queueItems.length)
 
   try {
-    // Simulate processing each item
-    for (const item of queueItems) {
-      // Simulate network delay
-      await new Promise((resolve) => setTimeout(resolve, 50))
+    // Dynamic import to avoid circular dependency
+    const { supabase } = await import('@/lib/supabase')
 
-      // Mark as synced based on table
-      if (item.tableName === 'events') {
-        const payload = item.payload as { id: string; syncedAt: string | null }
-        if (payload.id) {
-          await db.events.update(payload.id, {
-            syncedAt: new Date().toISOString(),
-          })
+    for (const item of queueItems) {
+      try {
+        if (item.operation === 'INSERT') {
+          const { error } = await supabase.from(item.tableName).insert(item.payload)
+          if (error) throw error
+        } else if (item.operation === 'UPDATE') {
+          const { id, ...rest } = item.payload as { id: string } & Record<string, unknown>
+          const { error } = await supabase.from(item.tableName).update(rest).eq('id', String(id))
+          if (error) throw error
         }
+
+        // Remove processed item from queue
+        await db.syncQueue.delete(item.id)
+
+        // Mark local event as synced when the event row was pushed
+        if (item.tableName === 'events' && item.operation === 'INSERT') {
+          const eventId = (item.payload as { id: string }).id
+          await db.events.update(eventId, { syncedAt: new Date().toISOString() })
+        }
+      } catch {
+        // Leave item in queue and increment retry counter
+        await db.syncQueue.update(item.id, { retryCount: item.retryCount + 1 })
       }
-
-      // Remove from queue
-      await db.syncQueue.delete(item.id)
     }
-
-    notifyListeners(false, 0)
-    console.log(`[SyncEngine] Synced ${queueItems.length} items`)
-  } catch (error) {
-    console.error('[SyncEngine] Sync failed:', error)
-
-    // Increment retry counts
-    for (const item of queueItems) {
-      await db.syncQueue.update(item.id, {
-        retryCount: item.retryCount + 1,
-      })
-    }
-
-    const remaining = await db.syncQueue.count()
-    notifyListeners(false, remaining)
   } finally {
     isSyncing = false
+    const remaining = await db.syncQueue.count()
+    notifyListeners(false, remaining)
   }
 }
 
@@ -73,21 +75,19 @@ export async function getQueueLength(): Promise<number> {
 }
 
 export function initSync(): void {
-  // Trigger 1: Online event
+  // Trigger 1: Back online
   window.addEventListener('online', () => {
-    console.log('[SyncEngine] Back online, processing queue')
     processQueue()
   })
 
-  // Trigger 2: Visibility change (app comes back to foreground)
+  // Trigger 2: App comes back to foreground
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
-      console.log('[SyncEngine] App visible, processing queue')
       processQueue()
     }
   })
 
-  // Initial sync attempt on app start
+  // Initial attempt on app start
   processQueue()
 
   // Periodic sync every 30 seconds
