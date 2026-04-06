@@ -121,8 +121,9 @@ export function OffCampusSheet({ open, onClose, onSuccess, onCheckoutSuccess }: 
         d.setHours(h, m, 0, 0)
         expectedReturn = d.toISOString()
       } else if (mode === 'multiday' && returnDate) {
-        const [year, month, day] = returnDate.split('-').map(Number)
-        const d = new Date(year, month - 1, day)
+        // Use noon (12:00) as the base time so the UTC conversion never crosses
+        // to the previous day (Israel is UTC+3, midnight local = 21:00 previous day UTC)
+        const d = new Date(`${returnDate}T12:00:00`)
         if (returnTime) {
           const [h, m] = returnTime.split(':').map(Number)
           d.setHours(h, m, 0, 0)

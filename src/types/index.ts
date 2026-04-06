@@ -18,6 +18,7 @@ export interface Student {
   idNumber: string
   phone: string
   deviceToken: string | null
+  push_token: string | null  // JSON-serialized Web Push PushSubscription
   currentStatus: StudentStatus
   lastSeen: string | null // ISO date string
   lastLocation: { lat: number; lng: number } | null

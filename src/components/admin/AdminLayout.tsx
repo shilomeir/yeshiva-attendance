@@ -11,6 +11,7 @@ import {
   X,
   MapPin,
   ClipboardList,
+  AlertOctagon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
@@ -24,6 +25,7 @@ const NAV_ITEMS = [
   { to: '/admin/students', icon: Users, label: 'תלמידים' },
   { to: '/admin/rollcall', icon: MapPin, label: 'ביקורת פנימית' },
   { to: '/admin/calendar', icon: Calendar, label: 'לוח שנה' },
+  { to: '/admin/exceptions', icon: AlertOctagon, label: 'חריגות עכשיו' },
   { to: '/admin/requests', icon: ClipboardList, label: 'בקשות ממתינות' },
   { to: '/admin/audit', icon: FileText, label: 'לוג ביקורת' },
   { to: '/admin/sms', icon: MessageSquare, label: 'SMS' },

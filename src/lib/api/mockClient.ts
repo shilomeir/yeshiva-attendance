@@ -85,6 +85,10 @@ export class MockApiClient implements IApiClient {
     })
   }
 
+  async updatePushToken(id: string, token: string | null): Promise<void> {
+    await db.students.update(id, { push_token: token })
+  }
+
   async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
     const student: Student = {
       id: uuidv4(),
@@ -92,6 +96,7 @@ export class MockApiClient implements IApiClient {
       idNumber: data.idNumber,
       phone: data.phone,
       deviceToken: null,
+      push_token: null,
       currentStatus: 'ON_CAMPUS',
       lastSeen: new Date().toISOString(),
       lastLocation: null,

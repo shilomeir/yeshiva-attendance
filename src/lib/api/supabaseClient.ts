@@ -111,6 +111,14 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
   }
 
+  async updatePushToken(id: string, token: string | null): Promise<void> {
+    const { error } = await supabase
+      .from('students')
+      .update({ push_token: token })
+      .eq('id', id)
+    if (error) throw error
+  }
+
   async getRecentEvents(limit = 50): Promise<Event[]> {
     const { data, error } = await supabase.from('events').select('*').order('timestamp', { ascending: false }).limit(limit)
     if (error) throw error
@@ -168,6 +176,29 @@ export class SupabaseApiClient implements IApiClient {
 
     const { error } = await supabase.from('absence_requests').update({ status, adminNote: adminNote ?? null }).eq('id', id)
     if (error) throw error
+
+    // Send push notification when request is approved
+    if (status === 'APPROVED' && req) {
+      try {
+        const { data: studentData } = await supabase
+          .from('students')
+          .select('push_token')
+          .eq('id', req.studentId)
+          .single()
+        if (studentData?.push_token) {
+          await supabase.functions.invoke('send-push', {
+            body: {
+              subscription: studentData.push_token,
+              title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
+              body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
+            },
+          })
+        }
+      } catch (pushErr) {
+        // Non-fatal — approval already succeeded
+        console.warn('[Push] Failed to send approval notification:', pushErr)
+      }
+    }
 
     // Create audit record for approve / reject / cancel actions
     if ((status === 'APPROVED' || status === 'REJECTED' || status === 'CANCELLED') && req) {

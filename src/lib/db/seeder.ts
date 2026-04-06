@@ -269,6 +269,7 @@ export async function seedDatabase(): Promise<void> {
                 lng: 35.1056 + (Math.random() - 0.5) * 0.02,
               }
             : null,
+        push_token: null,
         pendingApproval: Math.random() < 0.05,
         createdAt: randomDateInPast(365),
         grade: slot.grade,

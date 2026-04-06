@@ -5,6 +5,7 @@ import { parseClassSupervisorSuffix, type ClassSupervisorInfo } from '@/lib/auth
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { registerPushNotifications } from '@/lib/native/pushNotifications'
+import { unsubscribeFromPush } from '@/lib/pwa/webPush'
 import type { Student } from '@/types'
 
 interface AuthState {
@@ -25,7 +26,7 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       currentUser: null,
       isAdmin: false,
       classSupervisor: null,
@@ -98,6 +99,13 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: () => {
+        const { currentUser } = get()
+        if (currentUser?.id) {
+          // Clear push token from Supabase (fire-and-forget — logout must stay synchronous)
+          supabase.from('students').update({ push_token: null }).eq('id', currentUser.id).then(() => {})
+          // Unsubscribe this device from Web Push
+          unsubscribeFromPush().catch(() => {})
+        }
         set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null })
       },
 

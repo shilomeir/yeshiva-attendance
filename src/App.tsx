@@ -54,6 +54,18 @@ export default function App() {
     return cleanup
   }, [subscribeToRealtime])
 
+  // Clear app badge whenever the app becomes visible
+  useEffect(() => {
+    const clearBadge = () => {
+      if (!document.hidden && 'clearAppBadge' in navigator) {
+        ;(navigator as Navigator & { clearAppBadge(): Promise<void> }).clearAppBadge().catch(() => {})
+      }
+    }
+    clearBadge()
+    document.addEventListener('visibilitychange', clearBadge)
+    return () => document.removeEventListener('visibilitychange', clearBadge)
+  }, [])
+
   return (
     <>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
