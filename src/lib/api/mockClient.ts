@@ -33,11 +33,9 @@ export class MockApiClient implements IApiClient {
     let students = await db.students.orderBy('fullName').toArray()
 
     if (filter === 'OFF_CAMPUS') {
-      students = students.filter((s) => s.currentStatus === 'OFF_CAMPUS')
+      students = students.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
     } else if (filter === 'PENDING') {
       students = students.filter((s) => s.pendingApproval)
-    } else if (filter === 'OVERDUE') {
-      students = students.filter((s) => s.currentStatus === 'OVERDUE')
     }
 
     if (grade) {
@@ -350,8 +348,7 @@ export class MockApiClient implements IApiClient {
     const students = await db.students.toArray()
     const total = students.length
     const onCampus = students.filter((s) => s.currentStatus === 'ON_CAMPUS').length
-    const offCampus = students.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
-    const overdue = students.filter((s) => s.currentStatus === 'OVERDUE').length
+    const offCampus = students.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
     const pending = students.filter((s) => s.pendingApproval).length
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - 7)
@@ -360,7 +357,7 @@ export class MockApiClient implements IApiClient {
       (s) => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen !== null && s.lastSeen < cutoffISO
     ).length
 
-    return { total, onCampus, offCampus, overdue, pending, longAbsent }
+    return { total, onCampus, offCampus, pending, longAbsent }
   }
 
   async getDailyPresence(days: number = 7): Promise<DailyPresenceData[]> {
@@ -448,8 +445,7 @@ export class MockApiClient implements IApiClient {
       const total = classStudents.length
       const onCampus = classStudents.filter((s) => s.currentStatus === 'ON_CAMPUS').length
       const offCampus = classStudents.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
-      const overdue = classStudents.filter((s) => s.currentStatus === 'OVERDUE').length
-      stats.push({ grade, classId, total, onCampus, offCampus, overdue })
+      stats.push({ grade, classId, total, onCampus, offCampus })
     }
 
     // Sort by grade name then classId
@@ -482,6 +478,25 @@ export class MockApiClient implements IApiClient {
 
   async cancelAbsenceRequest(id: string): Promise<void> {
     await db.absenceRequests.update(id, { status: 'CANCELLED' as const })
+  }
+
+  async autoReturnStudents(): Promise<number> {
+    const now = new Date().toISOString()
+    const offCampus = await db.students
+      .filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
+      .toArray()
+    let count = 0
+    for (const student of offCampus) {
+      const events = await db.events.where('studentId').equals(student.id).toArray()
+      const lastCheckout = events
+        .filter((e) => e.type === 'CHECK_OUT' && e.expectedReturn)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
+      if (lastCheckout?.expectedReturn && lastCheckout.expectedReturn < now) {
+        await db.students.update(student.id, { currentStatus: 'ON_CAMPUS', lastSeen: now })
+        count++
+      }
+    }
+    return count
   }
 
   async markOverdueStudents(): Promise<number> {
