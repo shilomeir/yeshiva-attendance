@@ -15,6 +15,8 @@ import { SmsPage } from '@/pages/admin/SmsPage'
 import { SettingsPage } from '@/pages/admin/SettingsPage'
 import { RollCallPage } from '@/pages/admin/RollCallPage'
 import { PendingRequestsPage } from '@/pages/admin/PendingRequestsPage'
+import { ExceptionsPage } from '@/pages/admin/ExceptionsPage'
+import { ClassSupervisorDashboard } from '@/pages/class-supervisor/ClassSupervisorDashboard'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
@@ -28,6 +30,12 @@ function StudentGuard({ children }: { children: React.ReactNode }) {
 function AdminGuard({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuthStore()
   if (!isAdmin) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+function ClassSupervisorGuard({ children }: { children: React.ReactNode }) {
+  const { classSupervisor } = useAuthStore()
+  if (!classSupervisor) return <Navigate to="/login" replace />
   return <>{children}</>
 }
 
@@ -48,7 +56,6 @@ export default function App() {
 
   return (
     <>
-      {/* Splash screen overlays everything on first load */}
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
       <Routes>
@@ -86,7 +93,18 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="rollcall" element={<RollCallPage />} />
           <Route path="requests" element={<PendingRequestsPage />} />
+          <Route path="exceptions" element={<ExceptionsPage />} />
         </Route>
+
+        {/* Class supervisor route */}
+        <Route
+          path="/class-supervisor"
+          element={
+            <ClassSupervisorGuard>
+              <ClassSupervisorDashboard />
+            </ClassSupervisorGuard>
+          }
+        />
 
         {/* Default redirect */}
         <Route path="/" element={<Navigate to="/login" replace />} />

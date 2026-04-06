@@ -125,41 +125,28 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
           className={cn(
             'relative flex h-44 w-44 flex-col items-center justify-center gap-3 rounded-full border-[3px] transition-all active:scale-[0.95] shadow-lg',
             isOffCampus
-              ? currentStatus === 'OVERDUE'
-                ? 'border-[var(--red)] bg-red-50 dark:bg-red-950/20'
-                : 'border-[var(--orange)] bg-orange-50 dark:bg-orange-950/20'
+              ? 'border-[var(--orange)] bg-orange-50 dark:bg-orange-950/20'
               : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--orange)] hover:bg-orange-50/50 cursor-pointer hover:shadow-xl'
           )}
         >
           <LogOut
             className={cn(
               'h-14 w-14 transition-colors',
-              isOffCampus
-                ? currentStatus === 'OVERDUE'
-                  ? 'text-[var(--red)]'
-                  : 'text-[var(--orange)]'
-                : 'text-[var(--text-muted)]'
+              isOffCampus ? 'text-[var(--orange)]' : 'text-[var(--text-muted)]'
             )}
           />
           <div className="text-center">
             <p
               className={cn(
                 'text-xl font-bold',
-                isOffCampus
-                  ? currentStatus === 'OVERDUE'
-                    ? 'text-[var(--red)]'
-                    : 'text-[var(--orange)]'
-                  : 'text-[var(--text)]'
+                isOffCampus ? 'text-[var(--orange)]' : 'text-[var(--text)]'
               )}
             >
-              {currentStatus === 'OVERDUE' ? 'באיחור!' : 'מחוץ לישיבה'}
+              מחוץ לישיבה
             </p>
             {isOffCampus && (
               <p
-                className={cn(
-                  'mt-0.5 text-xs',
-                  currentStatus === 'OVERDUE' ? 'text-[var(--red)]' : 'text-[var(--orange)]'
-                )}
+                className="mt-0.5 text-xs text-[var(--orange)]"
               >
                 {currentStatus === 'OVERDUE' ? 'עברת את זמן החזרה!' : 'סטטוס נוכחי'}
               </p>

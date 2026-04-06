@@ -1,3 +1,4 @@
+// OVERDUE kept for DB backward-compat only — treated as OFF_CAMPUS everywhere in UI
 export type StudentStatus = 'ON_CAMPUS' | 'OFF_CAMPUS' | 'OVERDUE' | 'PENDING'
 
 export type GPSStatus = 'GRANTED' | 'DENIED_BY_USER' | 'UNAVAILABLE' | 'PENDING'
@@ -100,8 +101,7 @@ export interface AbsenceRequest {
 export interface DashboardStats {
   total: number
   onCampus: number
-  offCampus: number
-  overdue: number
+  offCampus: number  // includes OVERDUE (treated as off-campus)
   pending: number
   longAbsent: number // students not on campus for 7+ days
 }
@@ -111,8 +111,7 @@ export interface ClassStat {
   classId: string
   total: number
   onCampus: number
-  offCampus: number
-  overdue: number
+  offCampus: number  // includes OVERDUE
 }
 
 export interface DailyPresenceData {

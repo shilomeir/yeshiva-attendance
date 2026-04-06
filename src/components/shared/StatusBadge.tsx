@@ -9,7 +9,7 @@ interface StatusBadgeProps {
 const STATUS_CONFIG: Record<StudentStatus, { label: string; variant: 'success' | 'warning' | 'danger' | 'secondary' }> = {
   ON_CAMPUS: { label: 'בישיבה', variant: 'success' },
   OFF_CAMPUS: { label: 'מחוץ לישיבה', variant: 'warning' },
-  OVERDUE: { label: 'באיחור', variant: 'danger' },
+  OVERDUE: { label: 'מחוץ לישיבה', variant: 'warning' },  // treated same as OFF_CAMPUS
   PENDING: { label: 'ממתין', variant: 'secondary' },
 }
 

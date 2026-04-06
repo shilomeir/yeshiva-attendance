@@ -25,7 +25,6 @@ import type { Student, StudentStatus } from '@/types'
 const STATUS_OPTIONS: { value: StudentStatus; label: string }[] = [
   { value: 'ON_CAMPUS', label: 'בישיבה' },
   { value: 'OFF_CAMPUS', label: 'מחוץ לישיבה' },
-  { value: 'OVERDUE', label: 'באיחור' },
 ]
 
 interface StatusOverrideModalProps {

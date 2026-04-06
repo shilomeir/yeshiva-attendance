@@ -39,11 +39,9 @@ function applyFilter(
   let result = students
 
   if (filter === 'OFF_CAMPUS') {
-    result = result.filter((s) => s.currentStatus === 'OFF_CAMPUS')
+    result = result.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
   } else if (filter === 'PENDING') {
     result = result.filter((s) => s.pendingApproval)
-  } else if (filter === 'OVERDUE') {
-    result = result.filter((s) => s.currentStatus === 'OVERDUE')
   }
 
   if (grade) {

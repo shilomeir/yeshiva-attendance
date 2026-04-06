@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import {
-  Users, UserCheck, UserX, AlertTriangle, CalendarOff, Phone,
-  AlertOctagon, CheckCircle2, XCircle,
+  Users, UserCheck, UserX, CalendarOff, Phone,
+  AlertOctagon, CheckCircle2, XCircle, MapPin,
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -12,13 +12,34 @@ import { PresenceChart } from '@/components/analytics/PresenceChart'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { GRADE_LEVELS } from '@/lib/constants/grades'
+import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import type { DashboardStats, Student, AbsenceRequest, ClassStat } from '@/types'
 
+// ── location helpers ────────────────────────────────────────────────────────
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000
+  const dLat = ((lat2 - lat1) * Math.PI) / 180
+  const dLng = ((lng2 - lng1) * Math.PI) / 180
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+function getLocationCategory(student: Student): 'inYeshiva' | 'inArea' | 'far' {
+  if (student.currentStatus === 'ON_CAMPUS') return 'inYeshiva'
+  if (student.lastLocation) {
+    const dist = haversineDistance(CAMPUS_LAT, CAMPUS_LNG, student.lastLocation.lat, student.lastLocation.lng)
+    if (dist <= AREA_RADIUS_METERS) return 'inArea'
+  }
+  return 'far'
+}
+
+// ── stat cards config ───────────────────────────────────────────────────────
 const STAT_CARDS = [
-  { key: 'total' as const, label: 'סה"כ תלמידים', icon: Users, color: 'text-[var(--blue)]', bg: 'bg-blue-50 dark:bg-blue-950/20' },
-  { key: 'onCampus' as const, label: 'בישיבה', icon: UserCheck, color: 'text-[var(--green)]', bg: 'bg-green-50 dark:bg-green-950/20' },
-  { key: 'offCampus' as const, label: 'מחוץ לישיבה', icon: UserX, color: 'text-[var(--orange)]', bg: 'bg-orange-50 dark:bg-orange-950/20' },
-  { key: 'overdue' as const, label: 'באיחור', icon: AlertTriangle, color: 'text-[var(--red)]', bg: 'bg-red-50 dark:bg-red-950/20' },
+  { key: 'total' as const,     label: 'סה"כ תלמידים',    icon: Users,      color: 'text-[var(--blue)]',   bg: 'bg-blue-50 dark:bg-blue-950/20' },
+  { key: 'onCampus' as const,  label: 'בישיבה',           icon: UserCheck,  color: 'text-[var(--green)]',  bg: 'bg-green-50 dark:bg-green-950/20' },
+  { key: 'offCampus' as const, label: 'מחוץ לישיבה',     icon: UserX,      color: 'text-[var(--orange)]', bg: 'bg-orange-50 dark:bg-orange-950/20' },
 ]
 
 type UrgentWithStudent = AbsenceRequest & { studentName: string; studentClass: string }
@@ -28,45 +49,32 @@ export function DashboardPage() {
   const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
   const [urgentRequests, setUrgentRequests] = useState<UrgentWithStudent[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
-  const [offCampusBreakdown, setOffCampusBreakdown] = useState({ withApproval: 0, withUrgent: 0, noApproval: 0 })
+  const [locationBreakdown, setLocationBreakdown] = useState({ inYeshiva: 0, inArea: 0, far: 0 })
   const [isLoading, setIsLoading] = useState(true)
 
   const loadData = async () => {
     setIsLoading(true)
-    // Silently transition any overdue students before refreshing stats
-    api.markOverdueStudents().catch(() => {})
+    // Auto-return students whose expected return time has passed
+    api.autoReturnStudents().catch(() => {})
     try {
-      const [data, absent, urgent, clsStats, allStudents, approvedRequests] = await Promise.all([
+      const [data, absent, urgent, clsStats, allStudents] = await Promise.all([
         api.getDashboardStats(),
         api.getLongAbsentStudents(7),
         api.getUrgentRequests(),
         api.getClassStats(),
         api.getStudents(),
-        api.getAbsenceRequests({ status: 'APPROVED' }),
       ])
       setStats(data)
       setLongAbsentStudents(absent)
       setClassStats(clsStats)
 
-      // Calculate off-campus breakdown
-      const todayStr = new Date().toISOString().split('T')[0]
-      const outsideStudents = allStudents.filter(
-        (s: Student) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE'
-      )
-      const validApproved = approvedRequests.filter(
-        (r: AbsenceRequest) => r.date <= todayStr && (!r.endDate || r.endDate >= todayStr)
-      )
-      const approvedSet = new Set(validApproved.map((r: AbsenceRequest) => r.studentId))
-      const urgentSet = new Set(
-        validApproved.filter((r: AbsenceRequest) => r.isUrgent).map((r: AbsenceRequest) => r.studentId)
-      )
-      setOffCampusBreakdown({
-        withApproval: outsideStudents.filter((s: Student) => approvedSet.has(s.id) && !urgentSet.has(s.id)).length,
-        withUrgent: outsideStudents.filter((s: Student) => urgentSet.has(s.id)).length,
-        noApproval: outsideStudents.filter((s: Student) => !approvedSet.has(s.id)).length,
-      })
+      // Compute location-based breakdown for pie chart
+      const breakdown = { inYeshiva: 0, inArea: 0, far: 0 }
+      for (const s of allStudents as Student[]) {
+        breakdown[getLocationCategory(s)]++
+      }
+      setLocationBreakdown(breakdown)
 
-      // Enrich urgent requests with student info
       const enriched = await Promise.all(
         urgent.map(async (req: AbsenceRequest) => {
           const student = await api.getStudent(req.studentId)
@@ -88,30 +96,25 @@ export function DashboardPage() {
   useEffect(() => {
     loadData()
 
-    // Subscribe to realtime changes to auto-refresh dashboard
     const studentsChannel = supabase
       .channel('dashboard-students-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => {
-        loadData()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData())
       .subscribe()
 
     const requestsChannel = supabase
       .channel('dashboard-requests-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => {
-        loadData()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData())
       .subscribe()
 
-    // Poll for OVERDUE transitions every 60 seconds
-    const overdueInterval = setInterval(() => {
-      api.markOverdueStudents().catch(() => {})
+    // Poll auto-return every 60 seconds
+    const autoReturnInterval = setInterval(() => {
+      api.autoReturnStudents().catch(() => {})
     }, 60000)
 
     return () => {
       supabase.removeChannel(studentsChannel)
       supabase.removeChannel(requestsChannel)
-      clearInterval(overdueInterval)
+      clearInterval(autoReturnInterval)
     }
   }, [])
 
@@ -120,34 +123,33 @@ export function DashboardPage() {
     setUrgentRequests((prev) => prev.filter((r) => r.id !== id))
   }
 
-  // Hero block — % on campus
-  const onCampusPct = stats && stats.total > 0
-    ? Math.round((stats.onCampus / stats.total) * 100)
-    : 0
-  const heroColor = onCampusPct >= 80
-    ? { text: 'text-[var(--green)]', bar: 'bg-green-500', bg: 'bg-green-50 dark:bg-green-950/20', border: 'border-green-200 dark:border-green-800/40' }
-    : onCampusPct >= 60
-    ? { text: 'text-[var(--orange)]', bar: 'bg-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/20', border: 'border-orange-200 dark:border-orange-800/40' }
-    : { text: 'text-[var(--red)]', bar: 'bg-red-500', bg: 'bg-red-50 dark:bg-red-950/20', border: 'border-red-200 dark:border-red-800/40' }
+  // Hero %
+  const onCampusPct = stats && stats.total > 0 ? Math.round((stats.onCampus / stats.total) * 100) : 0
+  const heroColor =
+    onCampusPct >= 80
+      ? { text: 'text-[var(--green)]', bar: 'bg-green-500', bg: 'bg-green-50 dark:bg-green-950/20', border: 'border-green-200 dark:border-green-800/40' }
+      : onCampusPct >= 60
+      ? { text: 'text-[var(--orange)]', bar: 'bg-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/20', border: 'border-orange-200 dark:border-orange-800/40' }
+      : { text: 'text-[var(--red)]', bar: 'bg-red-500', bg: 'bg-red-50 dark:bg-red-950/20', border: 'border-red-200 dark:border-red-800/40' }
 
-  // Pie chart data — 4 categories
-  const pieData = stats ? [
-    { name: 'בישיבה', value: stats.onCampus, color: '#22C55E' },
-    { name: 'בחוץ באישור', value: offCampusBreakdown.withApproval, color: '#3B82F6' },
-    { name: 'בחוץ חריג', value: offCampusBreakdown.withUrgent, color: '#F97316' },
-    { name: 'בחוץ ללא אישור', value: offCampusBreakdown.noApproval, color: '#EF4444' },
-  ].filter((d) => d.value > 0) : []
+  // Pie chart — 3 location categories
+  const pieData = stats
+    ? [
+        { name: 'בישיבה', value: locationBreakdown.inYeshiva, color: '#22C55E' },
+        { name: 'באזור', value: locationBreakdown.inArea, color: '#3B82F6' },
+        { name: 'רחוק', value: locationBreakdown.far, color: '#EF4444' },
+      ].filter((d) => d.value > 0)
+    : []
 
-  // Aggregate class stats by grade for the bar chart
+  // Bar chart by grade
   const gradeChartData = GRADE_LEVELS.map((level) => {
     const classes = classStats.filter((cs) => cs.grade === level.name)
     return {
       name: level.name,
       בישיבה: classes.reduce((s, cs) => s + cs.onCampus, 0),
       מחוץ: classes.reduce((s, cs) => s + cs.offCampus, 0),
-      באיחור: classes.reduce((s, cs) => s + cs.overdue, 0),
     }
-  }).filter((d) => d.בישיבה + d.מחוץ + d.באיחור > 0)
+  }).filter((d) => d.בישיבה + d.מחוץ > 0)
 
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">
@@ -181,11 +183,14 @@ export function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Pie chart — student distribution */}
+      {/* Pie chart — 3 location categories */}
       {!isLoading && pieData.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">התפלגות תלמידים</CardTitle>
+            <div className="flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-[var(--blue)]" />
+              <CardTitle className="text-base">התפלגות מיקום תלמידים</CardTitle>
+            </div>
           </CardHeader>
           <CardContent>
             <div className="flex flex-col items-center sm:flex-row sm:items-center sm:justify-center gap-4">
@@ -238,7 +243,7 @@ export function DashboardPage() {
       )}
 
       {/* Stats grid */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-3 gap-3">
         {STAT_CARDS.map(({ key, label, icon: Icon, color, bg }) => (
           <Card key={key}>
             <CardContent className="p-4">
@@ -247,12 +252,9 @@ export function DashboardPage() {
                   <p className="text-sm text-[var(--text-muted)]">{label}</p>
                   <p className="mt-1 text-3xl font-bold text-[var(--text)]">
                     {isLoading ? '...' : (stats?.[key] ?? 0)}
-                    {key === 'overdue' && (stats?.overdue ?? 0) > 0 && (
-                      <span className="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--red)]" />
-                    )}
                   </p>
                 </div>
-                <div className={`rounded-lg p-2 ${bg} ${key === 'overdue' && (stats?.overdue ?? 0) > 0 ? 'animate-pulse' : ''}`}>
+                <div className={`rounded-lg p-2 ${bg}`}>
                   <Icon className={`h-5 w-5 ${color}`} />
                 </div>
               </div>
@@ -395,7 +397,6 @@ export function DashboardPage() {
                   <Legend wrapperStyle={{ fontSize: '12px', direction: 'rtl' }} />
                   <Bar dataKey="בישיבה" fill="#22C55E" radius={[3, 3, 0, 0]} />
                   <Bar dataKey="מחוץ" fill="#F97316" radius={[3, 3, 0, 0]} />
-                  <Bar dataKey="באיחור" fill="#EF4444" radius={[3, 3, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </CardContent>
@@ -415,7 +416,6 @@ export function DashboardPage() {
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">סה"כ</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--green)]">בישיבה</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--orange)]">מחוץ</th>
-                      <th className="px-3 py-2.5 text-center font-medium text-[var(--red)]">באיחור</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">היעדרות</th>
                       <th className="px-3 py-2.5 text-center font-medium text-[var(--text-muted)]">מכסה</th>
                     </tr>
@@ -430,22 +430,17 @@ export function DashboardPage() {
                       const gTotal     = gradeClasses.reduce((s, cs) => s + cs.total, 0)
                       const gOnCampus  = gradeClasses.reduce((s, cs) => s + cs.onCampus, 0)
                       const gOffCampus = gradeClasses.reduce((s, cs) => s + cs.offCampus, 0)
-                      const gOverdue   = gradeClasses.reduce((s, cs) => s + cs.overdue, 0)
-                      const gAbsRate   = gTotal > 0 ? ((gOffCampus + gOverdue) / gTotal) * 100 : 0
+                      const gAbsRate   = gTotal > 0 ? (gOffCampus / gTotal) * 100 : 0
                       const gHighAbs   = gAbsRate > 20
                       const multiClass = gradeClasses.length > 1
 
-                      // Grade-level quota: sum of per-class quotas
                       const gradeQuota = gradeClasses.reduce((sum) => {
-                        const classQuota = level.capacity >= 50 ? 6 : 3
-                        return sum + classQuota
+                        return sum + (level.capacity >= 50 ? 6 : 3)
                       }, 0)
-                      const gradeAbsCount = gOffCampus + gOverdue
-                      const gradeQuotaExceeded = gradeAbsCount >= gradeQuota
+                      const gradeQuotaExceeded = gOffCampus >= gradeQuota
 
                       return (
                         <Fragment key={level.name}>
-                          {/* Grade summary row */}
                           <tr className="border-b border-[var(--border)] bg-[var(--bg-2)]">
                             <td className="px-4 py-2.5 font-bold text-[var(--text)]">
                               <span>{level.name}</span>
@@ -458,7 +453,6 @@ export function DashboardPage() {
                             <td className="px-3 py-2.5 text-center font-semibold text-[var(--text)]">{gTotal}</td>
                             <td className="px-3 py-2.5 text-center font-semibold text-[var(--green)]">{gOnCampus}</td>
                             <td className="px-3 py-2.5 text-center font-semibold text-[var(--orange)]">{gOffCampus}</td>
-                            <td className="px-3 py-2.5 text-center font-semibold text-[var(--red)]">{gOverdue}</td>
                             <td className="px-3 py-2.5 text-center">
                               <span className={`font-semibold ${gHighAbs ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
                                 {gAbsRate.toFixed(0)}%
@@ -466,35 +460,28 @@ export function DashboardPage() {
                             </td>
                             <td className="px-3 py-2.5 text-center">
                               <span className={`font-semibold ${gradeQuotaExceeded ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
-                                {gradeAbsCount}/{gradeQuota}
+                                {gOffCampus}/{gradeQuota}
                               </span>
                             </td>
                           </tr>
 
-                          {/* Per-class rows — only for multi-class grades */}
                           {multiClass && gradeClasses.map((cs) => {
-                            const absRate = cs.total > 0
-                              ? ((cs.offCampus + cs.overdue) / cs.total) * 100
-                              : 0
+                            const absRate = cs.total > 0 ? (cs.offCampus / cs.total) * 100 : 0
                             const highAbs = absRate > 20
                             const classLabel = cs.classId.includes(' כיתה ')
                               ? `כיתה ${cs.classId.split(' כיתה ')[1]}`
                               : cs.classId
                             const classQuota = level.capacity >= 50 ? 6 : 3
-                            const classAbsCount = cs.offCampus + cs.overdue
-                            const classQuotaExceeded = classAbsCount >= classQuota
+                            const classQuotaExceeded = cs.offCampus >= classQuota
                             return (
                               <tr
                                 key={cs.classId}
                                 className={`border-b border-[var(--border)] last:border-b-0 ${highAbs ? 'bg-red-50/40 dark:bg-red-950/10' : ''}`}
                               >
-                                <td className="py-2 pl-4 pr-10 text-[var(--text-muted)]">
-                                  {classLabel}
-                                </td>
+                                <td className="py-2 pl-4 pr-10 text-[var(--text-muted)]">{classLabel}</td>
                                 <td className="px-3 py-2 text-center text-[var(--text-muted)]">{cs.total}</td>
                                 <td className="px-3 py-2 text-center text-[var(--green)]">{cs.onCampus}</td>
                                 <td className="px-3 py-2 text-center text-[var(--orange)]">{cs.offCampus}</td>
-                                <td className="px-3 py-2 text-center text-[var(--red)]">{cs.overdue}</td>
                                 <td className="px-3 py-2 text-center">
                                   <span className={`font-medium ${highAbs ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
                                     {absRate.toFixed(0)}%
@@ -502,7 +489,7 @@ export function DashboardPage() {
                                 </td>
                                 <td className="px-3 py-2 text-center">
                                   <span className={`font-medium ${classQuotaExceeded ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
-                                    {classAbsCount}/{classQuota}
+                                    {cs.offCampus}/{classQuota}
                                   </span>
                                 </td>
                               </tr>

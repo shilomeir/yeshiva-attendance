@@ -11,9 +11,8 @@ import type { IApiClient, GetStudentsOptions, CreateEventPayload, CreateAbsenceR
 export class SupabaseApiClient implements IApiClient {
   async getStudents(options?: GetStudentsOptions): Promise<Student[]> {
     let query = supabase.from('students').select('*')
-    if (options?.filter === 'OFF_CAMPUS') query = query.eq('currentStatus', 'OFF_CAMPUS')
+    if (options?.filter === 'OFF_CAMPUS') query = query.in('currentStatus', ['OFF_CAMPUS', 'OVERDUE'])
     else if (options?.filter === 'PENDING') query = query.eq('pendingApproval', true)
-    else if (options?.filter === 'OVERDUE') query = query.eq('currentStatus', 'OVERDUE')
     if (options?.grade) query = query.eq('grade', options.grade)
     if (options?.classId) query = query.eq('classId', options.classId)
     if (options?.search) {
@@ -238,8 +237,8 @@ export class SupabaseApiClient implements IApiClient {
     return {
       total: students.length,
       onCampus: students.filter(s => s.currentStatus === 'ON_CAMPUS').length,
-      offCampus: students.filter(s => s.currentStatus === 'OFF_CAMPUS').length,
-      overdue: students.filter(s => s.currentStatus === 'OVERDUE').length,
+      // OVERDUE treated as off-campus
+      offCampus: students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length,
       pending: students.filter(s => s.pendingApproval).length,
       longAbsent: students.filter(s => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen && s.lastSeen < sevenDaysAgo).length,
     }
@@ -285,12 +284,11 @@ export class SupabaseApiClient implements IApiClient {
     const map = new Map<string, ClassStat>()
     for (const s of (data ?? []) as any[]) {
       const key = `${s.grade}|${s.classId}`
-      if (!map.has(key)) map.set(key, { grade: s.grade, classId: s.classId, total: 0, onCampus: 0, offCampus: 0, overdue: 0 })
+      if (!map.has(key)) map.set(key, { grade: s.grade, classId: s.classId, total: 0, onCampus: 0, offCampus: 0 })
       const stat = map.get(key)!
       stat.total++
       if (s.currentStatus === 'ON_CAMPUS') stat.onCampus++
-      else if (s.currentStatus === 'OFF_CAMPUS') stat.offCampus++
-      else if (s.currentStatus === 'OVERDUE') stat.overdue++
+      else if (s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE') stat.offCampus++
     }
     return Array.from(map.values())
   }
@@ -329,6 +327,12 @@ export class SupabaseApiClient implements IApiClient {
 
   async markOverdueStudents(): Promise<number> {
     const { data, error } = await supabase.rpc('mark_overdue_students')
+    if (error) throw error
+    return (data as number) ?? 0
+  }
+
+  async autoReturnStudents(): Promise<number> {
+    const { data, error } = await supabase.rpc('auto_return_students')
     if (error) throw error
     return (data as number) ?? 0
   }

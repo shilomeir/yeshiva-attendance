@@ -22,7 +22,7 @@ export interface QuotaCheckResult {
 }
 
 export interface GetStudentsOptions {
-  filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
+  filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING'
   search?: string
   grade?: string
   classId?: string
@@ -106,6 +106,7 @@ export interface IApiClient {
   getClassOutsideCount(classId: string): Promise<number>
   cancelAbsenceRequest(id: string): Promise<void>
   markOverdueStudents(): Promise<number>
+  autoReturnStudents(): Promise<number>
   createCheckoutWithQuotaCheck(
     studentId: string,
     classId: string,

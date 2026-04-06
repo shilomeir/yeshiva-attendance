@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Shield, Loader2 } from 'lucide-react'
+import { Shield, Loader2, GraduationCap } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -22,7 +22,7 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const { loginAdmin } = useAuthStore()
+  const { loginAdmin, loginClassSupervisor } = useAuthStore()
   const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -32,19 +32,29 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
     setIsLoading(true)
     setError('')
 
-    // Simulate small delay
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await new Promise((resolve) => setTimeout(resolve, 400))
 
-    const success = await loginAdmin(pin)
-    setIsLoading(false)
-
-    if (success) {
+    // 1. Try admin PIN first (exact match)
+    const adminOk = await loginAdmin(pin)
+    if (adminOk) {
       onClose()
       navigate('/admin')
-    } else {
-      setError('קוד גישה שגוי')
-      setPin('')
+      setIsLoading(false)
+      return
     }
+
+    // 2. Try class-supervisor PIN (admin PIN + grade letter + class number)
+    const supervisorOk = await loginClassSupervisor(pin)
+    if (supervisorOk) {
+      onClose()
+      navigate('/class-supervisor')
+      setIsLoading(false)
+      return
+    }
+
+    setError('קוד גישה שגוי')
+    setPin('')
+    setIsLoading(false)
   }
 
   const handleClose = () => {
@@ -59,18 +69,18 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
         <DialogHeader>
           <div className="flex items-center gap-2">
             <Shield className="h-5 w-5 text-[var(--blue)]" />
-            <DialogTitle>כניסת מנהל</DialogTitle>
+            <DialogTitle>כניסת מנהל / אחראי כיתה</DialogTitle>
           </div>
-          <DialogDescription>הזן את קוד הגישה של המנהל להמשך</DialogDescription>
+          <DialogDescription>הזן את קוד הגישה להמשך</DialogDescription>
         </DialogHeader>
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
             <Label htmlFor="pin">קוד גישה</Label>
             <Input
               id="pin"
               type="password"
-              inputMode="numeric"
-              maxLength={6}
+              inputMode="text"
               placeholder="••••"
               value={pin}
               onChange={(e) => {
@@ -86,6 +96,17 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
               </p>
             )}
           </div>
+
+          {/* Hint for supervisors */}
+          <div className="flex items-start gap-2 rounded-lg bg-[var(--bg-2)] px-3 py-2.5">
+            <GraduationCap className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+            <p className="text-xs text-[var(--text-muted)]">
+              אחראי כיתה: הזן את קוד הגישה הכולל + אות השכבה + מספר הכיתה
+              <br />
+              <span className="opacity-60">לדוגמה: כיתה 3 בשיעור א' — קוד + a3</span>
+            </p>
+          </div>
+
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={handleClose} className="flex-1">
               ביטול

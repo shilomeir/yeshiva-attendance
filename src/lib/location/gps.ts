@@ -5,6 +5,7 @@ import type { GPSStatus } from '@/types'
 export const CAMPUS_LAT = 31.5253
 export const CAMPUS_LNG = 35.1056
 export const CAMPUS_RADIUS_METERS = 300
+export const AREA_RADIUS_METERS = 5000  // 5km — "in the Hebron area"
 
 export interface GPSResult {
   lat: number
