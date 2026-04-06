@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Users, UserCheck, UserX, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
-  Loader2, AlertOctagon,
+  Loader2, AlertOctagon, FileText, ShieldAlert,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -69,11 +69,19 @@ interface EditStudentSheetProps {
 }
 
 function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentSheetProps) {
-  const [mode, setMode] = useState<'checkin' | 'checkout' | null>(null)
+  const [mode, setMode] = useState<'checkin' | 'checkout' | 'request' | null>(null)
+  // checkout fields
   const [exitType, setExitType] = useState<'today' | 'multiday'>('today')
   const [reason, setReason] = useState('')
   const [returnTime, setReturnTime] = useState('')
   const [returnDate, setReturnDate] = useState('')
+  // absence request fields
+  const [reqStartDate, setReqStartDate] = useState('')
+  const [reqEndDate, setReqEndDate] = useState('')
+  const [reqReason, setReqReason] = useState('')
+  const [reqStartTime, setReqStartTime] = useState('08:00')
+  const [reqEndTime, setReqEndTime] = useState('20:00')
+  const [reqIsUrgent, setReqIsUrgent] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const todayStr = toDateInput(new Date())
@@ -86,6 +94,12 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     setReason('')
     setReturnTime('')
     setReturnDate('')
+    setReqStartDate('')
+    setReqEndDate('')
+    setReqReason('')
+    setReqStartTime('08:00')
+    setReqEndTime('20:00')
+    setReqIsUrgent(false)
   }
 
   const handleClose = () => { reset(); onClose() }
@@ -136,6 +150,28 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     } finally { setIsSubmitting(false) }
   }
 
+  const handleRequest = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!student || !reqStartDate || !reqReason) return
+    setIsSubmitting(true)
+    try {
+      await api.createAbsenceRequest({
+        studentId: student.id,
+        date: reqStartDate,
+        endDate: reqEndDate || undefined,
+        reason: reqReason,
+        startTime: reqStartTime,
+        endTime: reqEndTime,
+        isUrgent: reqIsUrgent,
+      })
+      toast({ title: `בקשת היעדרות הוגשה עבור ${student.fullName}` })
+      onSuccess()
+      handleClose()
+    } catch {
+      toast({ title: 'שגיאה בהגשת הבקשה', variant: 'destructive' })
+    } finally { setIsSubmitting(false) }
+  }
+
   if (!student) return null
 
   const isOutside = student.currentStatus === 'OFF_CAMPUS' || student.currentStatus === 'OVERDUE'
@@ -170,24 +206,24 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
                 סמן כנוכח בישיבה
               </button>
             )}
-            {!isOutside && (
-              <button
-                onClick={() => setMode('checkout')}
-                className="flex items-center justify-center gap-2 rounded-xl border-2 border-orange-300 bg-orange-50 py-4 text-base font-semibold text-orange-600 hover:bg-orange-100 transition-colors dark:bg-orange-950/20 dark:border-orange-800"
-              >
-                <LogOut className="h-5 w-5" />
-                רשום יציאה
-              </button>
-            )}
-            {isOutside && (
-              <button
-                onClick={() => setMode('checkout')}
-                className="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-3 text-sm font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)] transition-colors"
-              >
-                <LogOut className="h-4 w-4" />
-                עדכן פרטי יציאה
-              </button>
-            )}
+            <button
+              onClick={() => setMode('checkout')}
+              className={`flex items-center justify-center gap-2 rounded-xl py-4 text-base font-semibold transition-colors ${
+                isOutside
+                  ? 'border border-[var(--border)] bg-[var(--surface)] text-sm font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)] py-3'
+                  : 'border-2 border-orange-300 bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800'
+              }`}
+            >
+              <LogOut className={isOutside ? 'h-4 w-4' : 'h-5 w-5'} />
+              {isOutside ? 'עדכן פרטי יציאה' : 'רשום יציאה (עד יומיים)'}
+            </button>
+            <button
+              onClick={() => setMode('request')}
+              className="flex items-center justify-center gap-2 rounded-xl border-2 border-indigo-300 bg-indigo-50 py-4 text-base font-semibold text-indigo-600 hover:bg-indigo-100 transition-colors dark:bg-indigo-950/20 dark:border-indigo-800"
+            >
+              <FileText className="h-5 w-5" />
+              הגשת בקשת היעדרות
+            </button>
           </div>
         )}
 
@@ -259,7 +295,92 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
           </form>
         )}
 
-        {mode !== 'checkout' && (
+        {/* Absence request form */}
+        {mode === 'request' && (
+          <form onSubmit={handleRequest} className="flex flex-col gap-4">
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 dark:border-indigo-800/40 dark:bg-indigo-950/10">
+              <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                בקשה תוגש לאישור המנהל ותסומן כ"ממתין לאישור"
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="req-start" className="flex items-center gap-1.5">
+                  <CalendarDays className="h-3.5 w-3.5" />תאריך יציאה
+                </Label>
+                <Input id="req-start" type="date" value={reqStartDate} min={todayStr} onChange={(e) => setReqStartDate(e.target.value)} required />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="req-end" className="flex items-center gap-1.5">
+                  <CalendarDays className="h-3.5 w-3.5" />תאריך חזרה (אופציונלי)
+                </Label>
+                <Input id="req-end" type="date" value={reqEndDate} min={reqStartDate || todayStr} onChange={(e) => setReqEndDate(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="req-stime" className="flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5" />שעת יציאה
+                </Label>
+                <Input id="req-stime" type="time" value={reqStartTime} onChange={(e) => setReqStartTime(e.target.value)} />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="req-etime" className="flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5" />שעת חזרה
+                </Label>
+                <Input id="req-etime" type="time" value={reqEndTime} onChange={(e) => setReqEndTime(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="req-reason">סיבה</Label>
+              <Input
+                id="req-reason"
+                placeholder="לדוגמה: שמחת משפחה..."
+                value={reqReason}
+                onChange={(e) => setReqReason(e.target.value)}
+                required
+              />
+            </div>
+
+            {/* Urgent toggle */}
+            <button
+              type="button"
+              onClick={() => setReqIsUrgent(v => !v)}
+              className={`flex items-center gap-3 rounded-xl border-2 px-4 py-3 transition-colors text-right ${
+                reqIsUrgent
+                  ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30'
+                  : 'border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--bg-2)]'
+              }`}
+            >
+              <ShieldAlert className={`h-5 w-5 shrink-0 ${reqIsUrgent ? 'text-indigo-600' : 'text-[var(--text-muted)]'}`} />
+              <div className="flex flex-col items-start">
+                <span className={`text-sm font-semibold ${reqIsUrgent ? 'text-indigo-700 dark:text-indigo-300' : 'text-[var(--text)]'}`}>
+                  מצב חריג
+                </span>
+                <span className="text-xs text-[var(--text-muted)]">לא נספר במכסה הרגילה</span>
+              </div>
+              <div className={`mr-auto h-5 w-5 rounded-full border-2 transition-colors ${reqIsUrgent ? 'border-indigo-500 bg-indigo-500' : 'border-[var(--border)]'}`}>
+                {reqIsUrgent && <CheckCircle2 className="h-full w-full text-white p-0.5" />}
+              </div>
+            </button>
+
+            <div className="flex gap-2 pt-1">
+              <Button type="button" variant="outline" onClick={() => setMode(null)} className="flex-1">חזור</Button>
+              <Button
+                type="submit"
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white"
+                disabled={isSubmitting || !reqStartDate || !reqReason}
+              >
+                {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />שולח...</> : 'הגש בקשה'}
+              </Button>
+            </div>
+          </form>
+        )}
+
+        {mode === null && (
           <Button type="button" variant="ghost" onClick={handleClose} className="mt-4 w-full text-[var(--text-muted)]">
             ביטול
           </Button>

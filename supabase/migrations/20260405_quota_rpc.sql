@@ -5,8 +5,11 @@ CREATE OR REPLACE FUNCTION create_checkout_with_quota_check(
   p_student_id TEXT,
   p_class_id   TEXT,
   p_grade      TEXT,
-  p_reason     TEXT          DEFAULT NULL,
-  p_expected_return TIMESTAMPTZ DEFAULT NULL
+  p_reason     TEXT DEFAULT NULL,
+  -- TEXT (not TIMESTAMPTZ) because events."expectedReturn" is a TEXT column (ISO-8601 string).
+  -- PostgreSQL will not implicitly cast TIMESTAMPTZ → TEXT in an INSERT, so keeping this as
+  -- TEXT avoids a type-mismatch error when a non-null return time is provided.
+  p_expected_return TEXT DEFAULT NULL
 )
 RETURNS JSON
 LANGUAGE plpgsql
@@ -103,8 +106,8 @@ END;
 $$;
 
 -- Grant execute permissions
-GRANT EXECUTE ON FUNCTION create_checkout_with_quota_check(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ)
+GRANT EXECUTE ON FUNCTION create_checkout_with_quota_check(TEXT, TEXT, TEXT, TEXT, TEXT)
   TO authenticated;
 
-GRANT EXECUTE ON FUNCTION create_checkout_with_quota_check(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ)
+GRANT EXECUTE ON FUNCTION create_checkout_with_quota_check(TEXT, TEXT, TEXT, TEXT, TEXT)
   TO anon;
