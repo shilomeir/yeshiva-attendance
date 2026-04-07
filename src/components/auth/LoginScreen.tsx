@@ -6,10 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { AdminLoginModal } from '@/components/auth/AdminLoginModal'
-import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { useAuthStore } from '@/store/authStore'
-import { api } from '@/lib/api'
-import { subscribeToPush } from '@/lib/pwa/webPush'
 
 const SAVED_ID_KEY = 'yeshiva_last_id'
 
@@ -17,11 +14,9 @@ export function LoginScreen() {
   const navigate = useNavigate()
   const [idNumber, setIdNumber] = useState(() => localStorage.getItem(SAVED_ID_KEY) ?? '')
   const [showAdminModal, setShowAdminModal] = useState(false)
-  const [showRememberBanner, setShowRememberBanner] = useState(false)
   const { login, isLoading, error, clearError, currentUser, isAdmin } = useAuthStore()
 
-  // Redirect if already logged in and banner was already handled
-  if (currentUser && !showRememberBanner) return <Navigate to="/student" replace />
+  if (currentUser) return <Navigate to="/student" replace />
   if (isAdmin) return <Navigate to="/admin" replace />
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -29,30 +24,16 @@ export function LoginScreen() {
     if (!idNumber.trim()) return
     const success = await login(idNumber.trim())
     if (success) {
-      setShowRememberBanner(true)
+      // Set a flag so StudentLayout knows to show the "Remember me" banner
+      sessionStorage.setItem('show_remember_me', '1')
+      sessionStorage.setItem('last_login_id', idNumber.trim())
+      navigate('/student', { replace: true })
     }
   }
 
   const handleIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setIdNumber(e.target.value)
     if (error) clearError()
-  }
-
-  const handleRememberYes = async () => {
-    if (!currentUser) return
-    const subscription = await subscribeToPush()
-    if (subscription) {
-      await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
-    }
-    // Save ID for next auto-fill
-    localStorage.setItem(SAVED_ID_KEY, idNumber.trim())
-    setShowRememberBanner(false)
-    navigate('/student', { replace: true })
-  }
-
-  const handleRememberNo = () => {
-    setShowRememberBanner(false)
-    navigate('/student', { replace: true })
   }
 
   return (
@@ -123,13 +104,7 @@ export function LoginScreen() {
         </CardContent>
       </Card>
 
-      {/* Admin modal */}
       <AdminLoginModal open={showAdminModal} onClose={() => setShowAdminModal(false)} />
-
-      {/* "Remember me" banner — appears after successful login */}
-      {showRememberBanner && (
-        <RememberMeBanner onYes={handleRememberYes} onNo={handleRememberNo} />
-      )}
     </div>
   )
 }

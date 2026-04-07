@@ -1,9 +1,15 @@
+import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { Home, FileText, History, LogOut } from 'lucide-react'
 import { SyncStatusBar } from '@/components/shared/SyncStatusBar'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
+import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { useAuthStore } from '@/store/authStore'
+import { api } from '@/lib/api'
+import { subscribeToPush } from '@/lib/pwa/webPush'
 import { cn } from '@/lib/utils/cn'
+
+const SAVED_ID_KEY = 'yeshiva_last_id'
 
 const NAV_ITEMS = [
   { to: '/student', icon: Home, label: 'בית', end: true },
@@ -15,9 +21,40 @@ export function StudentLayout() {
   const { currentUser, logout } = useAuthStore()
   const navigate = useNavigate()
 
+  // Show "Remember me" banner once right after login (flag set by LoginScreen)
+  const [showRememberBanner] = useState(() => {
+    const flag = sessionStorage.getItem('show_remember_me')
+    if (flag) {
+      sessionStorage.removeItem('show_remember_me')
+      return true
+    }
+    return false
+  })
+  const [bannerVisible, setBannerVisible] = useState(showRememberBanner)
+
   const handleLogout = () => {
     logout()
     navigate('/login')
+  }
+
+  const handleRememberYes = async () => {
+    if (!currentUser) return
+    const subscription = await subscribeToPush()
+    if (subscription) {
+      await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
+    }
+    // Save ID for next auto-fill
+    const lastId = sessionStorage.getItem('last_login_id')
+    if (lastId) {
+      localStorage.setItem(SAVED_ID_KEY, lastId)
+      sessionStorage.removeItem('last_login_id')
+    }
+    setBannerVisible(false)
+  }
+
+  const handleRememberNo = () => {
+    sessionStorage.removeItem('last_login_id')
+    setBannerVisible(false)
   }
 
   return (
@@ -86,6 +123,11 @@ export function StudentLayout() {
           ))}
         </div>
       </nav>
+
+      {/* "Remember me" banner — shown once right after login */}
+      {bannerVisible && (
+        <RememberMeBanner onYes={handleRememberYes} onNo={handleRememberNo} />
+      )}
     </div>
   )
 }
