@@ -7,11 +7,8 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      strategies: 'injectManifest',
-      srcDir: 'src',
-      filename: 'sw.ts',
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'icons/*.png'],
+      includeAssets: ['favicon.ico', 'icons/*.png', 'push-sw.js'],
       manifest: {
         name: 'ישיבת שבי חברון',
         short_name: 'נוכחות',
@@ -38,8 +35,10 @@ export default defineConfig({
           },
         ],
       },
-      injectManifest: {
+      workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // Load our push + badge handler as a classic script inside the generated SW
+        importScripts: ['/push-sw.js'],
       },
     }),
   ],
