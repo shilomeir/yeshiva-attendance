@@ -16,6 +16,7 @@
  */
 
 // ── טאבים שיסונכרנו ──────────────────────────────────────────────────────────
+// ⚠️  אם סנכרון טאב מסוים נכשל, הרץ debugListTabs() כדי לראות את השמות המדויקים.
 var TARGET_TABS = [
   "שיעור א'",
   "שיעור ב'",
@@ -23,6 +24,50 @@ var TARGET_TABS = [
   "שיעור ד'-ה'",
   "אברכים ובוגרצ'",
 ];
+
+// ── נרמול שם לצורך השוואה גמישה ─────────────────────────────────────────────
+// מסיר: אפוסטרוף, גרש עברי, מרכאות, מקפים, רווחים כפולים
+function normalizeTabName(name) {
+  return String(name)
+    .replace(/['\u05F3"״׳`]/g, '') // אפוסטרופים וגרשיים
+    .replace(/[-–—]/g, '')          // מקפים
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// ── מציאת גיליון עם התאמה גמישה ─────────────────────────────────────────────
+function findSheet(ss, targetName) {
+  var sheets = ss.getSheets();
+  var normTarget = normalizeTabName(targetName);
+
+  // 1. התאמה מדויקת
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName() === targetName) return sheets[i];
+  }
+  // 2. התאמה גמישה (ללא אפוסטרופים ומקפים)
+  for (var j = 0; j < sheets.length; j++) {
+    if (normalizeTabName(sheets[j].getName()) === normTarget) return sheets[j];
+  }
+  return null;
+}
+
+// ── DEBUG: הצג את שמות כל הטאבים ────────────────────────────────────────────
+// הרץ פונקציה זו מ-Apps Script Editor אם טאב לא נמצא
+function debugListTabs() {
+  var ss     = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var msg    = '📋 טאבים בגיליון זה:\n\n';
+  sheets.forEach(function(s, i) {
+    var name = s.getName();
+    var found = TARGET_TABS.some(function(t) {
+      return normalizeTabName(t) === normalizeTabName(name);
+    });
+    msg += (i + 1) + '. "' + name + '"' + (found ? ' ✅' : ' ❌ (לא ברשימה)') + '\n';
+  });
+  msg += '\nעדכן את TARGET_TABS בקוד אם יש ❌.';
+  SpreadsheetApp.getUi().alert(msg);
+}
 
 // ── Trigger — מופעל על כל עריכה בגיליון ─────────────────────────────────────
 function onSheetEdit(e) {
@@ -56,10 +101,14 @@ function syncAllTabs() {
   var payload = {};
 
   TARGET_TABS.forEach(function(tabName) {
-    var sheet = ss.getSheetByName(tabName);
-    if (!sheet) { Logger.log('טאב לא נמצא: ' + tabName); return; }
-    payload[tabName] = parseTab(sheet);
-    Logger.log(tabName + ': ' + payload[tabName].length + ' תלמידים');
+    var sheet = findSheet(ss, tabName);
+    if (!sheet) {
+      Logger.log('טאב לא נמצא: "' + tabName + '" (הרץ debugListTabs לבדיקה)');
+      return;
+    }
+    var actualName = sheet.getName(); // השם האמיתי בגיליון
+    payload[actualName] = parseTab(sheet);
+    Logger.log(actualName + ': ' + payload[actualName].length + ' תלמידים');
   });
 
   var res;
