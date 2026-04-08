@@ -4,7 +4,7 @@
  * ║                                                                      ║
  * ║  הגדרה חד-פעמית:                                                    ║
  * ║  1. Extensions → Apps Script → Project Settings → Script Properties ║
- * ║     הוסף שתי מאפיינים:                                              ║
+ * ║     הוסף שני מאפיינים:                                              ║
  * ║       SUPABASE_URL       = https://[PROJECT-ID].supabase.co         ║
  * ║       SHEETS_SYNC_SECRET = [הסיסמה שהגדרת ב-Supabase Secrets]      ║
  * ║                                                                      ║
@@ -27,13 +27,9 @@ var TARGET_TABS = [
 // ── Trigger — מופעל על כל עריכה בגיליון ─────────────────────────────────────
 function onSheetEdit(e) {
   try {
-    // רק כשמסמנים A1 כ-TRUE
     if (e.range.getA1Notation() !== 'A1') return;
     if (e.range.getValue() !== true) return;
-
-    // אפס את הצ'קבוקס מיד (מונע הפעלה כפולה)
     e.range.setValue(false);
-
     syncAllTabs();
   } catch (err) {
     SpreadsheetApp.getUi().alert('❌ שגיאה בלתי צפויה:\n\n' + err.toString());
@@ -42,7 +38,7 @@ function onSheetEdit(e) {
 
 // ── סנכרון כל הטאבים ─────────────────────────────────────────────────────────
 function syncAllTabs() {
-  var props  = PropertiesService.getScriptProperties();
+  var props   = PropertiesService.getScriptProperties();
   var baseUrl = props.getProperty('SUPABASE_URL');
   var secret  = props.getProperty('SHEETS_SYNC_SECRET');
 
@@ -55,21 +51,17 @@ function syncAllTabs() {
     return;
   }
 
-  var url = baseUrl.replace(/\/$/, '') + '/functions/v1/sync-from-sheets';
-  var ss  = SpreadsheetApp.getActiveSpreadsheet();
+  var url     = baseUrl.replace(/\/$/, '') + '/functions/v1/sync-from-sheets';
+  var ss      = SpreadsheetApp.getActiveSpreadsheet();
   var payload = {};
 
   TARGET_TABS.forEach(function(tabName) {
     var sheet = ss.getSheetByName(tabName);
-    if (!sheet) {
-      Logger.log('טאב לא נמצא: ' + tabName);
-      return;
-    }
+    if (!sheet) { Logger.log('טאב לא נמצא: ' + tabName); return; }
     payload[tabName] = parseTab(sheet);
     Logger.log(tabName + ': ' + payload[tabName].length + ' תלמידים');
   });
 
-  // שלח לEdge Function
   var res;
   try {
     res = UrlFetchApp.fetch(url, {
@@ -77,109 +69,145 @@ function syncAllTabs() {
       contentType: 'application/json; charset=utf-8',
       headers: { 'X-Sync-Secret': secret },
       payload: JSON.stringify(payload),
-      muteHttpExceptions: true,  // תמיד קבל את הגוף, גם בשגיאות
+      muteHttpExceptions: true,
     });
   } catch (fetchErr) {
-    SpreadsheetApp.getUi().alert(
-      '❌ שגיאת רשת — לא ניתן להתחבר לשרת:\n\n' + fetchErr.toString()
-    );
+    SpreadsheetApp.getUi().alert('❌ שגיאת רשת:\n\n' + fetchErr.toString());
     return;
   }
 
   var statusCode = res.getResponseCode();
   var bodyText   = res.getContentText();
 
-  // שגיאת HTTP — הצג הודעה מדויקת מהשרת
   if (statusCode < 200 || statusCode >= 300) {
     var errMsg = '❌ שגיאה מהשרת (HTTP ' + statusCode + '):\n\n';
     try {
-      var parsed = JSON.parse(bodyText);
-      errMsg += (parsed.error || parsed.message || bodyText);
-    } catch (_) {
-      errMsg += (bodyText || '(אין תגובה מהשרת)');
-    }
+      var p = JSON.parse(bodyText);
+      errMsg += (p.error || p.message || bodyText);
+    } catch (_) { errMsg += (bodyText || '(אין תגובה)'); }
     SpreadsheetApp.getUi().alert(errMsg);
     return;
   }
 
-  // פרסר תגובת JSON
   var result;
   try {
     result = JSON.parse(bodyText);
   } catch (_) {
-    SpreadsheetApp.getUi().alert('⚠️ תגובה לא צפויה מהשרת:\n\n' + bodyText);
+    SpreadsheetApp.getUi().alert('⚠️ תגובה לא צפויה:\n\n' + bodyText);
     return;
   }
 
   showSummary(result);
 }
 
-// ── פרסר תוכן טאב ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// parseTab — מנתח טאב שבו כיתות מסודרות זו לצד זו (אופקית)
+//
+// אלגוריתם:
+//  1. סרוק כל תא — מצא כותרות כיתה (גופן ≥ 14 + "כית") וציין עמודתן
+//  2. מיין לפי עמודה → הגדר טווח עמודות לכל כיתה
+//  3. לכל כיתה: מצא עמודת ת"ז בתוך הטווח שלה, קרא תלמידים
+// ══════════════════════════════════════════════════════════════════════════════
 function parseTab(sheet) {
   var dataRange = sheet.getDataRange();
   var values    = dataRange.getValues();
   var fontSizes = dataRange.getFontSizes();
+  var numRows   = values.length;
+  var numCols   = numRows > 0 ? values[0].length : 0;
+  var students  = [];
 
-  var students     = [];
-  var currentClass = null;
-  var idCol        = detectIdColumn(values);
+  // ── שלב 1: מצא את כל כותרות הכיתות ─────────────────────────────────────
+  var classHeaders = [];
 
-  values.forEach(function(row, rowIdx) {
-    var rowText = row.map(function(c) { return String(c); }).join(' ');
+  for (var r = 0; r < numRows; r++) {
+    for (var c = 0; c < numCols; c++) {
+      var cellText = String(values[r][c] || '').trim();
+      var fontSize  = fontSizes[r][c] || 0;
+      if (fontSize >= 14 && /כית/.test(cellText) && cellText.length > 2) {
+        // בדוק שלא הוספנו כבר כותרת מאותו תא (תאים ממוזגים מדווחים פעמים)
+        var already = classHeaders.some(function(h) {
+          return h.classId === cellText && h.col === c;
+        });
+        if (!already) {
+          classHeaders.push({ classId: cellText, col: c, headerRow: r });
+        }
+      }
+    }
+  }
 
-    // כותרת כיתה: גופן ≥ 14pt + מכיל "כית"
-    var rowFonts  = fontSizes[rowIdx].filter(function(f) { return f > 0; });
-    var maxFont   = rowFonts.length > 0 ? Math.max.apply(null, rowFonts) : 0;
+  if (classHeaders.length === 0) {
+    Logger.log('לא נמצאו כותרות כיתה בטאב ' + sheet.getName());
+    return students;
+  }
 
-    if (maxFont >= 14 && /כית/.test(rowText)) {
-      var headerCell = row.find(function(c) { return /כית/.test(String(c)); });
-      if (headerCell) currentClass = String(headerCell).trim();
+  // מיין לפי מיקום עמודה (שמאל לימין)
+  classHeaders.sort(function(a, b) { return a.col - b.col; });
+  Logger.log('כיתות שנמצאו ב-' + sheet.getName() + ':');
+  classHeaders.forEach(function(h) { Logger.log('  "' + h.classId + '" עמודה ' + h.col); });
+
+  // ── שלב 2: קבע טווח עמודות לכל כיתה ───────────────────────────────────
+  for (var i = 0; i < classHeaders.length; i++) {
+    classHeaders[i].startCol = classHeaders[i].col;
+    classHeaders[i].endCol   = (i + 1 < classHeaders.length)
+      ? classHeaders[i + 1].col - 1
+      : numCols - 1;
+  }
+
+  // ── שלב 3: לכל כיתה — מצא עמודת ת"ז וקרא תלמידים ─────────────────────
+  classHeaders.forEach(function(cls) {
+    var idCol = detectIdColumnInRange(values, cls.startCol, cls.endCol);
+    if (idCol === -1) {
+      Logger.log('לא נמצאה עמודת ת"ז עבור: ' + cls.classId);
       return;
     }
+    Logger.log('"' + cls.classId + '" — עמודת ת"ז: ' + idCol);
 
-    // שורת תלמיד
-    if (!currentClass || idCol === -1) return;
+    for (var r = cls.headerRow + 1; r < numRows; r++) {
+      var row = values[r];
 
-    // padStart(9,'0') — Sheets מסיר אפסים מובילים מספרים (033... → 33...)
-    var rawId = String(row[idCol]).trim().replace(/[^0-9]/g, '');
-    var idVal = rawId.padStart(9, '0');
-    if (!/^\d{9}$/.test(idVal) || rawId.length === 0) return;
+      // ת"ז: ספרות בלבד + השלמת אפסים מובילים שנקצצו ע"י Sheets
+      var rawId = String(row[idCol] !== undefined ? row[idCol] : '')
+                    .trim().replace(/[^0-9]/g, '');
+      var idVal = rawId.padStart(9, '0');
+      if (rawId.length === 0 || !/^\d{9}$/.test(idVal)) continue;
 
-    // שם: כל תא בשורה עם טקסט עברי (מחוץ לעמודת הת"ז)
-    var nameParts = [];
-    row.forEach(function(cell, colIdx) {
-      if (colIdx === idCol) return;
-      var text = String(cell).trim();
-      if (text.length > 1 && /[\u0590-\u05FF]/.test(text)) {
-        nameParts.push(text);
+      // שם: אסוף טקסט עברי מטווח עמודות הכיתה (לא ת"ז, לא checkbox, לא מספרים)
+      var nameParts = [];
+      for (var c = cls.startCol; c <= cls.endCol; c++) {
+        if (c === idCol) continue;
+        var text = String(row[c] !== undefined ? row[c] : '').trim();
+        if (
+          text.length > 1 &&
+          /[\u0590-\u05FF]/.test(text) && // מכיל עברית
+          !/^\d+$/.test(text)              // לא רק ספרות
+        ) {
+          nameParts.push(text);
+        }
       }
-    });
-    var fullName = nameParts.join(' ').trim();
-    if (!fullName) return;
 
-    students.push({
-      idNumber: idVal,
-      fullName: fullName,
-      classId:  currentClass,
-    });
+      var fullName = nameParts.join(' ').trim();
+      if (!fullName) continue;
+
+      students.push({ idNumber: idVal, fullName: fullName, classId: cls.classId });
+    }
   });
 
   return students;
 }
 
-// ── זיהוי עמודת ת"ז ───────────────────────────────────────────────────────────
-function detectIdColumn(values) {
-  var sample   = values.slice(0, 40);
-  var colCount = Math.max.apply(null, sample.map(function(r) { return r.length; }));
+// ── זיהוי עמודת ת"ז בתוך טווח עמודות נתון ───────────────────────────────────
+// סורק עמודות startCol..endCol ומחפש את זו שרוב ערכיה הם 8-9 ספרות (ת"ז ישראלית)
+function detectIdColumnInRange(values, startCol, endCol) {
+  var sample = values.slice(0, Math.min(40, values.length));
 
-  for (var c = 0; c < colCount; c++) {
+  for (var c = startCol; c <= endCol; c++) {
     var hits = 0, total = 0;
     sample.forEach(function(row) {
       var raw = String(row[c] !== undefined ? row[c] : '').trim().replace(/[^0-9]/g, '');
       if (raw.length === 0) return;
       total++;
-      // padStart כדי לסמן גם מספרים שאפסיהם נקצצו
-      if (/^\d{9}$/.test(raw.padStart(9, '0')) && raw.length >= 8) hits++;
+      // מקבל 8 ספרות (אפס מוביל נקצץ) או 9 ספרות
+      if (raw.length >= 8 && /^\d{9}$/.test(raw.padStart(9, '0'))) hits++;
     });
     if (total > 0 && hits / total > 0.4) return c;
   }
@@ -188,17 +216,14 @@ function detectIdColumn(values) {
 
 // ── הצגת סיכום ───────────────────────────────────────────────────────────────
 function showSummary(result) {
-  var msg = '✅ סנכרון הושלם!\n\n';
+  var msg = '✅ סנכרון הושלם!\n\n📊 תוצאות:\n';
 
-  // תוצאות לפי שכבה
-  msg += '📊 תוצאות:\n';
   var grades = result.grades || {};
   Object.keys(grades).forEach(function(grade) {
     var s = grades[grade];
     msg += '• ' + grade + ': ' + s.upserted + ' עודכנו, ' + s.deleted + ' נמחקו\n';
   });
 
-  // קודי רכזים
   var codes = result.classCodes || [];
   if (codes.length > 0) {
     msg += '\n🔑 קודי רכזי כיתות:\n';
@@ -207,13 +232,13 @@ function showSummary(result) {
       msg += '  קוד=' + item.code + '  |  PIN רכז=' + item.supervisorPin + '\n';
     });
     msg += '\n💡 שמור קודים אלו — תוכל להפיץ לרבנים.\n';
-    msg += '(הקודים יתעדכנו אוטומטית אם תשנה את ה-PIN הניהולי)';
+    msg += '(הקודים מתעדכנים אוטומטית אם תשנה את ה-PIN הניהולי)';
   }
 
   SpreadsheetApp.getUi().alert(msg);
 }
 
-// ── פונקציה ידנית לבדיקה (ניתן להריץ ישירות מ-Apps Script Editor) ────────────
+// ── הרצה ידנית לבדיקה (מ-Apps Script Editor) ─────────────────────────────────
 function runSyncManually() {
   syncAllTabs();
 }
