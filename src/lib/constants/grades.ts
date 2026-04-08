@@ -30,3 +30,18 @@ export const ALL_CLASS_IDS: string[] = GRADE_LEVELS.flatMap((g) => getClasses(g.
 /** Default grade/class for students without an assignment */
 export const DEFAULT_GRADE = "שיעור א'"
 export const DEFAULT_CLASS = "שיעור א' כיתה 1"
+
+/**
+ * Canonical tab names from the Google Sheet ("DATA תלמידים ביקורות שבי חברון").
+ * Each tab maps 1:1 to a grade name in the DB.
+ * Used by the sync-from-sheets Edge Function and the GAS script.
+ */
+export const SHEET_GRADE_NAMES = [
+  "שיעור א'",
+  "שיעור ב'",
+  "שיעור ג'",
+  "שיעור ד'-ה'",
+  "אברכים ובוגרצ'",
+] as const
+
+export type SheetGradeName = (typeof SHEET_GRADE_NAMES)[number]

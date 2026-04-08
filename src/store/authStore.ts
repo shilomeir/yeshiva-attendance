@@ -42,7 +42,10 @@ export const useAuthStore = create<AuthState>()(
             set({ error: 'מספר זהות לא נמצא במערכת', isLoading: false })
             return false
           }
-          set({ currentUser: student, isAdmin: false, classSupervisor: null, isLoading: false })
+          // Stamp lastSeen on login so the device is always visible in Supabase
+          const now = new Date().toISOString()
+          supabase.from('students').update({ lastSeen: now }).eq('id', student.id).then(() => {})
+          set({ currentUser: { ...student, lastSeen: now }, isAdmin: false, classSupervisor: null, isLoading: false })
           registerPushNotifications(student.id)
           return true
         } catch {
@@ -77,6 +80,33 @@ export const useAuthStore = create<AuthState>()(
         if (!pin.startsWith(adminPin) || pin === adminPin) return false
 
         const suffix = pin.slice(adminPin.length)
+
+        // New format: exactly 3 digits → look up class code in app_settings
+        if (/^\d{3}$/.test(suffix)) {
+          const { data: codeRow } = await supabase
+            .from('app_settings')
+            .select('key')
+            .eq('value', suffix)
+            .like('key', 'class_code_%')
+            .maybeSingle()
+          if (codeRow) {
+            const classId = codeRow.key.replace('class_code_', '')
+            const { data: sample } = await supabase
+              .from('students')
+              .select('grade')
+              .eq('classId', classId)
+              .limit(1)
+              .maybeSingle()
+            set({
+              classSupervisor: { classId, gradeName: sample?.grade ?? '' },
+              isAdmin: false,
+              currentUser: null,
+            })
+            return true
+          }
+        }
+
+        // Legacy format: letter + number (e.g. "a3" → שיעור א' כיתה 3)
         const classInfo = parseClassSupervisorSuffix(suffix)
         if (!classInfo) return false
 
@@ -106,6 +136,7 @@ export const useAuthStore = create<AuthState>()(
           // Unsubscribe this device from Web Push
           unsubscribeFromPush().catch(() => {})
         }
+        localStorage.removeItem('yeshiva_remembered_id')
         set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null })
       },
 
