@@ -291,3 +291,98 @@ function showSummary(result) {
 function runSyncManually() {
   syncAllTabs();
 }
+
+// ── DEBUG: בדיקת פרסור טאב ספציפי ללא שליחה לשרת ────────────────────────────
+// שנה את TAB_TO_DEBUG לשם הטאב שרוצים לבדוק, ואז הרץ את הפונקציה.
+function debugParseTab() {
+  var TAB_TO_DEBUG = "שיעור א'"; // ← שנה כאן
+
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = findSheet(ss, TAB_TO_DEBUG);
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('טאב לא נמצא: "' + TAB_TO_DEBUG + '"\nהרץ debugListTabs לרשימה מלאה.');
+    return;
+  }
+
+  var dataRange = sheet.getDataRange();
+  var values    = dataRange.getValues();
+  var fontSizes = dataRange.getFontSizes();
+  var numRows   = values.length;
+  var numCols   = numRows > 0 ? values[0].length : 0;
+
+  // ── מצא כותרות כיתה (אותה לוגיקה כמו parseTab) ──────────────────────────
+  var classHeaders = [];
+  for (var r = 0; r < numRows; r++) {
+    for (var c = 0; c < numCols; c++) {
+      var cellText = String(values[r][c] || '').trim();
+      var fontSize  = fontSizes[r][c] || 0;
+      if (fontSize >= 14 && /כית/.test(cellText) && cellText.length > 2) {
+        var already = classHeaders.some(function(h) { return h.classId === cellText && h.col === c; });
+        if (!already) classHeaders.push({ classId: cellText, col: c, headerRow: r });
+      }
+    }
+  }
+
+  classHeaders.sort(function(a, b) { return a.col - b.col; });
+  for (var i = 0; i < classHeaders.length; i++) {
+    classHeaders[i].startCol = classHeaders[i].col;
+    classHeaders[i].endCol   = (i + 1 < classHeaders.length) ? classHeaders[i + 1].col - 1 : numCols - 1;
+  }
+
+  // ── הרץ parseTab ועצור לפני שליחה ──────────────────────────────────────
+  var students = parseTab(sheet);
+
+  // ── בנה סיכום ──────────────────────────────────────────────────────────
+  var msg = '🔍 ניתוח טאב: "' + sheet.getName() + '"\n';
+  msg += 'גודל גיליון: ' + numRows + ' שורות × ' + numCols + ' עמודות\n\n';
+
+  if (classHeaders.length === 0) {
+    msg += '⚠️ לא נמצאו כותרות כיתה (גופן ≥ 14 + "כית")!\n';
+    msg += 'בדוק שהכותרת כתובה עם "כית" ושהגופן גדול מ-14.';
+    SpreadsheetApp.getUi().alert(msg);
+    return;
+  }
+
+  msg += '📌 כיתות שנמצאו (' + classHeaders.length + '):\n';
+  classHeaders.forEach(function(cls) {
+    var idCol = detectIdColumnInRange(values, cls.startCol, cls.endCol);
+    var colLetter = colToLetter(cls.startCol) + '–' + colLetter(cls.endCol);
+    msg += '• "' + cls.classId + '"\n';
+    msg += '  עמודות: ' + colLetter + ' | שורת כותרת: ' + (cls.headerRow + 1);
+    msg += ' | עמודת ת"ז: ' + (idCol === -1 ? '❌ לא נמצאה' : colToLetter(idCol)) + '\n';
+  });
+
+  msg += '\n👥 תלמידים שנקראו: ' + students.length + '\n';
+
+  // הצג 3 תלמידים ראשונים מכל כיתה לאימות
+  var byClass = {};
+  students.forEach(function(s) {
+    if (!byClass[s.classId]) byClass[s.classId] = [];
+    byClass[s.classId].push(s);
+  });
+  msg += '\nדוגמה (3 ראשונים לכל כיתה):\n';
+  Object.keys(byClass).forEach(function(cls) {
+    msg += '\n[' + cls + ']\n';
+    byClass[cls].slice(0, 3).forEach(function(s) {
+      msg += '  ' + s.fullName + ' | ' + s.idNumber + '\n';
+    });
+    if (byClass[cls].length > 3) msg += '  ... ועוד ' + (byClass[cls].length - 3) + '\n';
+  });
+
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+// עזר: מספר עמודה → אות (0→A, 1→B, ...)
+function colToLetter(col) {
+  var letter = '';
+  col++;
+  while (col > 0) {
+    var rem = (col - 1) % 26;
+    letter  = String.fromCharCode(65 + rem) + letter;
+    col     = Math.floor((col - 1) / 26);
+  }
+  return letter;
+}
+
+// alias קצר לשימוש פנימי
+function colLetter(col) { return colToLetter(col); }
