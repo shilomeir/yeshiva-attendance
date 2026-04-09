@@ -267,15 +267,15 @@ function parseTab(sheet) {
         var idVal = rawId.padStart(9, '0');
         if (rawId.length === 0 || !/^\d{9}$/.test(idVal)) continue;
 
-        // שם: אסוף עברית מטווח הכיתה (לא ת"ז, לא מספרים בלבד)
+        // שם: שם משפחה + שם פרטי נמצאים תמיד בעמודות מיד לפני ת"ז (idCol-3..idCol-1)
+        // (לא סורקים את כל טווח הכיתה כדי לא לבלבל עם עמודות של הכיתה השכנה)
         var nameParts = [];
-        for (var c = cls.startCol; c <= cls.endCol; c++) {
-          if (c === idCol) continue;
+        for (var c = Math.max(0, idCol - 3); c < idCol; c++) {
           var text = String(row[c] !== undefined ? row[c] : '').trim();
           if (
             text.length > 1 &&
             /[\u0590-\u05FF]/.test(text) &&   // מכיל עברית
-            !/^\d+(\.\d+)?$/.test(text)        // לא מספר
+            !/^\d+(\.\d+)?$/.test(text)        // לא מספר בלבד
           ) {
             nameParts.push(text);
           }
