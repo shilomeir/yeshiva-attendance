@@ -1,111 +1,115 @@
-# CLAUDE.md — מצפן אסטרטגי לפרויקט מעקב נוכחות ישיבת שבי חברון
+# CLAUDE.md — Strategic Compass for Yeshivat Shavi Hevron Attendance System
 
-> **קרא קובץ זה לפני כל פעולה בפרויקט.** הוא מכיל את כל ההחלטות, הכללים, ולוגיקה העסקית של המערכת.
+> **Read this file before touching any code.** It contains every architectural decision, business rule, and constraint for this project.
 
 ---
 
-## 1. זהות הפרויקט
+## 1. Project Identity
 
-**שם:** מערכת מעקב נוכחות — ישיבת שבי חברון  
-**סוג:** PWA (Progressive Web App) + Android APK (Capacitor)  
+**Name:** Attendance Management System — Yeshivat Shavi Hevron (ישיבת שבי חברון)  
+**Type:** PWA (Progressive Web App) + Android APK (Capacitor)  
 **Stack:** React 18 + Vite + TypeScript + Supabase + Tailwind CSS + shadcn/ui  
-**שפה:** עברית בלבד. RTL. אין תמיכה בשפות אחרות.  
-**פריסה:** Vercel (frontend) + Supabase (backend/DB/Edge Functions)
+**Language:** Hebrew only. RTL. No i18n support.  
+**Deployment:** Vercel (frontend) + Supabase (backend / DB / Edge Functions)  
+**Production URL:** https://shavey-hevron.vercel.app
 
 ---
 
-## 2. ארכיטקטורה כללית
+## 2. Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Google Sheets  ──GAS──►  sync-from-sheets (Edge Fn)    │
-│                              │ UPSERT/DELETE students     │
-│                              ▼                            │
-│  React PWA / Android APK ◄──► Supabase PostgreSQL DB     │
-│  (Vite + Zustand + Dexie)    │ Real-time subscriptions   │
-│                              │ RPC functions              │
-│                              ▼                            │
-│  Supabase Edge Functions: send-push, broadcast-location  │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Google Sheets ──GAS──► sync-from-sheets (Edge Function)    │
+│                              │ UPSERT / DELETE students      │
+│                              ▼                               │
+│  React PWA / Android APK ◄──► Supabase PostgreSQL DB        │
+│  (Vite + Zustand + Dexie)    │ Realtime subscriptions       │
+│                              │ RPC functions                 │
+│                              ▼                               │
+│  Edge Functions: send-push, broadcast-location-request       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### כלל ברזל #1 — Google Sheets הוא מקור האמת היחיד לתלמידים
-- תלמידים **נוצרים, מעודכנים ונמחקים** אך ורק דרך סינכרון Google Sheets.
-- אין ואסור שיהיה ממשק להוספת / עריכת / ייבוא תלמידים מהאתר.
-- כשהסינכרון רץ — תלמיד שנמחק מהשיט **נמחק לחלוטין מה-DB כולל ההיסטוריה שלו** (cascade).
-- שינוי כיתה של תלמיד דרך ה-UI (ClassEditModal) תקף רק עד הסינכרון הבא, שידרוס אותו.
+### Iron Rule #1 — Google Sheets is the single source of truth for students
+- Students are **created, updated, and deleted ONLY via Google Sheets sync**.
+- There is NO UI to add, edit, or import students from the website. Do not add one.
+- When sync runs, a student removed from the sheet is **hard-deleted from DB including all history** (cascade).
+- Any class change made via the UI (ClassEditModal) is temporary — the next sync overwrites it.
 
-### כלל ברזל #2 — אין סטטוס "איחור" (OVERDUE)
-- `OVERDUE` קיים בטיפוסי TypeScript **לתאימות לאחור עם רשומות DB ישנות בלבד**.
-- לא יוצרים סטטוס OVERDUE חדש בשום מקום. `markOverdueStudents()` מחזירה 0.
-- בכל ממשק UI — OVERDUE מוצג ומטופל **זהה ל-OFF_CAMPUS**.
-- לא מציגים את המילה "איחור" לשום משתמש.
+### Iron Rule #2 — No "overdue/late" status
+- `OVERDUE` exists in TypeScript types **for backward compatibility with old DB rows only**.
+- Never create new OVERDUE status. `markOverdueStudents()` always returns 0.
+- In all UI — OVERDUE is displayed and handled **identically to OFF_CAMPUS**.
+- Never show the word "איחור" (late/overdue) to any user.
 
-### כלל ברזל #3 — ביטול יציאה מוחק את האירוע לחלוטין
-- כשתלמיד (או מנהל) מבטל יציאה — האירוע **נמחק מה-DB** (`deleteEvent`).
-- לא יוצרים CHECK_IN נגדי. הסטטוס מאופס ל-ON_CAMPUS ישירות.
-- זה נכון **בלי קשר לזמן** — אין הבדל בין ביטול תוך 5 דקות לביטול אחרי שעה.
+### Iron Rule #3 — Cancelling a departure hard-deletes the event
+- When a student (or admin) cancels a departure — the event is **deleted from DB** (`deleteEvent`).
+- No counter CHECK_IN is created. Status is reset to ON_CAMPUS directly via `updateStudentStatus`.
+- This applies **regardless of time elapsed** — no difference between cancelling after 2 minutes or 2 hours.
 
 ---
 
-## 3. מבנה הכיתות ושכבות הגיל
+## 3. Grade & Class Structure
 
-| שכבה | שם | כיתות | תלמידים לכיתה (קיבולת) |
-|------|-----|-------|------------------------|
-| שנה א' | שיעור א' | 6 (כיתה 1–6) | 25 |
-| שנה ב' | שיעור ב' | 4 (כיתה 1–4) | 25 |
-| שנה ג' | שיעור ג' | 3 (כיתה 1–3) | 25 |
-| שנה ד' | שיעור ד' | 1 (classId = שם השכבה) | 25 |
-| אברכים | אברכים | 1 (classId = שם השכבה) | 50 |
-| בוגרים | בוגרצים | 1 (classId = שם השכבה) | 50 |
+| Grade | Hebrew Name | Classes | Capacity per class |
+|-------|-------------|---------|-------------------|
+| 1st year | שיעור א' | 6 (כיתה 1–6) | 25 |
+| 2nd year | שיעור ב' | 4 (כיתה 1–4) | 25 |
+| 3rd year | שיעור ג' | 3 (כיתה 1–3) | 25 |
+| 4th year | שיעור ד' | 1 (classId = grade name) | 25 |
+| Advanced | אברכים | 1 (classId = grade name) | 50 |
+| Graduates | בוגרצים | 1 (classId = grade name) | 50 |
 
-**סה"כ: 16 כיתות, ~400 תלמידים.**
+**Total: 16 classes, ~400 students.**
 
-- שכבות עם כיתה יחידה: `classId === gradeName` (לדוגמה: `classId = "אברכים"`).
-- שכבות עם כיתות מרובות: `classId = "${gradeName} כיתה ${n}"` (לדוגמה: `"שיעור א' כיתה 3"`).
+- Single-class grades: `classId === gradeName` (e.g. `classId = "אברכים"`).
+- Multi-class grades: `classId = "${gradeName} כיתה ${n}"` (e.g. `"שיעור א' כיתה 3"`).
 
-### שמות גיליונות Google Sheets vs DB
-| שם בגיליון (`SHEET_GRADE_NAMES`) | שם ב-DB (`GRADE_LEVELS`) |
-|----------------------------------|--------------------------|
+### Sheet tab names vs DB grade names
+| Sheet tab (`SHEET_GRADE_NAMES`) | DB value (`GRADE_LEVELS`) |
+|---------------------------------|--------------------------|
 | שיעור א' | שיעור א' |
 | שיעור ב' | שיעור ב' |
 | שיעור ג' | שיעור ג' |
 | שיעור ד'-ה' | שיעור ד' |
 | אברכים ובוגרצ' | אברכים / בוגרצים |
 
-⚠️ **המיפוי בין שמות הגיליון לשמות DB נעשה ב-Edge Function `sync-from-sheets`.**
+The mapping between sheet names and DB names is handled inside the `sync-from-sheets` Edge Function.
+
+### Hebrew string comparison
+Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`) to handle different apostrophe variants (`'` / `'` / `׳`). This was the root cause of the student filter bug.
 
 ---
 
-## 4. מערכת הסטטוסים
+## 4. Status System
 
-### סטטוסי תלמיד (`currentStatus`)
+### Student statuses (`currentStatus`)
 
-| סטטוס | משמעות | צבע UI |
-|--------|---------|--------|
-| `ON_CAMPUS` | תלמיד בישיבה | ירוק |
-| `OFF_CAMPUS` | תלמיד מחוץ לישיבה | כתום |
-| `OVERDUE` | **מיושן** — מוצג כ-OFF_CAMPUS בכל מקום | כתום |
-| `PENDING` | תלמיד ממתין לאישור (רק בעת רישום ראשוני) | אפור |
+| Status | Meaning | UI color |
+|--------|---------|---------|
+| `ON_CAMPUS` | Student is at yeshiva | Green |
+| `OFF_CAMPUS` | Student has left | Orange |
+| `OVERDUE` | **Deprecated** — displayed as OFF_CAMPUS everywhere | Orange |
+| `PENDING` | Awaiting admin approval (new registration only) | Gray |
 
-### סוגי אירועים (`events.type`)
+### Event types (`events.type`)
 
-| סוג | פעולה | שינוי סטטוס |
-|-----|--------|-------------|
-| `CHECK_OUT` | יציאה מהישיבה | → OFF_CAMPUS |
-| `CHECK_IN` | חזרה לישיבה | → ON_CAMPUS |
-| `OVERRIDE` | שינוי ידני ע"י מנהל | כל סטטוס |
-| `SMS_IN` | חזרה דרך SMS | → ON_CAMPUS |
-| `SMS_OUT` | יציאה דרך SMS | → OFF_CAMPUS |
+| Type | Action | Status change |
+|------|--------|--------------|
+| `CHECK_OUT` | Student departs | → OFF_CAMPUS |
+| `CHECK_IN` | Student returns | → ON_CAMPUS |
+| `OVERRIDE` | Admin manual change | any |
+| `SMS_IN` | Return via SMS | → ON_CAMPUS |
+| `SMS_OUT` | Departure via SMS | → OFF_CAMPUS |
 
 ---
 
-## 5. מכסת יציאות (Quota)
+## 5. Departure Quota System
 
-### נוסחה: `GREATEST(1, ROUND((classSize × 3) / 25))`
+### Formula: `GREATEST(1, ROUND((classSize × 3) / 25))`
 
-| גודל כיתה | מכסה |
-|-----------|------|
+| Class size | Quota |
+|-----------|-------|
 | 25 | 3 |
 | 26–29 | 3 |
 | 30–37 | 4 |
@@ -113,259 +117,258 @@
 | 46–54 | 6 |
 | 50 (אברכים/בוגרצים) | 6 |
 
-**כללים:**
-- המכסה מחושבת **לפי מספר התלמידים הרשומים בפועל בכיתה** (לא קיבולת סטטית).
-- הנוסחה זהה בצד השרת (RPC `create_checkout_with_quota_check`) ובצד הלקוח (`calcQuota()` ב-OffCampusSheet).
-- תלמיד עם **בקשת היעדרות דחופה מאושרת** — **לא נחשב במכסה** לכל אורך תקופת הבקשה (לפי `date` עד `endDate`).
-- מנהל שמבצע OVERRIDE ידני — **עוקף את המכסה** ללא בדיקה.
-- הבדיקה מתבצעת עם advisory lock (`pg_try_advisory_xact_lock`) למניעת race conditions.
+**Rules:**
+- Quota is calculated from the **actual enrolled student count**, not static capacity.
+- The formula is identical server-side (RPC `create_checkout_with_quota_check`) and client-side (`calcQuota()` in OffCampusSheet.tsx).
+- A student with an **approved urgent absence request** is **exempt from quota** for the entire request period (`date` → `endDate`).
+- Admin OVERRIDE bypasses quota entirely — no check performed.
+- The RPC uses an advisory lock (`pg_try_advisory_xact_lock`) to prevent race conditions.
 
 ---
 
-## 6. בקשות היעדרות
+## 6. Absence Requests
 
-### מחזור חיים
-
+### Lifecycle
 ```
-תלמיד מגיש בקשה → PENDING
+Student submits → PENDING
     ↓
-מנהל בוחן:
-  APPROVED → תלמיד מקבל push notification
-  REJECTED → תלמיד לא מקבל
-  CANCELLED → בוטל ע"י מנהל
+Admin reviews:
+  APPROVED → student receives push notification
+  REJECTED → no notification
+  CANCELLED → cancelled by admin
     ↓
-תלמיד חוזר → שואלים אם לבטל את הבקשה
+Student returns → prompt to cancel the request
 ```
 
-### כללים
-- בקשה יכולה להיות **חד-יומית** (`date`) או **רב-יומית** (`date` עד `endDate`).
-- `startTime` / `endTime` — שעות ביום (HH:MM).
-- `isUrgent = true` — הבקשה פוטרת מהמכסה לכל התקופה.
-- אישור שולח push: _"בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉"_
-- כל פעולה (אישור/דחייה/ביטול) **נרשמת ב-`admin_overrides`** (audit log).
-- ביציאה מהישיבה — אם יש בקשה מאושרת בתוקף, מוצגת ללא צורך בהגשה מחדש.
+### Rules
+- Requests can be **single-day** (`date`) or **multi-day** (`date` to `endDate`).
+- `startTime` / `endTime` are HH:MM strings (hours within a day).
+- `isUrgent = true` → exempt from quota for the full period.
+- Approval push message: _"בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉"_
+- Every action (approve / reject / cancel) is **logged in `admin_overrides`** (audit trail).
 
 ---
 
-## 7. מערכת האימות — שלוש שכבות
+## 7. Three-Tier Authentication
 
-### תלמיד
-- כניסה לפי **מספר תעודת זהות בלבד** (אין סיסמה כרגע — יתווסף בעתיד).
-- `deviceToken` (UUID) נשמר ב-`localStorage` ומשמש לזיהוי מכשיר לסינכרון offline.
+### Student
+- Login by **ID number only** (no password currently — planned for future).
+- `deviceToken` (UUID) stored in `localStorage`, used for offline sync device identification.
 
-### מנהל (Admin)
-- PIN מאוחסן ב-`app_settings` תחת המפתח `admin_pin`.
-- כניסה מוגנת ב-AdminLoginModal בלבד.
-- גישה מלאה לכל הדפים.
+### Admin
+- PIN stored in `app_settings` under key `admin_pin` (plaintext — known limitation).
+- Full access to all pages and actions.
 
-### רכז כיתה (Class Supervisor)
-- PIN = `{adminPin}{classCode}` (קוד 3 ספרות, לדוגמה: `1234001`).
-- קודי הכיתות נוצרים אוטומטית בסינכרון מה-Sheets ונשמרים ב-`app_settings` כ-`class_code_{classId}`.
-- **אם ה-Admin PIN משתנה — כל הרכזים צריכים PIN חדש** (אין הודעה אוטומטית — ידני).
-- רכז רואה **רק את הכיתה שלו**.
-
----
-
-## 8. Google Sheets ← → Supabase Sync
-
-### זרימת סינכרון
-1. מנהל מסמן תיבת סימון ב-A1 בגיליון.
-2. טריגר GAS (`onSheetEdit`) מופעל.
-3. GAS מנתח את כל הלשוניות (parseTab) ושולח POST ל-Edge Function `sync-from-sheets`.
-4. Edge Function מבצע UPSERT לפי `idNumber` ומוחק תלמידים שנעלמו.
-
-### כללי סינכרון חשובים
-- **הסינכרון חד-כיווני: Sheets → DB בלבד.**
-- תלמיד שנמחק מהגיליון — נמחק מה-DB כולל ההיסטוריה שלו.
-- שינוי כיתה ב-UI ידרס בסינכרון הבא.
-- הגיליון מטפל ב-ת.ז. שמתחילות ב-0 (padding ל-9 ספרות).
-- כותרות הכיתה מזוהות לפי **גודל פונט ≥14** ומחרוזת "כית".
+### Class Supervisor (רכז כיתה)
+- PIN format: `{adminPin}{classCode}` (3-digit code, e.g. `1234001`).
+- Class codes auto-generated on sync, stored in `app_settings` as `class_code_{classId}`.
+- **If Admin PIN changes — all supervisors need new PINs. No automatic notification — manual process.**
+- Supervisor can only view/manage their assigned class.
+- All supervisor actions are logged in `admin_overrides`.
 
 ---
 
-## 9. מבנה הטבלאות (Supabase)
+## 8. Google Sheets ↔ Supabase Sync
+
+### Flow
+1. Admin checks checkbox in cell A1 of the sheet.
+2. GAS trigger (`onSheetEdit`) fires.
+3. GAS parses all tabs (`parseTab`) and POSTs to Edge Function `sync-from-sheets`.
+4. Edge Function UPSERTs students by `idNumber`, hard-deletes students missing from sheet.
+
+### Critical sync rules
+- **One-way sync: Sheets → DB only.**
+- Student deleted from sheet → deleted from DB including all event history.
+- Class edits via UI are overwritten on next sync.
+- Sheet handles leading-zero ID numbers (pads to 9 digits).
+- Class section headers identified by **font size ≥ 14** and containing "כית".
+
+---
+
+## 9. Database Schema (Supabase)
+
+> ⚠️ All camelCase column names are **quoted in SQL** (e.g. `"classId"`, `"currentStatus"`).
 
 ### `students`
-| עמודה | סוג | הערות |
-|-------|-----|-------|
+| Column | Type | Notes |
+|--------|------|-------|
 | `id` | UUID | PK |
-| `idNumber` | TEXT | ייחודי, 9 ספרות |
+| `idNumber` | TEXT | Unique, 9-digit Israeli ID |
 | `fullName` | TEXT | |
 | `phone` | TEXT | |
-| `grade` | TEXT | שם שכבה (ראה מיפוי) |
-| `classId` | TEXT | ייחודי בתוך שכבה |
+| `grade` | TEXT | Grade name (see mapping table) |
+| `classId` | TEXT | Unique within grade |
 | `currentStatus` | TEXT | ON_CAMPUS / OFF_CAMPUS / OVERDUE / PENDING |
 | `lastSeen` | TIMESTAMPTZ | |
 | `lastLocation` | JSONB | `{lat, lng}` |
-| `deviceToken` | TEXT | UUID, ל-offline sync |
+| `deviceToken` | TEXT | UUID for offline sync |
 | `push_token` | TEXT | Web Push subscription JSON |
-| `fcm_token` | TEXT | Firebase (Android APK בלבד) |
+| `fcm_token` | TEXT | Firebase (Android APK only) |
 | `pendingApproval` | BOOLEAN | |
 | `createdAt` | TIMESTAMPTZ | |
 
-> ⚠️ **כל שמות העמודות ב-camelCase עם גרשיים ב-SQL** (למשל `"classId"`, `"currentStatus"`).
-
 ### `events`
-| עמודה | סוג | הערות |
-|-------|-----|-------|
+| Column | Type | Notes |
+|--------|------|-------|
 | `id` | UUID | PK |
 | `studentId` | UUID | FK → students |
 | `type` | TEXT | CHECK_IN / CHECK_OUT / OVERRIDE / SMS_IN / SMS_OUT |
 | `timestamp` | TIMESTAMPTZ | |
-| `reason` | TEXT | סיבת יציאה (אופציונלי) |
-| `expectedReturn` | TIMESTAMPTZ | שעת חזרה צפויה |
-| `gpsLat` / `gpsLng` | FLOAT | GPS בזמן יציאה |
+| `reason` | TEXT | Departure reason (optional) |
+| `expectedReturn` | TIMESTAMPTZ | Expected return time |
+| `gpsLat` / `gpsLng` | FLOAT | GPS at time of event |
 | `gpsStatus` | TEXT | GRANTED / DENIED_BY_USER / UNAVAILABLE / PENDING |
-| `distanceFromCampus` | FLOAT | מטרים |
-| `note` | TEXT | הערת מנהל |
-| `syncedAt` | TIMESTAMPTZ | null = עדיין לא סונכרן |
+| `distanceFromCampus` | FLOAT | Meters from campus |
+| `note` | TEXT | Admin note |
+| `syncedAt` | TIMESTAMPTZ | null = not yet synced from offline queue |
 
 ### `absence_requests`
-| עמודה | הערות |
-|-------|-------|
-| `date` | תאריך התחלה YYYY-MM-DD |
-| `endDate` | תאריך סיום (אופציונלי, לבקשות רב-יומיות) |
+| Column | Notes |
+|--------|-------|
+| `date` | Start date YYYY-MM-DD |
+| `endDate` | End date (optional, multi-day requests) |
 | `startTime` / `endTime` | HH:MM |
 | `status` | PENDING / APPROVED / REJECTED / CANCELLED |
-| `isUrgent` | boolean — פטור ממכסה |
+| `isUrgent` | boolean — quota exempt |
 
 ### `admin_overrides` — Audit Log
-כל פעולה מנהלתית נרשמת כאן: אישור/דחיית בקשות, שינוי סטטוס ידני, ביטול יציאה.
+Every admin action is recorded here: approve/reject requests, manual status override, departure cancellation.
 
-### `app_settings`
-זוגות key-value:
-- `admin_pin` — PIN המנהל
-- `class_code_{classId}` — קוד 3 ספרות לרכז
+### `app_settings` — Key-value config
+- `admin_pin` — admin PIN
+- `class_code_{classId}` — 3-digit supervisor code
 
 ---
 
-## 10. פונקציות RPC (Supabase)
+## 10. RPC Functions (Supabase)
 
 ### `create_checkout_with_quota_check(p_student_id, p_class_id, p_grade, p_reason, p_expected_return)`
-- **מה עושה:** בודק מכסה + יוצר אירוע CHECK_OUT **אטומית**.
-- **מכסה:** דינמית — `GREATEST(1, ROUND((class_size × 3)::numeric / 25))`.
-- **פטור ממכסה:** תלמידים עם urgent request מאושר לתקופה הנוכחית.
-- **מחזיר:** `{success: true, eventId}` או `{success: false, error, current, quota}`.
-- **טיפול ב-timezone:** משתמש ב-`Asia/Jerusalem` לחישוב תאריך.
+- **Does:** Checks quota + creates CHECK_OUT event **atomically**.
+- **Quota:** Dynamic — `GREATEST(1, ROUND((class_size × 3)::numeric / 25))`.
+- **Exempt from quota:** Students with approved urgent request covering today's date range.
+- **Returns:** `{success: true, eventId}` or `{success: false, error, current, quota}`.
+- **Timezone:** Uses `Asia/Jerusalem` for date calculations.
+- **Latest migration:** `20260409_dynamic_quota.sql`
 
 ### `auto_return_students()`
-- **מה עושה:** מחזיר תלמידים ל-ON_CAMPUS כאשר `expectedReturn` עבר.
-- **מחזיר:** מספר תלמידים שהוחזרו.
-- **הפעלה:** ידנית מ-DashboardPage. אין cron job ייעודי כרגע.
+- **Does:** Returns students to ON_CAMPUS when `expectedReturn` has passed.
+- **Returns:** Count of students returned.
+- **Trigger:** Called manually from DashboardPage. No cron job yet.
 
-### `mark_overdue_students()` — **מושבתת**
-- מחזירה 0 תמיד. קיימת לתאימות לאחור.
+### `mark_overdue_students()` — **Disabled**
+- Always returns 0. Kept for backward compatibility only.
 
 ---
 
-## 11. מערכת Push Notifications
+## 11. Push Notifications
 
 ### Web Push (PWA)
-- נרשם בעת כניסת תלמיד (`registerPushSubscription`).
-- מאוחסן ב-`students.push_token` (JSON).
-- שולח דרך Edge Function `send-push` (VAPID + AES-128-GCM).
-- **שימוש:** אישור בקשת היעדרות.
+- Registered during student login (`registerPushSubscription`).
+- Stored as JSON in `students.push_token`.
+- Sent via Edge Function `send-push` (VAPID + AES-128-GCM / RFC 8291).
+- **Use case:** Absence request approval notification.
 
-### Firebase Cloud Messaging (Android APK בלבד)
-- Token מאוחסן ב-`students.fcm_token`.
-- שולח דרך Edge Function `broadcast-location-request`.
-- **שימוש:** ביקורת פנימית — מעיר את האפליקציה ברקע לשלוח GPS.
+### Firebase Cloud Messaging (Android APK only)
+- Token stored in `students.fcm_token`.
+- Sent via Edge Function `broadcast-location-request`.
+- **Use case:** Internal audit (ביקורת פנימית) — silently wakes APK in background to report GPS.
+- iPhone/PWA users have no FCM — they do not respond to audit broadcasts.
 
 ---
 
-## 12. GPS ומיקום
+## 12. GPS & Location
 
-| קטגוריה | מרחק | צבע |
-|----------|------|-----|
-| בישיבה | ≤ 300 מטר | ירוק |
-| באזור (חברון) | 300מ' – 5 ק"מ | כתום |
-| רחוק | > 5 ק"מ | אדום |
+| Category | Distance | Color |
+|----------|---------|-------|
+| On campus | ≤ 300m | Green |
+| In area (Hebron) | 300m – 5km | Orange |
+| Far | > 5km | Red |
 
-- **קואורדינטות הישיבה:** `LAT=31.5253, LNG=35.1056`
-- GPS נאסף **רק** בביקורת פנימית (admin RollCall) — לא בעת יציאה רגילה.
-- מכשירי iPhone/PWA: אין FCM — לא מגיבים לביקורת פנימית (מגבלת טכנולוגיה).
+- **Campus coordinates:** `LAT=31.5253, LNG=35.1056`
+- GPS is collected **only** during admin's internal audit (RollCall) — NOT during regular student departures.
 
 ---
 
 ## 13. Offline Support
 
-- **IndexedDB (Dexie):** שמירה מקומית של events, students, syncQueue.
-- **כשאין חיבור:** פעולות נשמרות ב-`syncQueue` ומסונכרנות עם חזרת החיבור.
-- **Conflict Resolution:** בגרסה נוכחית — הפעולות מ-offline נשלחות לפי סדר לאחר חזרת חיבור. אם האדמין שינה את הסטטוס בינתיים — פעולת ה-offline עלולה לדרוס. **ידוע, אין פתרון בגרסה נוכחית.**
-- **Sync triggers:** כשהאפליקציה חוזרת online, כשהיא חוזרת לפוקוס, כל 30 שניות.
+- **IndexedDB (Dexie):** Local storage for events, students, syncQueue.
+- **When offline:** Operations saved to `syncQueue`, synced when connection returns.
+- **Sync triggers:** App comes online, app returns to foreground, every 30 seconds.
+- **Conflict resolution:** Offline operations are replayed in order on reconnect. If admin changed status in the meantime, offline op may overwrite it. **Known limitation — no resolution in current version.**
 
 ---
 
-## 14. שלושה ממשקי משתמש
+## 14. Three User Interfaces
 
-### תלמיד (`/student`)
-- **דף הבית:** כפתורי CHECK_IN / CHECK_OUT, סטטוס נוכחי, באנר יציאה מאושרת, אפשרות ביטול יציאה.
-- **בקשות:** הגשת בקשת היעדרות (חד-יומית / רב-יומית / דחופה).
-- **היסטוריה:** רשימת אירועים.
-- **חוויה:** Mobile-first. הכל בעברית RTL.
+### Student (`/student`)
+- **Home:** CHECK_IN / CHECK_OUT buttons, current status, approved departure banner, cancel departure option.
+- **Requests:** Submit absence request (single-day / multi-day / urgent).
+- **History:** Event list.
+- **UX:** Mobile-first. All Hebrew RTL.
 
-### מנהל (`/admin`)
-- **דשבורד:** סטטיסטיקות, גרפים, שידור push.
-- **תלמידים:** רשימה עם פילטרים לפי שכבה/כיתה/סטטוס/חיפוש. **קריאה בלבד — לא ניתן להוסיף/לייבא תלמידים.** ייצוא Excel זמין.
-- **בקשות:** אישור/דחיית בקשות המתנה.
-- **ביקורת פנימית (RollCall):** שידור בקשת GPS לכל המכשירים.
-- **יומן ביקורת:** כל הפעולות המנהלתיות.
-- **הגדרות:** שינוי Admin PIN.
+### Admin (`/admin`)
+- **Dashboard:** Stats, charts, push broadcast.
+- **Students:** List with grade/class/status/search filters. **Read-only — no add/import.** Excel export available.
+- **Requests:** Approve / reject pending requests.
+- **RollCall (ביקורת פנימית):** Broadcast GPS request to all devices.
+- **Audit Log:** All admin actions.
+- **Settings:** Change admin PIN.
 
-### רכז כיתה (`/class-supervisor`)
-- **דשבורד:** רשימת תלמידי הכיתה שלו בלבד, סטטוסים, היסטוריה.
-- כל פעולה שרכז מבצע **נרשמת ב-`admin_overrides`**.
+### Class Supervisor (`/class-supervisor`)
+- **Dashboard:** Their class students only, statuses, history.
+- All supervisor actions logged in `admin_overrides`.
 
 ---
 
-## 15. מבנה הפרויקט
+## 15. Project File Structure
 
 ```
 src/
-├── App.tsx                    # ניתוב ראשי (React Router)
+├── App.tsx                     # Main routing (React Router)
 ├── pages/
-│   ├── student/               # דפי תלמיד
-│   ├── admin/                 # דפי מנהל
-│   └── class-supervisor/      # דף רכז כיתה
+│   ├── student/                # Student pages
+│   ├── admin/                  # Admin pages
+│   └── class-supervisor/       # Supervisor dashboard
 ├── components/
-│   ├── admin/                 # רכיבי מנהל
-│   ├── student/               # רכיבי תלמיד (StatusButtons, OffCampusSheet)
-│   ├── shared/                # StatusBadge, SyncStatusBar, SplashScreen
-│   ├── analytics/             # גרפים (recharts)
-│   ├── auth/                  # LoginScreen, AdminLoginModal
-│   └── ui/                    # shadcn/ui primitives
+│   ├── admin/                  # Admin UI components
+│   ├── student/                # StatusButtons, OffCampusSheet
+│   ├── shared/                 # StatusBadge, SyncStatusBar, SplashScreen
+│   ├── analytics/              # Charts (recharts)
+│   ├── auth/                   # LoginScreen, AdminLoginModal
+│   └── ui/                     # shadcn/ui primitives
 ├── store/
-│   ├── authStore.ts           # Zustand — auth state (persistent: deviceToken)
-│   ├── studentsStore.ts       # Zustand — רשימת תלמידים + פילטרים
-│   ├── syncStore.ts           # Zustand — מצב סינכרון offline
-│   └── uiStore.ts             # Zustand — theme, sidebar (persistent)
+│   ├── authStore.ts            # Auth state (deviceToken persisted)
+│   ├── studentsStore.ts        # Student list + filters + normalizeHebrew()
+│   ├── syncStore.ts            # Offline sync status
+│   └── uiStore.ts              # Theme, sidebar (persisted)
 ├── lib/
 │   ├── api/
-│   │   ├── supabaseClient.ts  # מימוש IApiClient
-│   │   └── types.ts           # IApiClient interface
-│   ├── constants/grades.ts    # GRADE_LEVELS, getClasses, ALL_CLASS_IDS
-│   ├── db/schema.ts           # Dexie (IndexedDB) schema
-│   ├── sync/syncEngine.ts     # מנוע סינכרון offline
-│   ├── location/gps.ts        # GPS utils (Haversine, campus coords)
-│   └── sms/parser.ts          # ניתוח הודעות SMS בעברית
-├── types/index.ts             # כל ה-TypeScript types
+│   │   ├── supabaseClient.ts   # IApiClient implementation
+│   │   ├── mockClient.ts       # Mock implementation (dev/offline)
+│   │   └── types.ts            # IApiClient interface
+│   ├── constants/grades.ts     # GRADE_LEVELS, getClasses, ALL_CLASS_IDS
+│   ├── db/schema.ts            # Dexie (IndexedDB) schema
+│   ├── sync/syncEngine.ts      # Offline sync engine
+│   ├── location/gps.ts         # GPS utils + Haversine distance
+│   └── sms/parser.ts           # Hebrew SMS message parser
+├── types/index.ts              # All TypeScript types
 supabase/
 ├── migrations/
 │   ├── 20260405_quota_rpc.sql
 │   ├── 20260405_overdue_transition.sql
 │   ├── 20260406_auto_return.sql
 │   ├── fix_checkout_and_push_token.sql
-│   └── 20260409_dynamic_quota.sql   ← מכסה דינמית (גרסה נוכחית)
+│   └── 20260409_dynamic_quota.sql   ← CURRENT quota logic
 └── functions/
-    ├── sync-from-sheets/      # GAS → Supabase sync
-    ├── send-push/             # Web Push (RFC 8291)
-    └── broadcast-location-request/ # FCM broadcast
-GoogleAppsScript.gs            # קוד GAS לסינכרון מהגיליון
+    ├── sync-from-sheets/       # GAS → Supabase sync
+    ├── send-push/              # Web Push (RFC 8291)
+    └── broadcast-location-request/  # FCM broadcast
+GoogleAppsScript.gs             # GAS code for sheet sync
 ```
 
 ---
 
-## 16. משתני סביבה
+## 16. Environment Variables
 
 ### Frontend (`.env.local`)
 ```
@@ -374,72 +377,73 @@ VITE_SUPABASE_ANON_KEY=
 VITE_VAPID_PUBLIC_KEY=
 ```
 
-### Supabase Edge Functions (Secrets)
+### Supabase Edge Function Secrets
 ```
-SHEETS_SYNC_SECRET       # shared secret עם GAS
-FCM_SERVER_KEY           # Firebase (ביקורת פנימית)
+SHEETS_SYNC_SECRET       # Shared secret with GAS
+FCM_SERVER_KEY           # Firebase (RollCall audit)
 VAPID_PUBLIC_KEY         # Web Push
 VAPID_PRIVATE_KEY        # Web Push
-VAPID_SUBJECT            # mailto:... עבור VAPID
+VAPID_SUBJECT            # mailto:... for VAPID
 ```
 
 ---
 
-## 17. עיצוב ו-UX — כללים
+## 17. Design & UX Rules
 
-- **שפה:** עברית בלבד. לא מוסיפים מחרוזות אנגלית לממשק.
-- **כיוון:** RTL. משתמשים ב-`start`/`end` במקום `left`/`right` ב-Tailwind.
+- **Language:** Hebrew only. No English strings in UI.
+- **Direction:** RTL. Use `start`/`end` not `left`/`right` in Tailwind.
 - **CSS Variables:** `--text`, `--text-muted`, `--bg`, `--bg-2`, `--surface`, `--border`, `--blue`, `--green`, `--orange`, `--red`.
-- **Dark Mode:** כל רכיב חייב לתמוך ב-dark mode דרך CSS variables.
-- **Mobile-first:** כל ממשק תלמיד מתוכנן לנייד. ממשק מנהל — responsive.
-- **Toast:** כל פעולה משמעותית מלווה ב-toast. timeout סטנדרטי.
-- **Loading states:** spinners/skeletons בכל פעולת רשת.
+- **Dark mode:** Every component must support dark mode via CSS variables.
+- **Mobile-first:** Student interface designed for mobile. Admin interface is responsive.
+- **Toasts:** Every significant action gets a toast notification.
 
 ---
 
-## 18. כללי פיתוח
+## 18. Development Rules
 
-### אסור בהחלט
-- ❌ להוסיף ממשק הוספת/עריכת תלמיד מהאתר (Sheets בלבד).
-- ❌ ליצור סטטוס OVERDUE חדש.
-- ❌ להשתמש ב-`addStudent()` — הוסר בכוונה.
-- ❌ לשנות נוסחת המכסה ב-OffCampusSheet בלי לשנות גם ב-RPC (ולהיפך).
-- ❌ לשמור GPS של תלמיד בעת יציאה רגילה (רק בביקורת פנימית).
+### Never do
+- ❌ Add any UI for creating/editing/importing students (Sheets only).
+- ❌ Create new OVERDUE status entries anywhere.
+- ❌ Use or restore `addStudent()` — intentionally removed from IApiClient.
+- ❌ Change quota formula in OffCampusSheet without also updating the RPC (and vice versa).
+- ❌ Collect GPS during a regular student departure (RollCall only).
+- ❌ Compare grade/class strings without `normalizeHebrew()`.
 
-### חובה תמיד
-- ✅ כל פעולה מנהלתית — נרשמת ב-`admin_overrides`.
-- ✅ ביטול יציאה = מחיקת האירוע (`deleteEvent`), לא יצירת CHECK_IN.
-- ✅ בדיקת מכסה = תמיד דרך RPC (לא בצד לקוח בלבד).
-- ✅ טיפול ב-timezone = `Asia/Jerusalem` בכל חישוב תאריך בשרת.
-- ✅ השוואת שמות שכבות/כיתות = normalize Hebrew (פונקציית `normalizeHebrew` ב-studentsStore).
-
----
-
-## 19. חובות ידועות (TODO)
-
-- [ ] הוספת סיסמאות לתלמידים (כרגע ID בלבד).
-- [ ] Supabase Row Level Security (RLS) — כרגע כל תלמיד רואה את כל הנתונים.
-- [ ] הודעה אוטומטית לרכזים בשינוי Admin PIN.
-- [ ] מכסת יציאות לפי שעות (כרגע 24/7).
-- [ ] פתרון conflicts offline — כרגע last-write-wins.
-- [ ] הגדרת auto_return_students כ-cron job (כרגע מופעל ידנית).
-- [ ] בדיקות אוטומטיות (unit / integration).
+### Always do
+- ✅ Log every admin action to `admin_overrides`.
+- ✅ Cancel departure = `deleteEvent(id)` + `updateStudentStatus('ON_CAMPUS')`.
+- ✅ Quota enforcement = always through RPC, never client-side only.
+- ✅ Server-side date calculations = `Asia/Jerusalem` timezone.
+- ✅ Both `IApiClient` implementations (`supabaseClient` + `mockClient`) must stay in sync.
 
 ---
 
-## 20. שאלות נפוצות
+## 19. Known Debt (TODO)
 
-**ש: תלמיד מנסה לצאת אבל רואה שהמכסה מלאה. מה יכול לעשות?**  
-ת: לחכות שחבר כיתה יחזור (המערכת מציגה מתי צפוי לחזור) — או להגיש בקשת היעדרות דחופה (isUrgent).
+- [ ] Add password authentication for students (currently ID-only).
+- [ ] Supabase Row Level Security (RLS) — currently all students can read all data.
+- [ ] Automatic notification to supervisors when Admin PIN changes.
+- [ ] Time-restricted quota (currently 24/7).
+- [ ] Offline conflict resolution (currently last-write-wins).
+- [ ] Schedule `auto_return_students` as a cron job (currently manual).
+- [ ] Automated tests (unit / integration).
+- [ ] Apply `20260409_dynamic_quota.sql` migration in Supabase Dashboard SQL Editor.
 
-**ש: תלמיד לחץ "יציאה" בטעות. יש לו חלון לבטל?**  
-ת: כן — 5 דקות. ביטול מוחק את האירוע לחלוטין מה-DB (לא נשאר שום עקב).
+---
 
-**ש: האם שינוי כיתה דרך ה-UI (ClassEditModal) קבוע?**  
-ת: לא — הסינכרון הבא מה-Sheets ידרוס אותו.
+## 20. Quick Reference — FAQ
 
-**ש: האדמין שינה את ה-PIN. האם רכזי הכיתה מקבלים הודעה?**  
-ת: לא — האחריות על יידוע הרכזים היא ידנית.
+**Q: Student tries to leave but quota is full. What can they do?**  
+A: Wait for a classmate to return (system shows expected return times) — or submit an urgent absence request (`isUrgent = true`).
 
-**ש: מה קורה לתלמיד שמסומן OVERDUE ב-DB?**  
-ת: מוצג כ-OFF_CAMPUS בכל ממשק. לא יוצרים OVERDUE חדש. `auto_return_students` יחזיר אותו כשהזמן יעבור.
+**Q: Student accidentally pressed checkout. Can they undo?**  
+A: Yes — 5-minute window. Cancellation hard-deletes the event from DB (no trace remains in history).
+
+**Q: Is a class edit via ClassEditModal permanent?**  
+A: No — next Google Sheets sync overwrites it.
+
+**Q: Admin changed PIN. Do supervisors get notified?**  
+A: No — must notify them manually.
+
+**Q: What happens to a student with OVERDUE status in the DB?**  
+A: Displayed as OFF_CAMPUS in all UI. No new OVERDUE entries are ever created. `auto_return_students` will return them when `expectedReturn` passes.
