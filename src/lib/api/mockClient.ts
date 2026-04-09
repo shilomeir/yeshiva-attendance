@@ -93,6 +93,7 @@ export class MockApiClient implements IApiClient {
     return { sent: 0, failed: 0 }
   }
 
+  // Students are managed via Google Sheets sync — addStudent kept only for mock/testing
   async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
     const student: Student = {
       id: uuidv4(),
@@ -116,6 +117,10 @@ export class MockApiClient implements IApiClient {
   async deleteStudent(id: string): Promise<void> {
     await db.students.delete(id)
     await db.events.where('studentId').equals(id).delete()
+  }
+
+  async getClassSize(classId: string): Promise<number> {
+    return db.students.where('classId').equals(classId).count()
   }
 
   async getLongAbsentStudents(days: number = 7): Promise<Student[]> {
@@ -179,6 +184,10 @@ export class MockApiClient implements IApiClient {
     })
 
     return event
+  }
+
+  async deleteEvent(id: string): Promise<void> {
+    await db.events.delete(id)
   }
 
   async getRecentEvents(limit: number = 50): Promise<Event[]> {
