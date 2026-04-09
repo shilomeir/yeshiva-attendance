@@ -510,9 +510,9 @@ export function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {GRADE_LEVELS.map((level) => {
+                    {[...new Set(classStats.map((cs) => cs.grade))].sort().map((gradeName) => {
                       const gradeClasses = classStats
-                        .filter((cs) => cs.grade === level.name)
+                        .filter((cs) => cs.grade === gradeName)
                         .sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
                       if (gradeClasses.length === 0) return null
 
@@ -524,15 +524,15 @@ export function DashboardPage() {
                       const multiClass = gradeClasses.length > 1
 
                       const gradeQuota = gradeClasses.reduce((sum) => {
-                        return sum + (level.capacity >= 50 ? 6 : 3)
+                        return sum + (gTotal >= 50 ? 6 : 3)
                       }, 0)
                       const gradeQuotaExceeded = gOffCampus >= gradeQuota
 
                       return (
-                        <Fragment key={level.name}>
+                        <Fragment key={gradeName}>
                           <tr className="border-b border-[var(--border)] bg-[var(--bg-2)]">
                             <td className="px-4 py-2.5 font-bold text-[var(--text)]">
-                              <span>{level.name}</span>
+                              <span>{gradeName}</span>
                               {gHighAbs && (
                                 <span className="mr-2 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-[var(--red)] dark:bg-red-900/30">
                                   ⚠ {gAbsRate.toFixed(0)}%
@@ -560,7 +560,7 @@ export function DashboardPage() {
                             const classLabel = cs.classId.includes(' כיתה ')
                               ? `כיתה ${cs.classId.split(' כיתה ')[1]}`
                               : cs.classId
-                            const classQuota = level.capacity >= 50 ? 6 : 3
+                            const classQuota = gTotal >= 50 ? 6 : 3
                             const classQuotaExceeded = cs.offCampus >= classQuota
                             return (
                               <tr
