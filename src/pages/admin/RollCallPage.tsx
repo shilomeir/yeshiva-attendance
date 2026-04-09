@@ -8,14 +8,18 @@ import {
   HelpCircle,
   Users,
   Download,
+  ClipboardList,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
-import type { Student } from '@/types'
+import type { Student, ClassStat } from '@/types'
 
 // Thresholds
 const ON_CAMPUS_METERS = 300
@@ -83,8 +87,60 @@ export function RollCallPage() {
   const [lastRun, setLastRun] = useState<Date | null>(null)
   const [search, setSearch] = useState('')
   const [filterClass, setFilterClass] = useState<LocationClass | 'הכל'>('הכל')
-  const [showConfirm, setShowConfirm] = useState(false)
   const waitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Pre-audit modal state
+  const [showAuditModal, setShowAuditModal] = useState(false)
+  const [auditMode, setAuditMode] = useState<'location' | 'manual' | null>(null)
+  const [allClassStats, setAllClassStats] = useState<ClassStat[]>([])
+  const [selectedClassIds, setSelectedClassIds] = useState<Set<string>>(new Set())
+  const [manualAuditSent, setManualAuditSent] = useState(false)
+
+  // Load class list when modal opens
+  useEffect(() => {
+    if (!showAuditModal) return
+    api.getClassStats().then((stats) => {
+      setAllClassStats(stats)
+      setSelectedClassIds(new Set(stats.map((s) => s.classId)))
+    })
+  }, [showAuditModal])
+
+  const handleOpenModal = () => {
+    setAuditMode(null)
+    setManualAuditSent(false)
+    setShowAuditModal(true)
+  }
+
+  const handleConfirmAudit = async () => {
+    setShowAuditModal(false)
+    if (auditMode === 'location') {
+      runRollCall()
+    } else {
+      // Manual audit: broadcast to class supervisors
+      const classIds = [...selectedClassIds]
+      const ch = supabase.channel('audit-control')
+      await new Promise<void>((resolve) => {
+        ch.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            ch.send({ type: 'broadcast', event: 'manual_audit_start', payload: { classIds } })
+            resolve()
+          }
+        })
+      })
+      supabase.removeChannel(ch)
+      setManualAuditSent(true)
+      setLastRun(new Date())
+    }
+  }
+
+  const toggleClass = (classId: string) => {
+    setSelectedClassIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(classId)) next.delete(classId)
+      else next.add(classId)
+      return next
+    })
+  }
 
   const enrichAndSet = useCallback((all: Student[]) => {
     const enriched: StudentWithLocation[] = all.map((s) => {
@@ -227,28 +283,10 @@ export function RollCallPage() {
             <Download className="h-4 w-4" />
             ייצא CSV
           </Button>
-          {!showConfirm ? (
-            <Button onClick={() => setShowConfirm(true)} disabled={isLoading || isWaiting} size="sm">
-              <MapPin className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
-              {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'הפעל ביקורת'}
-            </Button>
-          ) : (
-            <div className="flex items-center gap-2 rounded-lg border border-orange-300 bg-orange-50 px-3 py-1.5 dark:border-orange-700 dark:bg-orange-950/20">
-              <span className="text-sm font-medium text-orange-700 dark:text-orange-400">לאסוף מיקומי תלמידים?</span>
-              <button
-                onClick={() => { setShowConfirm(false); runRollCall() }}
-                className="rounded-md bg-orange-500 px-3 py-1 text-xs font-bold text-white hover:bg-orange-600"
-              >
-                כן, הפעל
-              </button>
-              <button
-                onClick={() => setShowConfirm(false)}
-                className="rounded-md border border-orange-300 px-2 py-1 text-xs text-orange-700 hover:bg-orange-100 dark:text-orange-400"
-              >
-                ביטול
-              </button>
-            </div>
-          )}
+          <Button onClick={handleOpenModal} disabled={isLoading || isWaiting} size="sm">
+            <MapPin className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
+            {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'הפעל ביקורת'}
+          </Button>
         </div>
       </div>
 
@@ -380,6 +418,110 @@ export function RollCallPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Manual audit sent banner */}
+      {manualAuditSent && (
+        <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 dark:border-blue-800 dark:bg-blue-950/30">
+          <ClipboardList className="h-5 w-5 shrink-0 text-blue-600 dark:text-blue-400" />
+          <div>
+            <p className="font-medium text-sm text-blue-700 dark:text-blue-300">ביקורת ידנית הופעלה</p>
+            <p className="text-xs text-blue-600 dark:text-blue-400 mt-0.5">
+              נשלחה הודעה לאחראי הכיתות. עליהם לסמן נוכחות מלוח הבקרה שלהם.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Pre-audit modal */}
+      <Dialog open={showAuditModal} onOpenChange={setShowAuditModal}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>הפעלת ביקורת פנימית</DialogTitle>
+            <DialogDescription>הגדר את פרטי הביקורת לפני ההפעלה</DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-5 pt-1">
+            {/* Q1: Location mode */}
+            <div>
+              <p className="text-sm font-semibold text-[var(--text)] mb-2">1. איסוף מיקום</p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setAuditMode('location')}
+                  className={`rounded-lg border p-3 text-sm text-start transition-all ${
+                    auditMode === 'location'
+                      ? 'border-[var(--blue)] bg-blue-50 dark:bg-blue-950/30 text-[var(--blue)]'
+                      : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--blue)]'
+                  }`}
+                >
+                  <MapPin className="mb-1 h-4 w-4" />
+                  <p className="font-medium">עם מיקום</p>
+                  <p className="text-xs opacity-70 mt-0.5">שליחת בקשת GPS לתלמידים</p>
+                </button>
+                <button
+                  onClick={() => setAuditMode('manual')}
+                  className={`rounded-lg border p-3 text-sm text-start transition-all ${
+                    auditMode === 'manual'
+                      ? 'border-[var(--blue)] bg-blue-50 dark:bg-blue-950/30 text-[var(--blue)]'
+                      : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--blue)]'
+                  }`}
+                >
+                  <ClipboardList className="mb-1 h-4 w-4" />
+                  <p className="font-medium">ללא מיקום</p>
+                  <p className="text-xs opacity-70 mt-0.5">אחראי כיתה מסמן נוכחות ידנית</p>
+                </button>
+              </div>
+            </div>
+
+            {/* Q2: Class selection */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-semibold text-[var(--text)]">2. כיתות משתתפות</p>
+                <button
+                  className="text-xs text-[var(--blue)] hover:underline"
+                  onClick={() =>
+                    setSelectedClassIds(
+                      selectedClassIds.size === allClassStats.length
+                        ? new Set()
+                        : new Set(allClassStats.map((s) => s.classId))
+                    )
+                  }
+                >
+                  {selectedClassIds.size === allClassStats.length ? 'בטל הכל' : 'בחר הכל'}
+                </button>
+              </div>
+              <div className="max-h-52 overflow-y-auto rounded-lg border border-[var(--border)] divide-y divide-[var(--border)]">
+                {allClassStats.length === 0 ? (
+                  <p className="p-3 text-sm text-[var(--text-muted)]">טוען כיתות...</p>
+                ) : (
+                  allClassStats.map((cs) => (
+                    <label key={cs.classId} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-[var(--bg-2)]">
+                      <input
+                        type="checkbox"
+                        checked={selectedClassIds.has(cs.classId)}
+                        onChange={() => toggleClass(cs.classId)}
+                        className="accent-[var(--blue)]"
+                      />
+                      <span className="text-sm text-[var(--text)]">{cs.classId}</span>
+                      <span className="text-xs text-[var(--text-muted)] ms-auto">{cs.grade}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowAuditModal(false)}>ביטול</Button>
+              <Button
+                onClick={handleConfirmAudit}
+                disabled={!auditMode || selectedClassIds.size === 0}
+              >
+                הפעל ביקורת
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

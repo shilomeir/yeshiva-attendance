@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
+import { Clock } from 'lucide-react'
 import { StatusButtons } from '@/components/student/StatusButtons'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -8,12 +9,29 @@ import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { supabase } from '@/lib/supabase'
 import { toast } from '@/hooks/use-toast'
-import type { Student } from '@/types'
+import type { Student, AbsenceRequest } from '@/types'
+
+function getTodayStr() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function parseTimeToday(timeStr: string): Date {
+  const [h, m] = timeStr.split(':').map(Number)
+  const d = new Date()
+  d.setHours(h, m, 0, 0)
+  return d
+}
+
+function getMinutesRemaining(endTime: string): number {
+  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
+}
 
 export function HomePage() {
   const { currentUser } = useAuthStore()
   const [student, setStudent] = useState<Student | null>(currentUser)
   const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number } | null>(null)
+  const [todayDeparture, setTodayDeparture] = useState<AbsenceRequest | null>(null)
+  const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const refreshStudent = async () => {
@@ -25,6 +43,25 @@ export function HomePage() {
   useEffect(() => {
     refreshStudent()
   }, [currentUser?.id])
+
+  // Load today's approved departure request
+  useEffect(() => {
+    if (!currentUser) return
+    api.getAbsenceRequests({ studentId: currentUser.id, status: 'APPROVED' }).then((reqs) => {
+      const today = getTodayStr()
+      const active = reqs.find(
+        (r) => r.date === today && getMinutesRemaining(r.endTime) > -60
+      )
+      setTodayDeparture(active ?? null)
+    })
+  }, [currentUser?.id])
+
+  // Tick every minute to keep countdown live
+  useEffect(() => {
+    if (!todayDeparture) return
+    const id = setInterval(() => setTick((t) => t + 1), 60000)
+    return () => clearInterval(id)
+  }, [todayDeparture])
 
   // Clear undo buffer when it expires
   useEffect(() => {
@@ -102,6 +139,34 @@ export function HomePage() {
           </button>
         </div>
       )}
+
+      {/* Departure countdown banner */}
+      {todayDeparture && (() => {
+        const minsToStart = getMinutesRemaining(todayDeparture.startTime)
+        const minsToEnd = getMinutesRemaining(todayDeparture.endTime)
+        if (minsToEnd <= -60) return null
+        const isActive = minsToStart <= 0 && minsToEnd > 0
+        return (
+          <div className="flex items-center gap-3 rounded-xl bg-blue-50 px-4 py-3 dark:bg-blue-950/30">
+            <Clock className="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
+            <div className="flex-1 text-sm">
+              <span className="font-medium text-blue-700 dark:text-blue-300">
+                יציאה מאושרת: {todayDeparture.startTime}–{todayDeparture.endTime}
+              </span>
+              <span className="mx-1 text-blue-500">·</span>
+              {isActive ? (
+                <span className="text-blue-600 dark:text-blue-400">
+                  נותרו {minsToEnd} דק&apos; לחזרה
+                </span>
+              ) : (
+                <span className="text-blue-600 dark:text-blue-400">
+                  היציאה בעוד {minsToStart} דק&apos;
+                </span>
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Current status card */}
       <Card>

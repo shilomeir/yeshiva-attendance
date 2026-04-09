@@ -31,11 +31,7 @@ function exportToXlsx(students: Student[]) {
       'טלפון': s.phone,
       'כיתה': s.classId,
       'סטטוס':
-        s.currentStatus === 'ON_CAMPUS'
-          ? 'בישיבה'
-          : s.currentStatus === 'OFF_CAMPUS'
-            ? 'מחוץ לישיבה'
-            : 'באיחור',
+        s.currentStatus === 'ON_CAMPUS' ? 'בישיבה' : 'מחוץ לישיבה',
     }))
 
     const ws = XLSX.utils.json_to_sheet(rows)

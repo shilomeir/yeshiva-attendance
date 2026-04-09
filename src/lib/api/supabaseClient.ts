@@ -119,6 +119,40 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
   }
 
+  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
+    const { data, error } = await supabase
+      .from('students')
+      .select('push_token')
+      .not('push_token', 'is', null)
+    if (error) throw error
+
+    const tokens = (data ?? []).map((s: { push_token: string }) => s.push_token).filter(Boolean)
+    let sent = 0
+    let failed = 0
+    let lastError: string | undefined
+
+    await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const res = await supabase.functions.invoke('send-push', {
+            body: { subscription: token, title, body },
+          })
+          if (res.error) {
+            failed++
+            lastError = res.error?.message ?? JSON.stringify(res.error)
+          } else {
+            sent++
+          }
+        } catch (e) {
+          failed++
+          lastError = e instanceof Error ? e.message : String(e)
+        }
+      })
+    )
+
+    return { sent, failed, lastError }
+  }
+
   async getRecentEvents(limit = 50): Promise<Event[]> {
     const { data, error } = await supabase.from('events').select('*').order('timestamp', { ascending: false }).limit(limit)
     if (error) throw error
@@ -357,9 +391,8 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async markOverdueStudents(): Promise<number> {
-    const { data, error } = await supabase.rpc('mark_overdue_students')
-    if (error) throw error
-    return (data as number) ?? 0
+    // OVERDUE status removed — no longer used
+    return 0
   }
 
   async autoReturnStudents(): Promise<number> {

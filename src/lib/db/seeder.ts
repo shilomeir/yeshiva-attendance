@@ -46,13 +46,10 @@ const ABSENCE_REASONS = [
 
 /**
  * Weighted status distribution:
- *  ~75% ON_CAMPUS · ~20% OFF_CAMPUS · ~5% OVERDUE
+ *  ~75% ON_CAMPUS · ~25% OFF_CAMPUS
  */
 function weightedStatus(): StudentStatus {
-  const r = Math.random()
-  if (r < 0.75) return 'ON_CAMPUS'
-  if (r < 0.95) return 'OFF_CAMPUS'
-  return 'OVERDUE'
+  return Math.random() < 0.75 ? 'ON_CAMPUS' : 'OFF_CAMPUS'
 }
 
 function randomItem<T>(arr: T[]): T {
@@ -128,7 +125,6 @@ function generateEvents(studentId: string, count: number): Event[] {
  * Generate absence requests for a student based on their current status.
  *
  * OFF_CAMPUS  → ~68% APPROVED · ~17% PENDING (some urgent) · ~8% REJECTED · ~7% none
- * OVERDUE     → ~60% APPROVED (returned late) · ~40% none
  * ON_CAMPUS   → ~8% have an old APPROVED/REJECTED request (historical)
  */
 function generateAbsenceRequests(
@@ -149,8 +145,6 @@ function generateAbsenceRequests(
       reqStatus = 'REJECTED'
     }
     // ~7%: no request at all
-  } else if (status === 'OVERDUE') {
-    if (Math.random() < 0.60) reqStatus = 'APPROVED'
   } else {
     // ON_CAMPUS: occasional historical request
     if (Math.random() < 0.08) {
@@ -299,13 +293,12 @@ export async function seedDatabase(): Promise<void> {
 
   const onCampus   = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
   const offCampus  = students.filter(s => s.currentStatus === 'OFF_CAMPUS').length
-  const overdue    = students.filter(s => s.currentStatus === 'OVERDUE').length
   const urgent     = allAbsenceRequests.filter(r => r.isUrgent).length
   const pending    = allAbsenceRequests.filter(r => r.status === 'PENDING').length
 
   console.log(
     `Seeded ${students.length} students ` +
-    `(${onCampus} ON_CAMPUS · ${offCampus} OFF_CAMPUS · ${overdue} OVERDUE) ` +
+    `(${onCampus} ON_CAMPUS · ${offCampus} OFF_CAMPUS) ` +
     `across 16 classes, ${allEvents.length} events, ` +
     `${allAbsenceRequests.length} absence requests (${urgent} urgent · ${pending} pending)`
   )

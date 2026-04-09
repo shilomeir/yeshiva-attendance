@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { Shield, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -14,10 +14,39 @@ export function LoginScreen() {
   const navigate = useNavigate()
   const [idNumber, setIdNumber] = useState(() => localStorage.getItem(SAVED_ID_KEY) ?? '')
   const [showAdminModal, setShowAdminModal] = useState(false)
+  const [autoLogging, setAutoLogging] = useState(false)
   const { login, isLoading, error, clearError, currentUser, isAdmin } = useAuthStore()
+
+  useEffect(() => {
+    const rememberedId = localStorage.getItem('yeshiva_remembered_id')
+    if (rememberedId) {
+      setAutoLogging(true)
+      login(rememberedId).then((success) => {
+        if (success) {
+          navigate('/student', { replace: true })
+        } else {
+          // Token is stale — clear it so the form shows normally
+          localStorage.removeItem('yeshiva_remembered_id')
+          setAutoLogging(false)
+        }
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   if (currentUser) return <Navigate to="/student" replace />
   if (isAdmin) return <Navigate to="/admin" replace />
+
+  if (autoLogging) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[var(--bg)]">
+        <div className="flex flex-col items-center gap-3 text-[var(--text-muted)]">
+          <img src="/logo.png" alt="לוגו" className="h-20 w-auto animate-pulse" draggable={false} />
+          <p className="text-sm">מתחבר...</p>
+        </div>
+      </div>
+    )
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()

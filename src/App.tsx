@@ -20,6 +20,7 @@ import { ClassSupervisorDashboard } from '@/pages/class-supervisor/ClassSupervis
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
+import { supabase } from '@/lib/supabase'
 
 function StudentGuard({ children }: { children: React.ReactNode }) {
   const { currentUser } = useAuthStore()
@@ -42,6 +43,7 @@ function ClassSupervisorGuard({ children }: { children: React.ReactNode }) {
 export default function App() {
   const { initialize } = useSyncStore()
   const { subscribeToRealtime } = useStudentsStore()
+  const { currentUser } = useAuthStore()
   const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
@@ -54,17 +56,32 @@ export default function App() {
     return cleanup
   }, [subscribeToRealtime])
 
-  // Clear app badge whenever the app becomes visible
+  // When the app becomes visible: clear badge + refresh lastSeen for logged-in student
   useEffect(() => {
-    const clearBadge = () => {
-      if (!document.hidden && 'clearAppBadge' in navigator) {
+    const onVisible = () => {
+      if (document.hidden) return
+      if ('clearAppBadge' in navigator) {
         ;(navigator as Navigator & { clearAppBadge(): Promise<void> }).clearAppBadge().catch(() => {})
       }
     }
-    clearBadge()
-    document.addEventListener('visibilitychange', clearBadge)
-    return () => document.removeEventListener('visibilitychange', clearBadge)
+    onVisible()
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
   }, [])
+
+  // Stamp lastSeen whenever the app becomes visible and a student is logged in
+  useEffect(() => {
+    if (!currentUser) return
+    const stamp = () => {
+      if (!document.hidden) {
+        supabase.from('students').update({ lastSeen: new Date().toISOString() }).eq('id', currentUser.id).then(() => {})
+      }
+    }
+    stamp()
+    document.addEventListener('visibilitychange', stamp)
+    return () => document.removeEventListener('visibilitychange', stamp)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id])
 
   return (
     <>

@@ -3,7 +3,7 @@ import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import type { Student, StudentStatus } from '@/types'
 
-type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
+type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING'
 
 interface StudentsState {
   students: Student[]

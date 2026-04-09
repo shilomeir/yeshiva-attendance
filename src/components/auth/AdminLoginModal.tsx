@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Shield, Loader2, GraduationCap } from 'lucide-react'
+import { Shield, Loader2 } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -95,16 +95,6 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
                 {error}
               </p>
             )}
-          </div>
-
-          {/* Hint for supervisors */}
-          <div className="flex items-start gap-2 rounded-lg bg-[var(--bg-2)] px-3 py-2.5">
-            <GraduationCap className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
-            <p className="text-xs text-[var(--text-muted)]">
-              אחראי כיתה: הזן את קוד הגישה הכולל + אות השכבה + מספר הכיתה
-              <br />
-              <span className="opacity-60">לדוגמה: כיתה 3 בשיעור א' — קוד + a3</span>
-            </p>
           </div>
 
           <div className="flex gap-2">

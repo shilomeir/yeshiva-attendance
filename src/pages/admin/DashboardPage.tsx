@@ -1,7 +1,7 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   Users, UserCheck, UserX, CalendarOff, Phone,
-  AlertOctagon, CheckCircle2, XCircle, MapPin,
+  AlertOctagon, CheckCircle2, XCircle, MapPin, Bell, Send, Loader2, Clock,
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -11,7 +11,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
-import { GRADE_LEVELS } from '@/lib/constants/grades'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import type { DashboardStats, Student, AbsenceRequest, ClassStat } from '@/types'
 
@@ -43,6 +42,16 @@ const STAT_CARDS = [
 ]
 
 type UrgentWithStudent = AbsenceRequest & { studentName: string; studentClass: string }
+type DepartureEntry = AbsenceRequest & { studentName: string; studentClass: string }
+
+function getTodayStr() { return new Date().toISOString().slice(0, 10) }
+function parseTimeToday(t: string): Date {
+  const [h, m] = t.split(':').map(Number)
+  const d = new Date(); d.setHours(h, m, 0, 0); return d
+}
+function minsRemaining(endTime: string) {
+  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
+}
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -50,7 +59,16 @@ export function DashboardPage() {
   const [urgentRequests, setUrgentRequests] = useState<UrgentWithStudent[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [locationBreakdown, setLocationBreakdown] = useState({ inYeshiva: 0, inArea: 0, far: 0 })
+  const [todayDepartures, setTodayDepartures] = useState<DepartureEntry[]>([])
+  const [, setTick] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
+
+  // Broadcast notification state
+  const [broadcastTitle, setBroadcastTitle] = useState('')
+  const [broadcastBody, setBroadcastBody] = useState('')
+  const [broadcastSending, setBroadcastSending] = useState(false)
+  const [broadcastResult, setBroadcastResult] = useState<{ sent: number; failed: number; lastError?: string } | null>(null)
+  const broadcastResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const loadData = async () => {
     setIsLoading(true)
@@ -86,6 +104,19 @@ export function DashboardPage() {
         })
       )
       setUrgentRequests(enriched)
+
+      // Today's departures
+      const today = getTodayStr()
+      const approvedToday = await api.getAbsenceRequests({ status: 'APPROVED' })
+      const todayReqs = approvedToday.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
+      const departures = await Promise.all(
+        todayReqs.map(async (req) => {
+          const s = await api.getStudent(req.studentId)
+          return { ...req, studentName: s?.fullName ?? 'לא ידוע', studentClass: s?.classId ?? '' }
+        })
+      )
+      departures.sort((a, b) => a.startTime.localeCompare(b.startTime))
+      setTodayDepartures(departures)
     } catch {
       console.error('Failed to load dashboard stats')
     } finally {
@@ -111,16 +142,37 @@ export function DashboardPage() {
       api.autoReturnStudents().catch(() => {})
     }, 60000)
 
+    // Tick every minute to keep departure countdowns live
+    const tickInterval = setInterval(() => setTick((t) => t + 1), 60000)
+
     return () => {
       supabase.removeChannel(studentsChannel)
       supabase.removeChannel(requestsChannel)
       clearInterval(autoReturnInterval)
+      clearInterval(tickInterval)
     }
   }, [])
 
   const handleUrgent = async (id: string, status: 'APPROVED' | 'REJECTED') => {
     await api.updateAbsenceRequestStatus(id, status)
     setUrgentRequests((prev) => prev.filter((r) => r.id !== id))
+  }
+
+  const handleBroadcast = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!broadcastTitle.trim() && !broadcastBody.trim()) return
+    setBroadcastSending(true)
+    setBroadcastResult(null)
+    try {
+      const result = await api.sendPushToAll(broadcastTitle.trim(), broadcastBody.trim())
+      setBroadcastResult(result)
+      setBroadcastTitle('')
+      setBroadcastBody('')
+      if (broadcastResultTimer.current) clearTimeout(broadcastResultTimer.current)
+      broadcastResultTimer.current = setTimeout(() => setBroadcastResult(null), 6000)
+    } finally {
+      setBroadcastSending(false)
+    }
   }
 
   // Hero %
@@ -141,15 +193,18 @@ export function DashboardPage() {
       ].filter((d) => d.value > 0)
     : []
 
-  // Bar chart by grade
-  const gradeChartData = GRADE_LEVELS.map((level) => {
-    const classes = classStats.filter((cs) => cs.grade === level.name)
-    return {
-      name: level.name,
-      בישיבה: classes.reduce((s, cs) => s + cs.onCampus, 0),
-      מחוץ: classes.reduce((s, cs) => s + cs.offCampus, 0),
-    }
-  }).filter((d) => d.בישיבה + d.מחוץ > 0)
+  // Bar chart by grade — built from live classStats, not hardcoded GRADE_LEVELS
+  const gradeChartData = (() => {
+    const gradeNames = [...new Set(classStats.map((cs) => cs.grade))].sort()
+    return gradeNames.map((grade) => {
+      const classes = classStats.filter((cs) => cs.grade === grade)
+      return {
+        name: grade,
+        בישיבה: classes.reduce((s, cs) => s + cs.onCampus, 0),
+        מחוץ: classes.reduce((s, cs) => s + cs.offCampus, 0),
+      }
+    }).filter((d) => d.בישיבה + d.מחוץ > 0)
+  })()
 
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">
@@ -182,6 +237,40 @@ export function DashboardPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Today's departures */}
+      {todayDepartures.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 text-[var(--blue)]" />
+              <CardTitle className="text-base">יציאות היום ({todayDepartures.length})</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="divide-y divide-[var(--border)]">
+              {todayDepartures.map((dep) => {
+                const mins = minsRemaining(dep.endTime)
+                const isActive = minsRemaining(dep.startTime) <= 0 && mins > 0
+                const isPending = minsRemaining(dep.startTime) > 0
+                return (
+                  <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <div className="flex-1 min-w-0">
+                      <span className="font-medium text-sm text-[var(--text)]">{dep.studentName}</span>
+                      <span className="mx-1.5 text-[var(--text-muted)] text-xs">·</span>
+                      <span className="text-xs text-[var(--text-muted)]">{dep.studentClass}</span>
+                    </div>
+                    <span className="text-xs text-[var(--text-muted)] shrink-0">{dep.startTime}–{dep.endTime}</span>
+                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
+                      {isActive ? `נותרו ${mins} דק'` : isPending ? `בעוד ${minsRemaining(dep.startTime)} דק'` : 'הסתיים'}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Pie chart — 3 location categories */}
       {!isLoading && pieData.length > 0 && (
@@ -505,6 +594,72 @@ export function DashboardPage() {
           </Card>
         </>
       )}
+
+      {/* Broadcast push notification */}
+      <Card className="border-[var(--blue)]/30 bg-blue-50/40 dark:bg-blue-950/10">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <div className="rounded-lg bg-blue-100 p-2 dark:bg-blue-900/30">
+              <Bell className="h-5 w-5 text-[var(--blue)]" />
+            </div>
+            <div>
+              <CardTitle className="text-base text-[var(--blue)]">שליחת התראות לכולם</CardTitle>
+              <p className="text-xs text-[var(--text-muted)]">שלח התראה לכל המכשירים הרשומים</p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleBroadcast} className="flex flex-col gap-3">
+            <input
+              type="text"
+              placeholder="כותרת ההתראה (לא חובה)"
+              value={broadcastTitle}
+              onChange={(e) => setBroadcastTitle(e.target.value)}
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]/40"
+              dir="rtl"
+            />
+            <textarea
+              placeholder="תוכן ההתראה..."
+              value={broadcastBody}
+              onChange={(e) => setBroadcastBody(e.target.value)}
+              rows={3}
+              className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]/40"
+              dir="rtl"
+            />
+            <button
+              type="submit"
+              disabled={broadcastSending || (!broadcastTitle.trim() && !broadcastBody.trim())}
+              className="flex items-center justify-center gap-2 rounded-lg bg-[var(--blue)] px-4 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            >
+              {broadcastSending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  שולח...
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4" />
+                  שלח לכולם
+                </>
+              )}
+            </button>
+            {broadcastResult && (
+              <div className="flex flex-col gap-1">
+                <p className={`text-center text-sm font-medium ${broadcastResult.failed > 0 && broadcastResult.sent === 0 ? 'text-[var(--red)]' : broadcastResult.failed > 0 ? 'text-[var(--orange)]' : 'text-[var(--green)]'}`}>
+                  {broadcastResult.sent > 0
+                    ? `✓ נשלח ל-${broadcastResult.sent} מכשירים${broadcastResult.failed > 0 ? ` · נכשל: ${broadcastResult.failed}` : ''}`
+                    : broadcastResult.failed > 0
+                    ? `שגיאה — השליחה נכשלה (${broadcastResult.failed} מכשירים)`
+                    : 'אין מכשירים רשומים כרגע'}
+                </p>
+                {broadcastResult.lastError && (
+                  <p className="text-center text-xs text-[var(--text-muted)] break-all">{broadcastResult.lastError}</p>
+                )}
+              </div>
+            )}
+          </form>
+        </CardContent>
+      </Card>
     </div>
   )
 }

@@ -23,8 +23,10 @@ if (savedState) {
 // Initialize sync engine
 initSync()
 
-// Seed database with demo data (only on first run)
-seedDatabase().catch(console.error)
+// Seed database with demo data — dev only (local IndexedDB, never affects production)
+if (import.meta.env.DEV) {
+  seedDatabase().catch(console.error)
+}
 
 const container = document.getElementById('root')!
 const root = createRoot(container)

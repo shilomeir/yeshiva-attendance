@@ -89,6 +89,10 @@ export class MockApiClient implements IApiClient {
     await db.students.update(id, { push_token: token })
   }
 
+  async sendPushToAll(_title: string, _body: string): Promise<{ sent: number; failed: number }> {
+    return { sent: 0, failed: 0 }
+  }
+
   async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
     const student: Student = {
       id: uuidv4(),
@@ -505,29 +509,8 @@ export class MockApiClient implements IApiClient {
   }
 
   async markOverdueStudents(): Promise<number> {
-    const now = new Date()
-    const offCampus = await db.students
-      .filter((s) => s.currentStatus === 'OFF_CAMPUS')
-      .toArray()
-    if (offCampus.length === 0) return 0
-
-    let count = 0
-    for (const student of offCampus) {
-      const events = await db.events
-        .where('studentId').equals(student.id)
-        .and((e) => e.type === 'CHECK_OUT' && e.expectedReturn != null)
-        .toArray()
-      if (events.length === 0) continue
-      // Find most recent CHECK_OUT
-      const latest = events.sort((a, b) =>
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      )[0]
-      if (latest.expectedReturn && new Date(latest.expectedReturn) < now) {
-        await db.students.update(student.id, { currentStatus: 'OVERDUE' })
-        count++
-      }
-    }
-    return count
+    // OVERDUE status removed — no longer used
+    return 0
   }
 
   async createCheckoutWithQuotaCheck(

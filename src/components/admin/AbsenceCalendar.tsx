@@ -11,16 +11,20 @@ import { he } from 'date-fns/locale'
 import { ChevronRight, ChevronLeft, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
-import { db } from '@/lib/db/schema'
 import { cn } from '@/lib/utils/cn'
-import type { AbsenceRequest } from '@/types'
+import type { AbsenceRequest, Student } from '@/types'
+
+interface EnrichedRequest extends AbsenceRequest {
+  studentName: string
+  studentClass: string
+  studentGrade: string
+}
 
 interface DayData {
   date: Date
-  offCampusCount: number
-  absenceRequests: AbsenceRequest[]
+  exitCount: number
+  requests: EnrichedRequest[]
   totalStudents: number
 }
 
@@ -34,37 +38,49 @@ export function AbsenceCalendar() {
   const loadData = async () => {
     setIsLoading(true)
     try {
-      const total = await db.students.count()
-      setTotalStudents(total)
-
       const monthStart = startOfMonth(currentMonth)
       const monthEnd = endOfMonth(currentMonth)
       const days = eachDayOfInterval({ start: monthStart, end: monthEnd })
 
-      const approvedRequests = await api.getAbsenceRequests({ status: 'APPROVED' })
-      const allEvents = await db.events
-        .where('type')
-        .equals('CHECK_OUT')
-        .toArray()
+      // Fetch approved requests and all students in parallel
+      const [approvedRequests, allStudents] = await Promise.all([
+        api.getAbsenceRequests({ status: 'APPROVED' }),
+        api.getStudents(),
+      ])
+
+      const total = (allStudents as Student[]).length
+      setTotalStudents(total)
+
+      // Build a studentId → Student map for fast lookup
+      const studentMap = new Map<string, Student>()
+      for (const s of allStudents as Student[]) {
+        studentMap.set(s.id, s)
+      }
+
+      // Enrich all requests with student info
+      const enriched: EnrichedRequest[] = approvedRequests.map((r) => {
+        const s = studentMap.get(r.studentId)
+        return {
+          ...r,
+          studentName: s?.fullName ?? 'לא ידוע',
+          studentClass: s?.classId ?? '',
+          studentGrade: s?.grade ?? '',
+        }
+      })
 
       const newDayData = new Map<string, DayData>()
-
       for (const day of days) {
         const dateStr = format(day, 'yyyy-MM-dd')
-        const dayStart = new Date(dateStr + 'T00:00:00')
-        const dayEnd = new Date(dateStr + 'T23:59:59')
-
-        const offCampusCount = allEvents.filter((e) => {
-          const eventDate = new Date(e.timestamp)
-          return eventDate >= dayStart && eventDate <= dayEnd
-        }).length
-
-        const dayRequests = approvedRequests.filter((r) => r.date === dateStr)
-
+        // Count approved requests whose date range covers this day
+        const dayRequests = enriched.filter((r) => {
+          if (r.date > dateStr) return false
+          const end = r.endDate ?? r.date
+          return end >= dateStr
+        })
         newDayData.set(dateStr, {
           date: day,
-          offCampusCount,
-          absenceRequests: dayRequests,
+          exitCount: dayRequests.length,
+          requests: dayRequests,
           totalStudents: total,
         })
       }
@@ -86,12 +102,11 @@ export function AbsenceCalendar() {
     end: endOfMonth(currentMonth),
   })
 
-  // Get day-of-week for first day (0=Sun, 6=Sat) — in RTL/Hebrew calendar order
   const firstDayOfWeek = getDay(startOfMonth(currentMonth))
 
   const getDayColor = (data: DayData | undefined): string => {
-    if (!data || data.offCampusCount === 0) return ''
-    const pct = (data.offCampusCount / data.totalStudents) * 100
+    if (!data || data.exitCount === 0) return ''
+    const pct = (data.exitCount / data.totalStudents) * 100
     if (pct < 5) return 'bg-green-100 text-green-800 dark:bg-green-900/30'
     if (pct < 15) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30'
     return 'bg-red-100 text-red-800 dark:bg-red-900/30'
@@ -119,7 +134,6 @@ export function AbsenceCalendar() {
         <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-green-200" />פחות מ-5%</span>
         <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-yellow-200" />5-15%</span>
         <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-red-200" />מעל 15%</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-[var(--blue)] opacity-60" />בקשות מאושרות</span>
       </div>
 
       {/* Calendar grid */}
@@ -140,7 +154,6 @@ export function AbsenceCalendar() {
           </div>
         ) : (
           <div className="grid grid-cols-7">
-            {/* Empty cells for first week offset */}
             {Array.from({ length: firstDayOfWeek }).map((_, i) => (
               <div key={`empty-${i}`} className="border-b border-e border-[var(--border)] p-2 min-h-[70px]" />
             ))}
@@ -149,7 +162,6 @@ export function AbsenceCalendar() {
               const dateStr = format(day, 'yyyy-MM-dd')
               const data = dayData.get(dateStr)
               const dayColor = getDayColor(data)
-              const hasApproved = (data?.absenceRequests.length ?? 0) > 0
 
               return (
                 <div
@@ -162,14 +174,11 @@ export function AbsenceCalendar() {
                   onClick={() => setSelectedDay(data ?? null)}
                 >
                   <span className="text-sm font-medium">{format(day, 'd')}</span>
-                  {data && data.offCampusCount > 0 && (
+                  {data && data.exitCount > 0 && (
                     <div className="mt-1">
-                      <span className="text-xs font-bold">{data.offCampusCount}</span>
+                      <span className="text-xs font-bold">{data.exitCount}</span>
                       <span className="text-xs"> יציאות</span>
                     </div>
-                  )}
-                  {hasApproved && (
-                    <div className="absolute bottom-1 end-1 h-2 w-2 rounded-full bg-[var(--blue)]" />
                   )}
                 </div>
               )
@@ -183,34 +192,46 @@ export function AbsenceCalendar() {
         <Card>
           <CardContent className="p-4">
             <div className="flex items-start justify-between mb-3">
-              <h3 className="font-semibold text-[var(--text)]">
-                {format(selectedDay.date, 'EEEE, d בMMMM', { locale: he })}
-              </h3>
+              <div>
+                <h3 className="font-semibold text-[var(--text)]">
+                  {format(selectedDay.date, 'EEEE, d בMMMM', { locale: he })}
+                </h3>
+                <p className="text-sm text-[var(--text-muted)] mt-0.5">
+                  {selectedDay.exitCount} יציאות מאושרות
+                  {selectedDay.totalStudents > 0 && ` (${((selectedDay.exitCount / selectedDay.totalStudents) * 100).toFixed(1)}%)`}
+                </p>
+              </div>
               <button onClick={() => setSelectedDay(null)} className="text-[var(--text-muted)] hover:text-[var(--text)]">
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <p className="text-sm text-[var(--text-muted)] mb-3">
-              {selectedDay.offCampusCount} יציאות מתועדות ({((selectedDay.offCampusCount / selectedDay.totalStudents) * 100).toFixed(1)}%)
-            </p>
-
-            {selectedDay.absenceRequests.length > 0 && (
-              <div>
-                <p className="text-sm font-medium text-[var(--text)] mb-2">בקשות מאושרות:</p>
-                <div className="flex flex-col gap-2">
-                  {selectedDay.absenceRequests.map((req) => (
-                    <div key={req.id} className="rounded-lg bg-[var(--bg-2)] p-2 text-sm">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[var(--text)]">{req.reason}</span>
-                        <StatusBadge status="OFF_CAMPUS" />
+            {selectedDay.requests.length === 0 ? (
+              <p className="text-sm text-[var(--text-muted)]">אין יציאות מאושרות ביום זה</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {selectedDay.requests.map((req) => (
+                  <div key={req.id} className="rounded-lg bg-[var(--bg-2)] p-3 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-[var(--text)]">{req.studentName}</p>
+                        {(req.studentGrade || req.studentClass) && (
+                          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                            {req.studentGrade}
+                            {req.studentGrade && req.studentClass ? ' · ' : ''}
+                            {req.studentClass}
+                          </p>
+                        )}
                       </div>
-                      <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                        {req.startTime} — {req.endTime}
-                      </p>
+                      <span className="text-xs text-[var(--text-muted)] shrink-0">
+                        {req.startTime}–{req.endTime}
+                      </span>
                     </div>
-                  ))}
-                </div>
+                    {req.reason && (
+                      <p className="text-xs text-[var(--text-muted)] mt-1">{req.reason}</p>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </CardContent>

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Save, KeyRound, Clock, Eye, EyeOff } from 'lucide-react'
+import { KeyRound, Eye, EyeOff } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -7,24 +7,8 @@ import { Label } from '@/components/ui/label'
 import { toast } from '@/hooks/use-toast'
 import { useAuthStore } from '@/store/authStore'
 
-const SETTINGS_KEY = 'yeshiva_settings'
-
-interface Settings {
-  gracePeriodMinutes: number
-}
-
-function loadSettings(): Settings {
-  try {
-    const saved = localStorage.getItem(SETTINGS_KEY)
-    if (saved) return JSON.parse(saved)
-  } catch {}
-  return { gracePeriodMinutes: 30 }
-}
-
 export function SettingsPage() {
   const { changeAdminPin } = useAuthStore()
-  const [settings, setSettings] = useState<Settings>(loadSettings)
-  const [isDirty, setIsDirty] = useState(false)
 
   // PIN change state
   const [oldPin, setOldPin] = useState('')
@@ -32,12 +16,6 @@ export function SettingsPage() {
   const [confirmPin, setConfirmPin] = useState('')
   const [showPins, setShowPins] = useState(false)
   const [pinError, setPinError] = useState('')
-
-  const saveSettings = () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-    setIsDirty(false)
-    toast({ title: 'ההגדרות נשמרו בהצלחה' })
-  }
 
   const handleChangePin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -70,38 +48,6 @@ export function SettingsPage() {
         <h2 className="text-2xl font-bold text-[var(--text)]">הגדרות</h2>
         <p className="text-sm text-[var(--text-muted)]">הגדרות מערכת וניהול סיסמה</p>
       </div>
-
-      {/* Grace period */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Clock className="h-4 w-4 text-[var(--blue)]" />
-            זמן חסד
-          </CardTitle>
-          <CardDescription>דקות לאחר שעת החזרה לפני סיווג כ"באיחור"</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-3">
-            <Input
-              id="grace"
-              type="number"
-              min={0}
-              max={120}
-              value={settings.gracePeriodMinutes}
-              onChange={(e) => {
-                setSettings({ gracePeriodMinutes: Number(e.target.value) })
-                setIsDirty(true)
-              }}
-              className="w-24 text-center"
-            />
-            <span className="text-sm text-[var(--text-muted)]">דקות</span>
-          </div>
-          <Button onClick={saveSettings} disabled={!isDirty} className="mt-4" size="sm">
-            <Save className="h-4 w-4" />
-            שמור
-          </Button>
-        </CardContent>
-      </Card>
 
       {/* Change admin PIN */}
       <Card>

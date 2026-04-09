@@ -16,7 +16,7 @@ function translateStatus(status: string): string {
   switch (status) {
     case 'ON_CAMPUS': return 'בישיבה'
     case 'OFF_CAMPUS': return 'מחוץ לישיבה'
-    case 'OVERDUE': return 'באיחור'
+    case 'OVERDUE': return 'מחוץ לישיבה'
     case 'PENDING': return 'ממתין'
     default: return status
   }

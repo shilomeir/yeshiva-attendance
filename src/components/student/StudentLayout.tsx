@@ -47,6 +47,7 @@ export function StudentLayout() {
     const lastId = sessionStorage.getItem('last_login_id')
     if (lastId) {
       localStorage.setItem(SAVED_ID_KEY, lastId)
+      localStorage.setItem('yeshiva_remembered_id', lastId)
       sessionStorage.removeItem('last_login_id')
     }
     setBannerVisible(false)

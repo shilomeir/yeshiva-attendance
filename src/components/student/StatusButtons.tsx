@@ -148,7 +148,7 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
               <p
                 className="mt-0.5 text-xs text-[var(--orange)]"
               >
-                {currentStatus === 'OVERDUE' ? 'עברת את זמן החזרה!' : 'סטטוס נוכחי'}
+                סטטוס נוכחי
               </p>
             )}
           </div>

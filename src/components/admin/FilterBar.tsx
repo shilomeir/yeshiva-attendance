@@ -4,13 +4,12 @@ import { Button } from '@/components/ui/button'
 import { useStudentsStore } from '@/store/studentsStore'
 import { cn } from '@/lib/utils/cn'
 
-type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING' | 'OVERDUE'
+type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING'
 
 const FILTERS: { value: FilterType; label: string }[] = [
   { value: 'ALL', label: 'כולם' },
   { value: 'OFF_CAMPUS', label: 'מחוץ לישיבה' },
   { value: 'PENDING', label: 'ממתינים' },
-  { value: 'OVERDUE', label: 'באיחור' },
 ]
 
 export function FilterBar() {

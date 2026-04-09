@@ -21,7 +21,7 @@ import { GRADE_LEVELS } from '@/lib/constants/grades'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
-import type { Student, DashboardStats, ClassStat } from '@/types'
+import type { Student, DashboardStats, ClassStat, AbsenceRequest } from '@/types'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -402,6 +402,15 @@ function getAvatarColor(id: string): string {
 }
 
 // ── Main dashboard ───────────────────────────────────────────────────────────
+function getTodayStr() { return new Date().toISOString().slice(0, 10) }
+function parseTimeToday(t: string): Date {
+  const [h, m] = t.split(':').map(Number)
+  const d = new Date(); d.setHours(h, m, 0, 0); return d
+}
+function minsRemaining(endTime: string) {
+  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
+}
+
 export function ClassSupervisorDashboard() {
   const { classSupervisor, logout } = useAuthStore()
   const [globalStats, setGlobalStats] = useState<DashboardStats | null>(null)
@@ -409,14 +418,17 @@ export function ClassSupervisorDashboard() {
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [editStudent, setEditStudent] = useState<Student | null>(null)
+  const [todayDepartures, setTodayDepartures] = useState<AbsenceRequest[]>([])
+  const [, setTick] = useState(0)
+  const [manualAuditActive, setManualAuditActive] = useState(false)
+  const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
 
-  if (!classSupervisor) return null
-  const { classId, gradeName } = classSupervisor
-
-  const quota = getQuotaForGrade(gradeName)
-  const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
+  // Derive safely before hooks — avoids conditional-return-before-useEffect violation
+  const classId = classSupervisor?.classId ?? ''
+  const gradeName = classSupervisor?.gradeName ?? ''
 
   const loadData = async () => {
+    if (!classId) return
     try {
       const [gs, sts, cs] = await Promise.all([
         api.getDashboardStats(),
@@ -434,6 +446,7 @@ export function ClassSupervisorDashboard() {
   }
 
   useEffect(() => {
+    if (!classId) return
     loadData()
     const ch = supabase
       .channel('supervisor-realtime')
@@ -442,6 +455,40 @@ export function ClassSupervisorDashboard() {
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [classId])
+
+  // Load today's departures for this class
+  useEffect(() => {
+    if (!classId) return
+    const today = getTodayStr()
+    api.getAbsenceRequests({ status: 'APPROVED' }).then((reqs) => {
+      setTodayDepartures(
+        reqs.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
+      )
+    })
+    const tick = setInterval(() => setTick((t) => t + 1), 60000)
+    return () => clearInterval(tick)
+  }, [classId])
+
+  // Subscribe to manual audit broadcasts from admin
+  useEffect(() => {
+    if (!classId) return
+    const ch = supabase
+      .channel('audit-control')
+      .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
+        const { classIds } = payload as { classIds: string[] }
+        if (classIds.includes(classId)) {
+          setManualAuditActive(true)
+          setAuditPresence(new Map())
+        }
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(ch) }
+  }, [classId])
+
+  if (!classSupervisor) return null
+
+  const quota = getQuotaForGrade(gradeName)
+  const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
 
   // Class stats
   const classOnCampus = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
@@ -498,6 +545,42 @@ export function ClassSupervisorDashboard() {
       </header>
 
       <div className="flex flex-col gap-5 p-4 lg:p-6">
+        {/* Manual audit banner */}
+        {manualAuditActive && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <p className="font-semibold text-amber-700 dark:text-amber-300">ביקורת פנימית פעילה — סמן נוכחות</p>
+            </div>
+            <div className="flex flex-col gap-1.5 mb-3">
+              {students.map((s) => {
+                const present = auditPresence.get(s.id)
+                return (
+                  <div key={s.id} className="flex items-center justify-between rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
+                    <span className="text-sm font-medium text-[var(--text)]">{s.fullName}</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, true))}
+                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === true ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50'}`}
+                      >נוכח</button>
+                      <button
+                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, false))}
+                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === false ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50'}`}
+                      >נעדר</button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <button
+              onClick={() => setManualAuditActive(false)}
+              className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600"
+            >
+              סיום ביקורת
+            </button>
+          </div>
+        )}
+
         {/* Global % hero */}
         <Card className={`border ${heroColor.border} ${heroColor.bg}`}>
           <CardContent className="p-4">
@@ -711,6 +794,42 @@ export function ClassSupervisorDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Today's departures */}
+      {todayDepartures.length > 0 && (() => {
+        const classStudentIds = new Set(students.map(s => s.id))
+        const classDeps = todayDepartures.filter(d => classStudentIds.has(d.studentId))
+        if (classDeps.length === 0) return null
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Clock className="h-4 w-4 text-[var(--blue)]" />
+                יציאות היום ({classDeps.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="divide-y divide-[var(--border)]">
+                {classDeps.map((dep) => {
+                  const s = students.find(st => st.id === dep.studentId)
+                  const mins = minsRemaining(dep.endTime)
+                  const isActive = minsRemaining(dep.startTime) <= 0 && mins > 0
+                  const isPending = minsRemaining(dep.startTime) > 0
+                  return (
+                    <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
+                      <span className="font-medium text-sm text-[var(--text)] flex-1">{s?.fullName ?? '—'}</span>
+                      <span className="text-xs text-[var(--text-muted)] shrink-0">{dep.startTime}–{dep.endTime}</span>
+                      <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
+                        {isActive ? `נותרו ${mins} דק'` : isPending ? `בעוד ${minsRemaining(dep.startTime)} דק'` : 'הסתיים'}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })()}
 
       {/* Edit sheet */}
       <EditStudentSheet

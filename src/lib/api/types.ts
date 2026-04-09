@@ -62,6 +62,7 @@ export interface IApiClient {
   updateStudentLocation(id: string, lat: number, lng: number): Promise<void>
   updateStudentFcmToken(id: string, token: string): Promise<void>
   updatePushToken(id: string, token: string | null): Promise<void>
+  sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }>
 
   // Events
   getEvents(studentId: string): Promise<Event[]>
