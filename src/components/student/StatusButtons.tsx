@@ -10,7 +10,7 @@ import type { StudentStatus } from '@/types'
 interface StatusButtonsProps {
   currentStatus: StudentStatus
   onStatusChange: (newStatus: StudentStatus) => void
-  onCheckoutSuccess?: () => void
+  onCheckoutSuccess?: (eventId: string) => void
 }
 
 export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess }: StatusButtonsProps) {
@@ -159,7 +159,7 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
         open={showOffCampusSheet}
         onClose={() => setShowOffCampusSheet(false)}
         onSuccess={() => onStatusChange('OFF_CAMPUS')}
-        onCheckoutSuccess={onCheckoutSuccess}
+        onCheckoutSuccess={(eventId) => onCheckoutSuccess?.(eventId)}
       />
     </>
   )

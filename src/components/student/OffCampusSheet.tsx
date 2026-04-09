@@ -15,7 +15,6 @@ import { api } from '@/lib/api'
 import { scheduleReturn } from '@/lib/notifications/scheduleReturn'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
-import { GRADE_LEVELS } from '@/lib/constants/grades'
 import type { Student } from '@/types'
 
 interface ClassmateInfo extends Student {
@@ -37,7 +36,9 @@ interface OffCampusSheetProps {
   open: boolean
   onClose: () => void
   onSuccess: () => void
-  onCheckoutSuccess?: () => void  // Called after successful checkout for undo buffer
+  /** Called after a successful checkout — receives the eventId so the caller
+   *  can hard-delete it if the student wants to cancel the departure. */
+  onCheckoutSuccess?: (eventId: string) => void
 }
 
 type DepartureMode = 'today' | 'multiday'
@@ -49,10 +50,11 @@ function toDateInput(d: Date): string {
   return `${yyyy}-${mm}-${dd}`
 }
 
-function getQuotaForGrade(gradeName: string): number {
-  const level = GRADE_LEVELS.find((g) => g.name === gradeName)
-  if (!level) return 3
-  return level.capacity >= 50 ? 6 : 3
+/** Dynamic quota: ~3 slots per 25 students (rounds to nearest).
+ *  Examples: 25→3, 26→3, 30→4, 50→6.
+ *  Minimum is 1. Matches the server-side RPC formula. */
+function calcQuota(classSize: number): number {
+  return Math.max(1, Math.round((classSize * 3) / 25))
 }
 
 export function OffCampusSheet({ open, onClose, onSuccess, onCheckoutSuccess }: OffCampusSheetProps) {
@@ -71,13 +73,17 @@ export function OffCampusSheet({ open, onClose, onSuccess, onCheckoutSuccess }: 
   // Fetch live quota counter when sheet opens
   useEffect(() => {
     if (!open || !currentUser) return
-    const q = getQuotaForGrade(currentUser.grade)
-    setQuota(q)
+
+    // Fetch actual class size to compute quota dynamically
+    api.getClassSize(currentUser.classId)
+      .then((size) => setQuota(calcQuota(size)))
+      .catch(() => setQuota(3)) // safe fallback
+
     api.getClassOutsideCount(currentUser.classId)
       .then((count) => {
         setOutsideCount(count)
         // If class is already full, pre-load classmates list with return times
-        if (count >= q) {
+        if (count >= quota) {
           api.getStudents({ filter: 'OFF_CAMPUS', classId: currentUser.classId })
             .then(async (students) => {
               const withReturn: ClassmateInfo[] = await Promise.all(
@@ -181,9 +187,10 @@ export function OffCampusSheet({ open, onClose, onSuccess, onCheckoutSuccess }: 
           : 'יציאה נרשמה'
 
       toast({ title: 'היציאה נרשמה בהצלחה', description, variant: 'default' })
+      const eventId = result.eventId ?? ''
       resetForm()
       onSuccess()
-      onCheckoutSuccess?.()
+      if (eventId) onCheckoutSuccess?.(eventId)
       onClose()
     } catch (error) {
       console.error('Failed to record departure:', error)

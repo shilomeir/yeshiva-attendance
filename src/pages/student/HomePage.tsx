@@ -29,7 +29,7 @@ function getMinutesRemaining(endTime: string): number {
 export function HomePage() {
   const { currentUser } = useAuthStore()
   const [student, setStudent] = useState<Student | null>(currentUser)
-  const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number } | null>(null)
+  const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; eventId: string } | null>(null)
   const [todayDeparture, setTodayDeparture] = useState<AbsenceRequest | null>(null)
   const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -100,16 +100,12 @@ export function HomePage() {
   }, [currentUser?.id])
 
   const handleUndoCheckout = async () => {
-    if (!currentUser) return
+    if (!currentUser || !undoCheckout) return
     try {
-      await api.createEvent({
-        studentId: currentUser.id,
-        type: 'CHECK_IN',
-        gpsLat: null,
-        gpsLng: null,
-        gpsStatus: 'PENDING',
-        distanceFromCampus: null,
-      })
+      // Hard-delete the checkout event so it never appears in history
+      await api.deleteEvent(undoCheckout.eventId)
+      // Reset status back to ON_CAMPUS without creating a new event
+      await api.updateStudentStatus(currentUser.id, 'ON_CAMPUS')
       setStudent((prev) => prev ? { ...prev, currentStatus: 'ON_CAMPUS' } : prev)
       setUndoCheckout(null)
       toast({ title: 'היציאה בוטלה', description: 'הסטטוס חזר ל"בישיבה"' })
@@ -186,17 +182,14 @@ export function HomePage() {
         <StatusButtons
           currentStatus={student.currentStatus}
           onStatusChange={async (newStatus) => {
-            const wasOnCampus = student?.currentStatus === 'ON_CAMPUS'
             setStudent((prev) => prev ? { ...prev, currentStatus: newStatus } : prev)
             await refreshStudent()
-            if (newStatus === 'OFF_CAMPUS' && wasOnCampus) {
-              setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000 })
-            } else if (newStatus === 'ON_CAMPUS') {
+            if (newStatus === 'ON_CAMPUS') {
               setUndoCheckout(null)
             }
           }}
-          onCheckoutSuccess={() => {
-            setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000 })
+          onCheckoutSuccess={(eventId) => {
+            setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000, eventId })
           }}
         />
       </div>

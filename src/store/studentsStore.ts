@@ -29,6 +29,12 @@ interface StudentsState {
   subscribeToRealtime: () => () => void
 }
 
+/** Normalize Hebrew grade/class strings for robust comparison.
+ *  Handles different apostrophe variants (ASCII ', right-quote ', geresh ׳). */
+function normalizeHebrew(s: string): string {
+  return s.trim().replace(/['''׳`]/g, "'")
+}
+
 function applyFilter(
   students: Student[],
   filter: FilterType,
@@ -39,16 +45,19 @@ function applyFilter(
   let result = students
 
   if (filter === 'OFF_CAMPUS') {
+    // OVERDUE is treated as OFF_CAMPUS for backward compatibility with old DB records
     result = result.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
   } else if (filter === 'PENDING') {
     result = result.filter((s) => s.pendingApproval)
   }
 
   if (grade) {
-    result = result.filter((s) => s.grade === grade)
+    const normalGrade = normalizeHebrew(grade)
+    result = result.filter((s) => s.grade && normalizeHebrew(s.grade) === normalGrade)
   }
   if (classId) {
-    result = result.filter((s) => s.classId === classId)
+    const normalClass = normalizeHebrew(classId)
+    result = result.filter((s) => s.classId && normalizeHebrew(s.classId) === normalClass)
   }
 
   if (search) {

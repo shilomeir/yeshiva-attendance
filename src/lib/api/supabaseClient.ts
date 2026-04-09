@@ -153,6 +153,11 @@ export class SupabaseApiClient implements IApiClient {
     return { sent, failed, lastError }
   }
 
+  async deleteEvent(id: string): Promise<void> {
+    const { error } = await supabase.from('events').delete().eq('id', id)
+    if (error) throw error
+  }
+
   async getRecentEvents(limit = 50): Promise<Event[]> {
     const { data, error } = await supabase.from('events').select('*').order('timestamp', { ascending: false }).limit(limit)
     if (error) throw error
@@ -271,20 +276,22 @@ export class SupabaseApiClient implements IApiClient {
     return (data as RecurringAbsence[]) ?? []
   }
 
-  async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
-    const student = {
-      id: uuidv4(), fullName: data.fullName, idNumber: data.idNumber, phone: data.phone,
-      deviceToken: null, currentStatus: 'ON_CAMPUS' as StudentStatus, lastSeen: null, lastLocation: null,
-      pendingApproval: false, createdAt: new Date().toISOString(), grade: data.grade, classId: data.classId,
-    }
-    const { data: created, error } = await supabase.from('students').insert(student).select().single()
-    if (error) throw error
-    return created as Student
-  }
+  // Students are managed exclusively via Google Sheets sync.
+  // addStudent is intentionally removed — do not add it back.
 
   async deleteStudent(id: string): Promise<void> {
     const { error } = await supabase.from('students').delete().eq('id', id)
     if (error) throw error
+  }
+
+  /** Count all students enrolled in a given class (for dynamic quota calculation). */
+  async getClassSize(classId: string): Promise<number> {
+    const { count, error } = await supabase
+      .from('students')
+      .select('id', { count: 'exact', head: true })
+      .eq('classId', classId)
+    if (error) throw error
+    return count ?? 0
   }
 
   async getLongAbsentStudents(days = 7): Promise<Student[]> {

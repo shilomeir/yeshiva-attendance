@@ -67,6 +67,7 @@ export interface IApiClient {
   // Events
   getEvents(studentId: string): Promise<Event[]>
   createEvent(payload: CreateEventPayload): Promise<Event>
+  deleteEvent(id: string): Promise<void>
   getRecentEvents(limit?: number): Promise<Event[]>
 
   // SMS
@@ -94,9 +95,9 @@ export interface IApiClient {
   // Recurring absences
   getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]>
 
-  // Student management
-  addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student>
+  // Student management — students are managed via Google Sheets sync only
   deleteStudent(id: string): Promise<void>
+  getClassSize(classId: string): Promise<number>
   getLongAbsentStudents(days?: number): Promise<Student[]>
 
   // Analytics
