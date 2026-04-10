@@ -55,86 +55,62 @@ export const useAuthStore = create<AuthState>()(
       },
 
       loginAdmin: async (pin: string) => {
-        const { data } = await supabase
-          .from('app_settings')
-          .select('value')
-          .eq('key', 'admin_pin')
-          .single()
-        if (data?.value === pin) {
-          set({ isAdmin: true, classSupervisor: null, currentUser: null })
-          return true
-        }
-        return false
+        // Verify PIN via SECURITY DEFINER RPC — never exposes the stored value
+        const { data: valid } = await supabase.rpc('verify_admin_pin', { p_pin: pin })
+        if (!valid) return false
+        // Sign in as the admin Supabase Auth user so RLS policies allow full access
+        const { error } = await supabase.auth.signInWithPassword({
+          email: 'admin@yeshiva.local',
+          password: pin,
+        })
+        if (error) return false
+        set({ isAdmin: true, classSupervisor: null, currentUser: null })
+        return true
       },
 
       loginClassSupervisor: async (pin: string) => {
-        const { data } = await supabase
-          .from('app_settings')
-          .select('value')
-          .eq('key', 'admin_pin')
-          .single()
-        const adminPin = data?.value as string | undefined
-        if (!adminPin) return false
-
-        // Pin must start with admin pin but not be equal to it
-        if (!pin.startsWith(adminPin) || pin === adminPin) return false
-
-        const suffix = pin.slice(adminPin.length)
-
-        // New format: exactly 3 digits → look up class code in app_settings
-        if (/^\d{3}$/.test(suffix)) {
-          const { data: codeRow } = await supabase
-            .from('app_settings')
-            .select('key')
-            .eq('value', suffix)
-            .like('key', 'class_code_%')
-            .maybeSingle()
-          if (codeRow) {
-            const classId = codeRow.key.replace('class_code_', '')
-            const { data: sample } = await supabase
-              .from('students')
-              .select('grade')
-              .eq('classId', classId)
-              .limit(1)
-              .maybeSingle()
-            set({
-              classSupervisor: { classId, gradeName: sample?.grade ?? '' },
-              isAdmin: false,
-              currentUser: null,
-            })
-            return true
-          }
+        // Verify via SECURITY DEFINER RPC (reads app_settings internally, never exposes values)
+        const { data: result } = await supabase.rpc('verify_supervisor_pin', { p_pin: pin })
+        if (result) {
+          set({
+            classSupervisor: { classId: result.classId, gradeName: result.gradeName },
+            isAdmin: false,
+            currentUser: null,
+          })
+          return true
         }
 
-        // Legacy format: letter + number (e.g. "a3" → שיעור א' כיתה 3)
+        // Legacy format fallback: adminPin + letter+digit (e.g. "1234a3")
+        // Get PIN length without exposing the actual value
+        const { data: pinLen } = await supabase.rpc('get_admin_pin_length')
+        if (!pinLen || pin.length <= pinLen) return false
+        const suffix = pin.slice(pinLen)
         const classInfo = parseClassSupervisorSuffix(suffix)
         if (!classInfo) return false
-
         set({ classSupervisor: classInfo, isAdmin: false, currentUser: null })
         return true
       },
 
       changeAdminPin: async (oldPin: string, newPin: string) => {
-        const { data } = await supabase
-          .from('app_settings')
-          .select('value')
-          .eq('key', 'admin_pin')
-          .single()
-        if (data?.value !== oldPin) return false
-        await supabase
-          .from('app_settings')
-          .update({ value: newPin })
-          .eq('key', 'admin_pin')
+        const { data: changed } = await supabase.rpc('change_admin_pin', {
+          p_old_pin: oldPin,
+          p_new_pin: newPin,
+        })
+        if (!changed) return false
+        // Update the Supabase Auth user password to stay in sync
+        await supabase.auth.updateUser({ password: newPin })
         return true
       },
 
       logout: () => {
-        const { currentUser } = get()
+        const { currentUser, isAdmin } = get()
         if (currentUser?.id) {
-          // Clear push token from Supabase (fire-and-forget — logout must stay synchronous)
           supabase.from('students').update({ push_token: null }).eq('id', currentUser.id).then(() => {})
-          // Unsubscribe this device from Web Push
           unsubscribeFromPush().catch(() => {})
+        }
+        if (isAdmin) {
+          // Sign out from Supabase Auth (admin was signed in as admin@yeshiva.local)
+          supabase.auth.signOut().catch(() => {})
         }
         localStorage.removeItem('yeshiva_remembered_id')
         set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null })

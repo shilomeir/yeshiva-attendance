@@ -31,8 +31,10 @@ interface StudentsState {
 
 /** Normalize Hebrew grade/class strings for robust comparison.
  *  Handles different apostrophe variants (ASCII ', right-quote ', geresh ׳). */
-function normalizeHebrew(s: string): string {
-  return s.trim().replace(/['''׳`]/g, "'")
+export function normalizeHebrew(s: string): string {
+  // Normalize apostrophe variants and strip trailing apostrophe as a safety net
+  // GRADE_LEVELS names now match DB values directly, but this handles any stale data
+  return s.trim().replace(/['''׳`]/g, "'").replace(/'$/, '')
 }
 
 function applyFilter(

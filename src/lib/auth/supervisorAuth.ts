@@ -1,13 +1,12 @@
 import { GRADE_LEVELS } from '@/lib/constants/grades'
 
-/** Maps grade names to their single-character password letter */
+/** Maps grade names (as stored in DB) to their single-character password letter */
 const GRADE_TO_LETTER: Record<string, string> = {
-  "שיעור א'": 'a',
-  "שיעור ב'": 'b',
-  "שיעור ג'": 'c',
-  "שיעור ד'": 'd',
-  'אברכים':  'e',
-  'בוגרצים': 'f',
+  'שיעור א':      'a',
+  'שיעור ב':      'b',
+  'שיעור ג':      'c',
+  'שיעור ד-ה':    'd',
+  'אברכים ובוגרצ': 'e',
 }
 
 export interface ClassSupervisorInfo {

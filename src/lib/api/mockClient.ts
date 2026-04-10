@@ -531,7 +531,7 @@ export class MockApiClient implements IApiClient {
   ): Promise<QuotaCheckResult> {
     // Check quota client-side in mock
     const count = await this.getClassOutsideCount(classId)
-    const quota = (grade === 'אברכים' || grade === 'בוגרצים') ? 6 : 3
+    const quota = grade === 'אברכים ובוגרצ' ? 6 : 3
     if (count >= quota) {
       return { success: false, error: 'quota_exceeded', current: count, quota }
     }

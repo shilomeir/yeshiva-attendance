@@ -1,12 +1,12 @@
-/** Grade-level and class structure for Yeshivat Shavi Hevron */
+/** Grade-level and class structure for Yeshivat Shavi Hevron.
+ *  Names match the actual `grade` column values in the DB (no apostrophes). */
 
 export const GRADE_LEVELS = [
-  { name: "שיעור א'", classCount: 6, capacity: 25 },
-  { name: "שיעור ב'", classCount: 4, capacity: 25 },
-  { name: "שיעור ג'", classCount: 3, capacity: 25 },
-  { name: "שיעור ד'", classCount: 1, capacity: 25 },
-  { name: 'אברכים',   classCount: 1, capacity: 50 },
-  { name: 'בוגרצים',  classCount: 1, capacity: 50 },
+  { name: 'שיעור א',      classCount: 6, capacity: 25 },
+  { name: 'שיעור ב',      classCount: 4, capacity: 25 },
+  { name: 'שיעור ג',      classCount: 3, capacity: 25 },
+  { name: 'שיעור ד-ה',    classCount: 1, capacity: 25 },
+  { name: 'אברכים ובוגרצ', classCount: 1, capacity: 50 },
 ] as const
 
 export type GradeName = (typeof GRADE_LEVELS)[number]['name']
@@ -28,8 +28,8 @@ export function getClasses(gradeName: string): string[] {
 export const ALL_CLASS_IDS: string[] = GRADE_LEVELS.flatMap((g) => getClasses(g.name))
 
 /** Default grade/class for students without an assignment */
-export const DEFAULT_GRADE = "שיעור א'"
-export const DEFAULT_CLASS = "שיעור א' כיתה 1"
+export const DEFAULT_GRADE = 'שיעור א'
+export const DEFAULT_CLASS = 'שיעור א'
 
 /**
  * Canonical tab names from the Google Sheet ("DATA תלמידים ביקורות שבי חברון").

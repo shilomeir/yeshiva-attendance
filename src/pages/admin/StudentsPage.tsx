@@ -3,9 +3,9 @@ import * as XLSX from 'xlsx'
 import { Download } from 'lucide-react'
 import { FilterBar } from '@/components/admin/FilterBar'
 import { StudentTable } from '@/components/admin/StudentTable'
-import { useStudentsStore } from '@/store/studentsStore'
+import { useStudentsStore, normalizeHebrew } from '@/store/studentsStore'
 import { Button } from '@/components/ui/button'
-import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
+import { GRADE_LEVELS } from '@/lib/constants/grades'
 import { cn } from '@/lib/utils/cn'
 import type { Student } from '@/types'
 
@@ -65,7 +65,15 @@ export function StudentsPage() {
     loadStudents()
   }, [])
 
-  const classOptions = selectedGrade ? getClasses(selectedGrade) : []
+  // Derive classes from actual student data so DB apostrophe variants don't cause mismatches
+  const classOptions = selectedGrade
+    ? [...new Set(
+        students
+          .filter((s) => s.grade && normalizeHebrew(s.grade) === normalizeHebrew(selectedGrade))
+          .map((s) => s.classId)
+          .filter(Boolean)
+      )].sort((a, b) => a.localeCompare(b, 'he'))
+    : []
   const showClassTabs = classOptions.length > 1
 
   return (
@@ -110,9 +118,9 @@ export function StudentsPage() {
             הכל
           </button>
           {GRADE_LEVELS.map((g) => {
-            const isActive = selectedGrade === g.name
-            // Count students in this grade for the badge
-            const count = students.filter((s) => s.grade === g.name).length
+            const isActive = selectedGrade != null && normalizeHebrew(selectedGrade) === normalizeHebrew(g.name)
+            const normalG = normalizeHebrew(g.name)
+            const count = students.filter((s) => s.grade && normalizeHebrew(s.grade) === normalG).length
             return (
               <button
                 key={g.name}
@@ -160,9 +168,13 @@ export function StudentsPage() {
               כל הכיתות
             </button>
             {classOptions.map((cls) => {
-              const isActive = selectedClass === cls
+              const normalCls = normalizeHebrew(cls)
+              const isActive = selectedClass != null && normalizeHebrew(selectedClass) === normalCls
+              const normalG = selectedGrade ? normalizeHebrew(selectedGrade) : ''
               const count = students.filter(
-                (s) => s.grade === selectedGrade && s.classId === cls
+                (s) =>
+                  s.grade && normalizeHebrew(s.grade) === normalG &&
+                  s.classId && normalizeHebrew(s.classId) === normalCls
               ).length
               return (
                 <button

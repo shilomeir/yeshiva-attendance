@@ -85,7 +85,8 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const todayStr = toDateInput(new Date())
-  const maxDate = new Date(); maxDate.setDate(maxDate.getDate() + 2)
+  // Supervisors can record departures up to 30 days ahead
+  const maxDate = new Date(); maxDate.setDate(maxDate.getDate() + 30)
   const maxDateStr = toDateInput(maxDate)
 
   const reset = () => {
@@ -155,7 +156,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     if (!student || !reqStartDate || !reqReason) return
     setIsSubmitting(true)
     try {
-      await api.createAbsenceRequest({
+      const req = await api.createAbsenceRequest({
         studentId: student.id,
         date: reqStartDate,
         endDate: reqEndDate || undefined,
@@ -164,11 +165,13 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         endTime: reqEndTime,
         isUrgent: reqIsUrgent,
       })
-      toast({ title: `בקשת היעדרות הוגשה עבור ${student.fullName}` })
+      // Supervisor has admin authority for their class — auto-approve immediately
+      await api.updateAbsenceRequestStatus(req.id, 'APPROVED', 'אושר על ידי אחראי כיתה')
+      toast({ title: `היעדרות אושרה עבור ${student.fullName}` })
       onSuccess()
       handleClose()
     } catch {
-      toast({ title: 'שגיאה בהגשת הבקשה', variant: 'destructive' })
+      toast({ title: 'שגיאה ברישום ההיעדרות', variant: 'destructive' })
     } finally { setIsSubmitting(false) }
   }
 
@@ -222,7 +225,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
               className="flex items-center justify-center gap-2 rounded-xl border-2 border-indigo-300 bg-indigo-50 py-4 text-base font-semibold text-indigo-600 hover:bg-indigo-100 transition-colors dark:bg-indigo-950/20 dark:border-indigo-800"
             >
               <FileText className="h-5 w-5" />
-              הגשת בקשת היעדרות
+              רישום היעדרות מאושרת
             </button>
           </div>
         )}
@@ -300,7 +303,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
           <form onSubmit={handleRequest} className="flex flex-col gap-4">
             <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 dark:border-indigo-800/40 dark:bg-indigo-950/10">
               <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
-                בקשה תוגש לאישור המנהל ותסומן כ"ממתין לאישור"
+                כאחראי כיתה, ההיעדרות תאושר מיידית ותישלח הודעה לתלמיד
               </p>
             </div>
 
@@ -374,7 +377,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
                 className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white"
                 disabled={isSubmitting || !reqStartDate || !reqReason}
               >
-                {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />שולח...</> : 'הגש בקשה'}
+                {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />רושם...</> : 'אשר היעדרות'}
               </Button>
             </div>
           </form>
