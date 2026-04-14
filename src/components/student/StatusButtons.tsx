@@ -26,7 +26,6 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
     setIsCheckingIn(true)
 
     try {
-      // Check for active approved absence requests
       const today = new Date().toISOString().split('T')[0]
       const approvedRequests = await api.getAbsenceRequests({
         studentId: currentUser.id,
@@ -41,13 +40,10 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
         const confirmed = window.confirm(
           'יש לך בקשת היעדרות מאושרת. האם לבטל אותה ולחזור לישיבה?'
         )
-        if (!confirmed) {
-          return // User chose not to cancel — abort check-in
-        }
+        if (!confirmed) return
         await api.cancelAbsenceRequest(activeRequest.id)
       }
 
-      // GPS is collected ONLY during admin's ביקורת פנימית — not here
       await api.createEvent({
         studentId: currentUser.id,
         type: 'CHECK_IN',
@@ -58,17 +54,9 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
       })
 
       onStatusChange('ON_CAMPUS')
-
-      toast({
-        title: 'ברוך שובך!',
-        description: 'החזרה לישיבה נרשמה בהצלחה',
-      })
-    } catch (error) {
-      toast({
-        title: 'שגיאה ברישום החזרה',
-        description: 'נסה שוב',
-        variant: 'destructive',
-      })
+      toast({ title: 'ברוך שובך!', description: 'החזרה לישיבה נרשמה בהצלחה' })
+    } catch {
+      toast({ title: 'שגיאה ברישום החזרה', description: 'נסה שוב', variant: 'destructive' })
     } finally {
       setIsCheckingIn(false)
     }
@@ -80,76 +68,102 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
 
   return (
     <>
-      <div className="flex flex-col items-center justify-center gap-8 p-8 h-full">
-        {/* ON CAMPUS circle */}
+      <div className="flex flex-col items-center justify-center gap-4 px-4 py-6">
+        <p className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+          עדכן סטטוס
+        </p>
+
+        {/* ON CAMPUS button */}
         <button
           onClick={isOnCampus ? undefined : handleCheckIn}
           disabled={isOnCampus || isCheckingIn}
           className={cn(
-            'relative flex h-44 w-44 flex-col items-center justify-center gap-3 rounded-full border-[3px] transition-all active:scale-[0.95] shadow-lg',
+            'group relative flex w-full flex-col items-center gap-4 rounded-2xl border px-6 py-7 transition-all duration-200',
             isOnCampus
-              ? 'border-[var(--green)] bg-green-50 dark:bg-green-950/20'
-              : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--green)] hover:bg-green-50/50 cursor-pointer hover:shadow-xl',
+              ? 'cursor-default border-green-300 bg-green-50 dark:border-green-800 dark:bg-green-950/20'
+              : 'cursor-pointer border-[var(--border)] bg-[var(--surface)] hover:border-green-300 hover:bg-green-50/60 dark:hover:border-green-800 dark:hover:bg-green-950/10',
             isCheckingIn && 'opacity-70 cursor-not-allowed'
           )}
+          style={{
+            boxShadow: isOnCampus
+              ? '0 4px 20px rgba(34,197,94,0.18), 0 1px 4px rgba(34,197,94,0.1)'
+              : '0 1px 6px rgba(14,30,70,0.06)',
+          }}
         >
-          {isCheckingIn ? (
-            <Loader2 className="h-14 w-14 text-[var(--green)] animate-spin" />
-          ) : (
-            <CheckCircle
-              className={cn(
-                'h-14 w-14 transition-colors',
-                isOnCampus ? 'text-[var(--green)]' : 'text-[var(--text-muted)]'
-              )}
-            />
-          )}
+          {/* Icon circle */}
+          <div
+            className={cn(
+              'flex h-20 w-20 items-center justify-center rounded-full transition-all',
+              isOnCampus
+                ? 'bg-green-100 dark:bg-green-900/30'
+                : 'bg-[var(--bg-2)] group-hover:bg-green-100/70'
+            )}
+          >
+            {isCheckingIn ? (
+              <Loader2 className="h-10 w-10 animate-spin text-[var(--green)]" />
+            ) : (
+              <CheckCircle
+                className={cn(
+                  'h-10 w-10 transition-colors',
+                  isOnCampus ? 'text-[var(--green)]' : 'text-[var(--text-muted)] group-hover:text-[var(--green)]'
+                )}
+              />
+            )}
+          </div>
+
           <div className="text-center">
-            <p
-              className={cn(
-                'text-xl font-bold',
-                isOnCampus ? 'text-[var(--green)]' : 'text-[var(--text)]'
-              )}
-            >
+            <p className={cn('text-xl font-bold', isOnCampus ? 'text-green-700 dark:text-green-400' : 'text-[var(--text)]')}>
               בישיבה
             </p>
-            {isOnCampus && (
-              <p className="mt-0.5 text-xs text-[var(--green)]">סטטוס נוכחי</p>
+            {isOnCampus ? (
+              <p className="mt-1 text-sm font-medium text-green-600 dark:text-green-500">סטטוס נוכחי ✓</p>
+            ) : (
+              <p className="mt-1 text-sm text-[var(--text-muted)]">לחץ לרישום חזרה</p>
             )}
           </div>
         </button>
 
-        {/* OFF CAMPUS circle */}
+        {/* OFF CAMPUS button */}
         <button
           onClick={isOffCampus ? undefined : handleCheckOut}
           disabled={isOffCampus}
           className={cn(
-            'relative flex h-44 w-44 flex-col items-center justify-center gap-3 rounded-full border-[3px] transition-all active:scale-[0.95] shadow-lg',
+            'group relative flex w-full flex-col items-center gap-4 rounded-2xl border px-6 py-7 transition-all duration-200',
             isOffCampus
-              ? 'border-[var(--orange)] bg-orange-50 dark:bg-orange-950/20'
-              : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--orange)] hover:bg-orange-50/50 cursor-pointer hover:shadow-xl'
+              ? 'cursor-default border-orange-300 bg-orange-50 dark:border-orange-800 dark:bg-orange-950/20'
+              : 'cursor-pointer border-[var(--border)] bg-[var(--surface)] hover:border-orange-300 hover:bg-orange-50/60 dark:hover:border-orange-800 dark:hover:bg-orange-950/10'
           )}
+          style={{
+            boxShadow: isOffCampus
+              ? '0 4px 20px rgba(249,115,22,0.18), 0 1px 4px rgba(249,115,22,0.1)'
+              : '0 1px 6px rgba(14,30,70,0.06)',
+          }}
         >
-          <LogOut
+          {/* Icon circle */}
+          <div
             className={cn(
-              'h-14 w-14 transition-colors',
-              isOffCampus ? 'text-[var(--orange)]' : 'text-[var(--text-muted)]'
+              'flex h-20 w-20 items-center justify-center rounded-full transition-all',
+              isOffCampus
+                ? 'bg-orange-100 dark:bg-orange-900/30'
+                : 'bg-[var(--bg-2)] group-hover:bg-orange-100/70'
             )}
-          />
-          <div className="text-center">
-            <p
+          >
+            <LogOut
               className={cn(
-                'text-xl font-bold',
-                isOffCampus ? 'text-[var(--orange)]' : 'text-[var(--text)]'
+                'h-10 w-10 transition-colors',
+                isOffCampus ? 'text-[var(--orange)]' : 'text-[var(--text-muted)] group-hover:text-[var(--orange)]'
               )}
-            >
+            />
+          </div>
+
+          <div className="text-center">
+            <p className={cn('text-xl font-bold', isOffCampus ? 'text-orange-700 dark:text-orange-400' : 'text-[var(--text)]')}>
               מחוץ לישיבה
             </p>
-            {isOffCampus && (
-              <p
-                className="mt-0.5 text-xs text-[var(--orange)]"
-              >
-                סטטוס נוכחי
-              </p>
+            {isOffCampus ? (
+              <p className="mt-1 text-sm font-medium text-orange-600 dark:text-orange-500">סטטוס נוכחי ✓</p>
+            ) : (
+              <p className="mt-1 text-sm text-[var(--text-muted)]">לחץ לרישום יציאה</p>
             )}
           </div>
         </button>

@@ -2,27 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Google Font: Heebo ──────────────────────────────────────────────────── */
+/* Loaded via index.html <link> for performance */
+
 :root {
+  /* Original light blue palette — kept as-is */
   --bg: #EAF4FF;
   --bg-2: #D6ECFF;
   --text: #0F172A;
   --text-muted: #64748B;
   --border: #CBD5E1;
   --surface: #FFFFFF;
+
+  /* Accent colors */
   --blue: #3B82F6;
+  --blue-dark: #2563EB;
   --purple: #8B5CF6;
   --green: #22C55E;
+  --green-dark: #16A34A;
   --orange: #F97316;
+  --orange-dark: #EA580C;
   --red: #EF4444;
+
+  /* Depth / shadow */
+  --shadow-card: 0 1px 8px rgba(14, 30, 70, 0.07), 0 1px 3px rgba(14, 30, 70, 0.04);
+  --shadow-elevated: 0 6px 24px rgba(14, 30, 70, 0.12), 0 2px 6px rgba(14, 30, 70, 0.06);
+
+  /* Sidebar — light themed */
+  --sidebar-bg: #1E293B;
+  --sidebar-text: #94A3B8;
+  --sidebar-active-bg: var(--blue);
+  --sidebar-active-text: #FFFFFF;
+  --sidebar-hover-bg: rgba(255,255,255,0.06);
+  --sidebar-border: rgba(255,255,255,0.07);
 }
 
 .dark {
-  --bg: #0B0B0F;
-  --bg-2: #14141A;
-  --text: #FFFFFF;
-  --text-muted: #94A3B8;
-  --border: #26262F;
-  --surface: #1A1A24;
+  --bg: #080E1C;
+  --bg-2: #0F1826;
+  --text: #E8EFFC;
+  --text-muted: #6B82A8;
+  --border: #1E2D47;
+  --surface: #111C30;
+
+  --blue: #3B82F6;
+  --blue-dark: #2563EB;
+  --purple: #8B5CF6;
+  --green: #22C55E;
+  --green-dark: #16A34A;
+  --orange: #F97316;
+  --orange-dark: #EA580C;
+  --red: #EF4444;
+
+  --shadow-card: 0 2px 16px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.2);
+  --shadow-elevated: 0 8px 40px rgba(0, 0, 0, 0.5), 0 2px 12px rgba(0, 0, 0, 0.3);
+
+  --sidebar-bg: #080E1C;
+  --sidebar-text: #6B82A8;
+  --sidebar-active-bg: #1E3A6E;
+  --sidebar-active-text: #FFFFFF;
+  --sidebar-hover-bg: rgba(255,255,255,0.04);
+  --sidebar-border: rgba(255,255,255,0.06);
 }
 
 @layer base {
@@ -32,9 +72,11 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'Heebo', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
     direction: rtl;
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   html {
     direction: rtl;
@@ -49,15 +91,15 @@
 
 /* Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-2);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 3px;
+  border-radius: 99px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
@@ -68,9 +110,15 @@
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
-/* Override for animations that shouldn't transition */
+/* Override for interactive elements */
 button, a, [role="button"] {
-  transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease,
+              border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Button press effect */
+button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 /* ── Splash screen animations ─────────────────────────────────────────── */
@@ -85,4 +133,57 @@ button, a, [role="button"] {
   0%   { opacity: 0; transform: scaleX(0.2); }
   40%  { opacity: 1; transform: scaleX(1); }
   100% { opacity: 0; transform: scaleX(0.2); }
+}
+
+/* ── Status pulse dot ─────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.45; transform: scale(0.82); }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ── Entry animations ─────────────────────────────────────────────────── */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.animate-slide-up { animation: slide-up 0.35s ease-out both; }
+.animate-fade-in  { animation: fade-in 0.4s ease-out both; }
+
+.delay-100 { animation-delay: 0.1s; }
+.delay-200 { animation-delay: 0.2s; }
+.delay-300 { animation-delay: 0.3s; }
+
+/* ── Progress bar animated fill ──────────────────────────────────────── */
+@keyframes bar-fill {
+  from { width: 0%; }
+  to   { width: var(--bar-width, 100%); }
+}
+.bar-animated {
+  animation: bar-fill 0.9s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* ── Sidebar active glow ─────────────────────────────────────────────── */
+.sidebar-active-glow {
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.3);
+}
+
+/* ── Hero card — finish pulse ────────────────────────────────────────── */
+@keyframes hero-pulse {
+  0%   { filter: none;                                        opacity: 1; }
+  35%  { filter: drop-shadow(0 0 10px var(--pulse-color, currentColor)); opacity: 0.88; }
+  65%  { filter: drop-shadow(0 0 6px  var(--pulse-color, currentColor)); opacity: 0.94; }
+  100% { filter: none;                                        opacity: 1; }
+}
+
+.hero-pulse {
+  animation: hero-pulse 0.7s cubic-bezier(0.4, 0, 0.2, 1) both;
 }

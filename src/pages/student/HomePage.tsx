@@ -1,8 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
-import { Clock } from 'lucide-react'
+import { Clock, Undo2 } from 'lucide-react'
 import { StatusButtons } from '@/components/student/StatusButtons'
 import { StatusBadge } from '@/components/shared/StatusBadge'
-import { Card, CardContent } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
@@ -44,7 +43,6 @@ export function HomePage() {
     refreshStudent()
   }, [currentUser?.id])
 
-  // Load today's approved departure request
   useEffect(() => {
     if (!currentUser) return
     api.getAbsenceRequests({ studentId: currentUser.id, status: 'APPROVED' }).then((reqs) => {
@@ -56,14 +54,12 @@ export function HomePage() {
     })
   }, [currentUser?.id])
 
-  // Tick every minute to keep countdown live
   useEffect(() => {
     if (!todayDeparture) return
     const id = setInterval(() => setTick((t) => t + 1), 60000)
     return () => clearInterval(id)
   }, [todayDeparture])
 
-  // Clear undo buffer when it expires
   useEffect(() => {
     if (!undoCheckout) return
     const remaining = undoCheckout.expiresAt - Date.now()
@@ -79,12 +75,9 @@ export function HomePage() {
     }
   }, [undoCheckout])
 
-  // Listen for admin location-audit broadcasts and respond with current GPS
   useEffect(() => {
     if (!currentUser) return
-
     const channel = supabase.channel('location-requests')
-
     channel
       .on('broadcast', { event: 'request_location' }, async () => {
         const result = await getCurrentPosition()
@@ -93,18 +86,13 @@ export function HomePage() {
         }
       })
       .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
+    return () => { supabase.removeChannel(channel) }
   }, [currentUser?.id])
 
   const handleUndoCheckout = async () => {
     if (!currentUser || !undoCheckout) return
     try {
-      // Hard-delete the checkout event so it never appears in history
       await api.deleteEvent(undoCheckout.eventId)
-      // Reset status back to ON_CAMPUS without creating a new event
       await api.updateStudentStatus(currentUser.id, 'ON_CAMPUS')
       setStudent((prev) => prev ? { ...prev, currentStatus: 'ON_CAMPUS' } : prev)
       setUndoCheckout(null)
@@ -120,65 +108,72 @@ export function HomePage() {
   const undoRemainingMin = Math.ceil(undoRemainingMs / 60000)
 
   return (
-    <div className="flex flex-col gap-4 p-4 pt-6">
-      {/* Undo checkout banner */}
+    <div className="flex flex-col gap-4 p-4 pt-5 animate-fade-in">
+      {/* ── Undo checkout banner ──────────────────────────────────────── */}
       {undoCheckout && Date.now() < undoCheckout.expiresAt && (
-        <div className="flex items-center justify-between gap-3 rounded-xl bg-orange-100 px-4 py-3 text-sm dark:bg-orange-950/30">
-          <span className="text-orange-700 dark:text-orange-400">
-            נרשמה יציאה. טעית? ({undoRemainingMin} דק&apos;)
-          </span>
+        <div className="animate-slide-up flex items-center justify-between gap-3 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3.5 dark:border-orange-900/50 dark:bg-orange-950/20">
+          <div className="flex items-center gap-2.5">
+            <Undo2 className="h-4 w-4 shrink-0 text-[var(--orange)]" />
+            <span className="text-sm font-medium text-orange-800 dark:text-orange-300">
+              נרשמה יציאה · נותרו {undoRemainingMin} דק&apos;
+            </span>
+          </div>
           <button
             onClick={handleUndoCheckout}
-            className="rounded-lg bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-600"
+            className="shrink-0 rounded-xl bg-orange-500 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-orange-600 transition-colors"
           >
-            בטל פעולה
+            בטל
           </button>
         </div>
       )}
 
-      {/* Departure countdown banner */}
+      {/* ── Approved departure banner ────────────────────────────────── */}
       {todayDeparture && (() => {
         const minsToStart = getMinutesRemaining(todayDeparture.startTime)
         const minsToEnd = getMinutesRemaining(todayDeparture.endTime)
         if (minsToEnd <= -60) return null
         const isActive = minsToStart <= 0 && minsToEnd > 0
         return (
-          <div className="flex items-center gap-3 rounded-xl bg-blue-50 px-4 py-3 dark:bg-blue-950/30">
-            <Clock className="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
-            <div className="flex-1 text-sm">
-              <span className="font-medium text-blue-700 dark:text-blue-300">
+          <div className="animate-slide-up delay-100 flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3.5 dark:border-blue-900/50 dark:bg-blue-950/20">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-100 dark:bg-blue-900/30">
+              <Clock className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-blue-800 dark:text-blue-200">
                 יציאה מאושרת: {todayDeparture.startTime}–{todayDeparture.endTime}
-              </span>
-              <span className="mx-1 text-blue-500">·</span>
-              {isActive ? (
-                <span className="text-blue-600 dark:text-blue-400">
-                  נותרו {minsToEnd} דק&apos; לחזרה
-                </span>
-              ) : (
-                <span className="text-blue-600 dark:text-blue-400">
-                  היציאה בעוד {minsToStart} דק&apos;
-                </span>
-              )}
+              </p>
+              <p className="text-xs text-blue-600 dark:text-blue-400 mt-0.5">
+                {isActive
+                  ? `נותרו ${minsToEnd} דקות לחזרה`
+                  : `היציאה בעוד ${minsToStart} דקות`}
+              </p>
             </div>
           </div>
         )
       })()}
 
-      {/* Current status card */}
-      <Card>
-        <CardContent className="flex items-center justify-between p-4">
-          <div>
-            <p className="text-sm text-[var(--text-muted)]">סטטוס נוכחי</p>
-            <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-              עדכון אחרון: {formatRelativeTime(student.lastSeen)}
-            </p>
-          </div>
-          <StatusBadge status={student.currentStatus} />
-        </CardContent>
-      </Card>
+      {/* ── Current status card ──────────────────────────────────────── */}
+      <div
+        className="animate-slide-up delay-200 flex items-center justify-between rounded-2xl px-5 py-4"
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          boxShadow: 'var(--shadow-card)',
+        }}
+      >
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+            סטטוס נוכחי
+          </p>
+          <p className="mt-1 text-xs text-[var(--text-muted)]">
+            עדכון אחרון: {formatRelativeTime(student.lastSeen)}
+          </p>
+        </div>
+        <StatusBadge status={student.currentStatus} />
+      </div>
 
-      {/* Status buttons */}
-      <div className="flex-1">
+      {/* ── Status buttons ───────────────────────────────────────────── */}
+      <div className="animate-slide-up delay-300 flex-1">
         <StatusButtons
           currentStatus={student.currentStatus}
           onStatusChange={async (newStatus) => {

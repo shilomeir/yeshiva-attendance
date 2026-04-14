@@ -1,10 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { Shield, Loader2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { AdminLoginModal } from '@/components/auth/AdminLoginModal'
 import { useAuthStore } from '@/store/authStore'
 
@@ -25,7 +21,6 @@ export function LoginScreen() {
         if (success) {
           navigate('/student', { replace: true })
         } else {
-          // Token is stale — clear it so the form shows normally
           localStorage.removeItem('yeshiva_remembered_id')
           setAutoLogging(false)
         }
@@ -40,9 +35,9 @@ export function LoginScreen() {
   if (autoLogging) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[var(--bg)]">
-        <div className="flex flex-col items-center gap-3 text-[var(--text-muted)]">
+        <div className="flex flex-col items-center gap-4">
           <img src="/logo.png" alt="לוגו" className="h-20 w-auto animate-pulse" draggable={false} />
-          <p className="text-sm">מתחבר...</p>
+          <p className="text-sm text-[var(--text-muted)]">מתחבר...</p>
         </div>
       </div>
     )
@@ -53,7 +48,6 @@ export function LoginScreen() {
     if (!idNumber.trim()) return
     const success = await login(idNumber.trim())
     if (success) {
-      // Set a flag so StudentLayout knows to show the "Remember me" banner
       sessionStorage.setItem('show_remember_me', '1')
       sessionStorage.setItem('last_login_id', idNumber.trim())
       navigate('/student', { replace: true })
@@ -66,24 +60,53 @@ export function LoginScreen() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--bg)] px-4">
-      {/* Header */}
-      <div className="mb-8 flex flex-col items-center gap-3">
-        <img src="/logo.png" alt="ישיבת שבי חברון" className="h-28 w-auto" draggable={false} />
-        <p className="text-sm text-[var(--text-muted)]">מערכת נוכחות</p>
+    <div
+      className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden"
+      style={{ background: 'var(--bg)' }}
+    >
+      {/* Subtle decorative circles */}
+      <div
+        className="pointer-events-none absolute -top-32 -end-32 h-96 w-96 rounded-full opacity-40"
+        style={{ background: 'radial-gradient(circle, #BFDBFE 0%, transparent 70%)' }}
+      />
+      <div
+        className="pointer-events-none absolute -bottom-40 -start-24 h-80 w-80 rounded-full opacity-30"
+        style={{ background: 'radial-gradient(circle, #C7D2FE 0%, transparent 70%)' }}
+      />
+
+      {/* Logo above card */}
+      <div className="animate-slide-up relative z-10 mb-8 flex flex-col items-center gap-3">
+        <img src="/logo.png" alt="ישיבת שבי חברון" className="h-28 w-auto drop-shadow-md" draggable={false} />
+        <p className="text-sm font-medium text-[var(--text-muted)]">מערכת נוכחות</p>
       </div>
 
-      {/* Login Card */}
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle className="text-xl">כניסה למערכת</CardTitle>
-          <CardDescription>הזן את מספר תעודת הזהות שלך להתחברות</CardDescription>
-        </CardHeader>
-        <CardContent>
+      {/* Login card */}
+      <div
+        className="animate-slide-up delay-100 relative z-10 w-full max-w-sm overflow-hidden rounded-2xl"
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          boxShadow: '0 8px 32px rgba(14, 30, 70, 0.1), 0 2px 8px rgba(14, 30, 70, 0.06)',
+        }}
+      >
+        {/* Blue accent top strip */}
+        <div
+          className="h-1 w-full"
+          style={{ background: 'linear-gradient(90deg, var(--blue), var(--purple))' }}
+        />
+
+        <div className="px-7 py-8">
+          <div className="mb-6">
+            <h1 className="text-xl font-bold text-[var(--text)]">כניסה למערכת</h1>
+            <p className="mt-0.5 text-sm text-[var(--text-muted)]">הזן את מספר תעודת הזהות שלך</p>
+          </div>
+
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="idNumber">מספר תעודת זהות</Label>
-              <Input
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="idNumber" className="text-sm font-medium text-[var(--text-muted)]">
+                מספר תעודת זהות
+              </label>
+              <input
                 id="idNumber"
                 type="text"
                 inputMode="numeric"
@@ -92,21 +115,47 @@ export function LoginScreen() {
                 placeholder="123456789"
                 value={idNumber}
                 onChange={handleIdChange}
-                className="text-center text-lg tracking-widest"
                 autoComplete="off"
                 autoFocus
+                className="w-full rounded-xl px-4 py-3 text-center text-xl font-bold tracking-[0.2em] outline-none transition-all"
+                style={{
+                  background: 'var(--bg)',
+                  border: error
+                    ? '1.5px solid var(--red)'
+                    : '1.5px solid var(--border)',
+                  color: 'var(--text)',
+                  boxShadow: error ? '0 0 0 3px rgba(239,68,68,0.1)' : 'none',
+                }}
+                onFocus={(e) => {
+                  if (!error) {
+                    e.currentTarget.style.border = '1.5px solid var(--blue)'
+                    e.currentTarget.style.boxShadow = '0 0 0 3px rgba(59,130,246,0.12)'
+                  }
+                }}
+                onBlur={(e) => {
+                  if (!error) {
+                    e.currentTarget.style.border = '1.5px solid var(--border)'
+                    e.currentTarget.style.boxShadow = 'none'
+                  }
+                }}
               />
               {error && (
-                <p className="text-sm text-[var(--red)]" role="alert">
+                <p className="text-sm text-[var(--red)] text-center" role="alert">
                   {error}
                 </p>
               )}
             </div>
 
-            <Button
+            <button
               type="submit"
-              className="w-full"
               disabled={isLoading || idNumber.length < 5}
+              className="flex w-full items-center justify-center gap-2 rounded-xl py-3 text-base font-bold text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                background: 'linear-gradient(135deg, var(--blue) 0%, var(--blue-dark) 100%)',
+                boxShadow: isLoading || idNumber.length < 5
+                  ? 'none'
+                  : '0 4px 16px rgba(59,130,246,0.35)',
+              }}
             >
               {isLoading ? (
                 <>
@@ -116,22 +165,25 @@ export function LoginScreen() {
               ) : (
                 'כניסה'
               )}
-            </Button>
+            </button>
           </form>
 
           {/* Admin link */}
-          <div className="mt-6 border-t border-[var(--border)] pt-4 text-center">
+          <div
+            className="mt-6 border-t pt-5 text-center"
+            style={{ borderColor: 'var(--border)' }}
+          >
             <button
               type="button"
               onClick={() => setShowAdminModal(true)}
               className="inline-flex items-center gap-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--blue)] transition-colors"
             >
               <Shield className="h-3.5 w-3.5" />
-              כניסת מנהל
+              כניסת מנהל / רכז
             </button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       <AdminLoginModal open={showAdminModal} onClose={() => setShowAdminModal(false)} />
     </div>

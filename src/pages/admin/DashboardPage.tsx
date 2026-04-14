@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import React, { Fragment, useEffect, useRef, useState } from 'react'
 import {
   Users, UserCheck, UserX, CalendarOff, Phone,
   AlertOctagon, CheckCircle2, XCircle, MapPin, Bell, Send, Loader2, Clock,
@@ -36,9 +36,30 @@ function getLocationCategory(student: Student): 'inYeshiva' | 'inArea' | 'far' {
 
 // ── stat cards config ───────────────────────────────────────────────────────
 const STAT_CARDS = [
-  { key: 'total' as const,     label: 'סה"כ תלמידים',    icon: Users,      color: 'text-[var(--blue)]',   bg: 'bg-blue-50 dark:bg-blue-950/20' },
-  { key: 'onCampus' as const,  label: 'בישיבה',           icon: UserCheck,  color: 'text-[var(--green)]',  bg: 'bg-green-50 dark:bg-green-950/20' },
-  { key: 'offCampus' as const, label: 'מחוץ לישיבה',     icon: UserX,      color: 'text-[var(--orange)]', bg: 'bg-orange-50 dark:bg-orange-950/20' },
+  {
+    key: 'total' as const,
+    label: 'סה"כ תלמידים',
+    icon: Users,
+    iconColor: 'var(--blue)',
+    iconBg: 'rgba(59,130,246,0.12)',
+    strip: 'var(--blue)',
+  },
+  {
+    key: 'onCampus' as const,
+    label: 'בישיבה',
+    icon: UserCheck,
+    iconColor: 'var(--green)',
+    iconBg: 'rgba(34,197,94,0.12)',
+    strip: 'var(--green)',
+  },
+  {
+    key: 'offCampus' as const,
+    label: 'מחוץ לישיבה',
+    icon: UserX,
+    iconColor: 'var(--orange)',
+    iconBg: 'rgba(249,115,22,0.12)',
+    strip: 'var(--orange)',
+  },
 ]
 
 type UrgentWithStudent = AbsenceRequest & { studentName: string; studentClass: string }
@@ -62,6 +83,9 @@ export function DashboardPage() {
   const [todayDepartures, setTodayDepartures] = useState<DepartureEntry[]>([])
   const [, setTick] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
+  const [displayPct, setDisplayPct] = useState(0)
+  const [heroDone, setHeroDone] = useState(false)
+  const animFrameRef = useRef<number | null>(null)
 
   // Broadcast notification state
   const [broadcastTitle, setBroadcastTitle] = useState('')
@@ -177,12 +201,45 @@ export function DashboardPage() {
 
   // Hero %
   const onCampusPct = stats && stats.total > 0 ? Math.round((stats.onCampus / stats.total) * 100) : 0
-  const heroColor =
-    onCampusPct >= 80
-      ? { text: 'text-[var(--green)]', bar: 'bg-green-500', bg: 'bg-green-50 dark:bg-green-950/20', border: 'border-green-200 dark:border-green-800/40' }
-      : onCampusPct >= 60
-      ? { text: 'text-[var(--orange)]', bar: 'bg-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/20', border: 'border-orange-200 dark:border-orange-800/40' }
-      : { text: 'text-[var(--red)]', bar: 'bg-red-500', bg: 'bg-red-50 dark:bg-red-950/20', border: 'border-red-200 dark:border-red-800/40' }
+
+  // Animate counter from 0 → onCampusPct over 2.5s (easeOutCubic) when data arrives
+  useEffect(() => {
+    if (isLoading) {
+      setDisplayPct(0)
+      setHeroDone(false)
+      return
+    }
+    const target = onCampusPct
+    const duration = 2500
+    const startTime = performance.now()
+    setHeroDone(false)
+
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime
+      const progress = Math.min(elapsed / duration, 1)
+      setDisplayPct(Math.round(easeOutCubic(progress) * target))
+      if (progress < 1) {
+        animFrameRef.current = requestAnimationFrame(tick)
+      } else {
+        setHeroDone(true)
+      }
+    }
+
+    animFrameRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current)
+    }
+  }, [isLoading, onCampusPct])
+
+  // Color shifts live as displayPct climbs: 0-30 red → 31-60 orange → 61+ green
+  const liveColor = (pct: number): string => {
+    if (pct <= 30) return '#EF4444'
+    if (pct <= 60) return '#F97316'
+    return '#22C55E'
+  }
+  const heroAccent = liveColor(displayPct)
 
   // Pie chart — 3 location categories
   const pieData = stats
@@ -214,11 +271,27 @@ export function DashboardPage() {
       </div>
 
       {/* Hero — % on campus */}
-      <Card className={`border ${heroColor.border} ${heroColor.bg}`}>
-        <CardContent className="p-5">
+      <div
+        className="overflow-hidden rounded-2xl"
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          boxShadow: 'var(--shadow-card)',
+        }}
+      >
+        <div className="p-5">
           <div className="flex items-end gap-4">
-            <span className={`text-6xl font-extrabold leading-none ${heroColor.text}`}>
-              {isLoading ? '—' : `${onCampusPct}%`}
+            {/* Number — pulses once when animation finishes */}
+            <span
+              key={heroDone ? 'done' : 'counting'}
+              className={`text-6xl font-extrabold leading-none tabular-nums${heroDone ? ' hero-pulse' : ''}`}
+              style={{
+                color: heroAccent,
+                '--pulse-color': heroAccent,
+                transition: 'color 0.4s ease',
+              } as React.CSSProperties}
+            >
+              {isLoading ? '—' : `${displayPct}%`}
             </span>
             <div className="mb-1 flex flex-col gap-0.5">
               <span className="text-base font-semibold text-[var(--text)]">מתוך התלמידים בישיבה כרגע</span>
@@ -229,14 +302,21 @@ export function DashboardPage() {
               )}
             </div>
           </div>
-          <div className="mt-4 h-3 w-full overflow-hidden rounded-full bg-[var(--border)]">
+          {/* Bar — same live color, pulses once on finish */}
+          <div className="mt-4 h-2.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
             <div
-              className={`h-full rounded-full transition-all duration-700 ${heroColor.bar}`}
-              style={{ width: `${isLoading ? 0 : onCampusPct}%` }}
+              key={heroDone ? 'bar-done' : 'bar-counting'}
+              className={heroDone ? 'hero-pulse h-full rounded-full' : 'h-full rounded-full'}
+              style={{
+                width: `${displayPct}%`,
+                background: heroAccent,
+                '--pulse-color': heroAccent,
+                transition: 'background 0.4s ease',
+              } as React.CSSProperties}
             />
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {/* Today's departures */}
       {todayDepartures.length > 0 && (
@@ -333,27 +413,39 @@ export function DashboardPage() {
 
       {/* Stats grid */}
       <div className="grid grid-cols-3 gap-3">
-        {STAT_CARDS.map(({ key, label, icon: Icon, color, bg }) => (
-          <Card key={key}>
-            <CardContent className="p-4">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm text-[var(--text-muted)]">{label}</p>
-                  <p className="mt-1 text-3xl font-bold text-[var(--text)]">
-                    {isLoading ? '...' : (stats?.[key] ?? 0)}
+        {STAT_CARDS.map(({ key, label, icon: Icon, iconColor, iconBg, strip }) => (
+          <div
+            key={key}
+            className="overflow-hidden rounded-2xl"
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              boxShadow: 'var(--shadow-card)',
+              borderRight: `3px solid ${strip}`,
+            }}
+          >
+            <div className="p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-[var(--text-muted)] truncate">{label}</p>
+                  <p className="mt-1.5 text-3xl font-extrabold text-[var(--text)] leading-none">
+                    {isLoading ? '—' : (stats?.[key] ?? 0)}
                   </p>
                 </div>
-                <div className={`rounded-lg p-2 ${bg}`}>
-                  <Icon className={`h-5 w-5 ${color}`} />
+                <div
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: iconBg }}
+                >
+                  <Icon className="h-5 w-5" style={{ color: iconColor }} />
                 </div>
               </div>
               {stats && key !== 'total' && (
-                <p className="mt-2 text-xs text-[var(--text-muted)]">
-                  {((stats[key] / stats.total) * 100).toFixed(1)}% מסה"כ
+                <p className="mt-2.5 text-xs font-medium" style={{ color: iconColor }}>
+                  {((stats[key] / stats.total) * 100).toFixed(1)}%
                 </p>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         ))}
       </div>
 
