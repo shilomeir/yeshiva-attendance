@@ -94,17 +94,19 @@ export function DashboardPage() {
   const [broadcastResult, setBroadcastResult] = useState<{ sent: number; failed: number; lastError?: string } | null>(null)
   const broadcastResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const loadData = async () => {
-    setIsLoading(true)
+  const loadData = async (isBackground = false) => {
+    if (!isBackground) setIsLoading(true)
     // Auto-return students whose expected return time has passed
     api.autoReturnStudents().catch(() => {})
     try {
-      const [data, absent, urgent, clsStats, allStudents] = await Promise.all([
+      // Fetch everything in parallel — including approved requests that were previously serial
+      const [data, absent, urgent, clsStats, allStudents, approvedRequests] = await Promise.all([
         api.getDashboardStats(),
         api.getLongAbsentStudents(7),
         api.getUrgentRequests(),
         api.getClassStats(),
         api.getStudents(),
+        api.getAbsenceRequests({ status: 'APPROVED' }),
       ])
       setStats(data)
       setLongAbsentStudents(absent)
@@ -117,34 +119,35 @@ export function DashboardPage() {
       }
       setLocationBreakdown(breakdown)
 
-      const enriched = await Promise.all(
-        urgent.map(async (req: AbsenceRequest) => {
-          const student = await api.getStudent(req.studentId)
-          return {
-            ...req,
-            studentName: student?.fullName ?? 'לא ידוע',
-            studentClass: student?.classId ?? '',
-          }
-        })
-      )
+      // Filter today's approved departures
+      const today = getTodayStr()
+      const todayReqs = approvedRequests.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
+
+      // Batch-fetch all students needed for enrichment in a single query (no N+1)
+      const neededIds = [...new Set([
+        ...urgent.map((r: AbsenceRequest) => r.studentId),
+        ...todayReqs.map((r) => r.studentId),
+      ])]
+      const studentMap = await api.getStudentsByIds(neededIds)
+
+      const enriched = urgent.map((req: AbsenceRequest) => ({
+        ...req,
+        studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
+        studentClass: studentMap[req.studentId]?.classId ?? '',
+      }))
       setUrgentRequests(enriched)
 
-      // Today's departures
-      const today = getTodayStr()
-      const approvedToday = await api.getAbsenceRequests({ status: 'APPROVED' })
-      const todayReqs = approvedToday.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
-      const departures = await Promise.all(
-        todayReqs.map(async (req) => {
-          const s = await api.getStudent(req.studentId)
-          return { ...req, studentName: s?.fullName ?? 'לא ידוע', studentClass: s?.classId ?? '' }
-        })
-      )
+      const departures = todayReqs.map((req) => ({
+        ...req,
+        studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
+        studentClass: studentMap[req.studentId]?.classId ?? '',
+      }))
       departures.sort((a, b) => a.startTime.localeCompare(b.startTime))
       setTodayDepartures(departures)
     } catch {
       console.error('Failed to load dashboard stats')
     } finally {
-      setIsLoading(false)
+      if (!isBackground) setIsLoading(false)
     }
   }
 
@@ -153,12 +156,12 @@ export function DashboardPage() {
 
     const studentsChannel = supabase
       .channel('dashboard-students-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData(true))
       .subscribe()
 
     const requestsChannel = supabase
       .channel('dashboard-requests-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData(true))
       .subscribe()
 
     // Poll auto-return every 60 seconds

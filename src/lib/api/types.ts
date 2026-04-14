@@ -56,6 +56,7 @@ export interface IApiClient {
   // Students
   getStudents(options?: GetStudentsOptions): Promise<Student[]>
   getStudent(id: string): Promise<Student | null>
+  getStudentsByIds(ids: string[]): Promise<Record<string, Student>>
   getStudentByIdNumber(idNumber: string): Promise<Student | null>
   updateStudentStatus(id: string, status: StudentStatus): Promise<void>
   updateStudentGrade(id: string, grade: string, classId: string): Promise<void>

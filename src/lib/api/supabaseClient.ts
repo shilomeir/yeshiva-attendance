@@ -31,6 +31,16 @@ export class SupabaseApiClient implements IApiClient {
     return data as Student
   }
 
+  async getStudentsByIds(ids: string[]): Promise<Record<string, Student>> {
+    if (ids.length === 0) return {}
+    const { data, error } = await supabase
+      .from('students')
+      .select('id, fullName, classId, grade, currentStatus, idNumber, phone')
+      .in('id', ids)
+    if (error) throw error
+    return Object.fromEntries((data as Student[]).map((s) => [s.id, s]))
+  }
+
   async getStudentByIdNumber(idNumber: string): Promise<Student | null> {
     const { data, error } = await supabase.from('students').select('*').eq('idNumber', idNumber).single()
     if (error) return null

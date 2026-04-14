@@ -63,6 +63,12 @@ export class MockApiClient implements IApiClient {
     return (await db.students.get(id)) ?? null
   }
 
+  async getStudentsByIds(ids: string[]): Promise<Record<string, Student>> {
+    if (ids.length === 0) return {}
+    const students = await db.students.where('id').anyOf(ids).toArray()
+    return Object.fromEntries(students.map((s) => [s.id, s]))
+  }
+
   async getStudentByIdNumber(idNumber: string): Promise<Student | null> {
     return (await db.students.where('idNumber').equals(idNumber).first()) ?? null
   }
