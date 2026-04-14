@@ -89,6 +89,43 @@
   }
 }
 
+/* ── Toast Glass Design ───────────────────────────────────────────────────── */
+.toast-glass {
+  background: rgba(255, 255, 255, 0.80);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(203, 213, 225, 0.45);
+}
+
+.dark .toast-glass {
+  background: rgba(11, 20, 38, 0.85);
+  border: 1px solid rgba(30, 45, 71, 0.55);
+}
+
+.toast-accent-blue {
+  border-inline-start: 4px solid var(--blue) !important;
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.08),
+    0 12px 36px rgba(59, 130, 246, 0.14),
+    0 0 0 1px rgba(59, 130, 246, 0.08);
+}
+
+.toast-accent-green {
+  border-inline-start: 4px solid var(--green) !important;
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.08),
+    0 12px 36px rgba(34, 197, 94, 0.14),
+    0 0 0 1px rgba(34, 197, 94, 0.08);
+}
+
+.toast-accent-red {
+  border-inline-start: 4px solid var(--red) !important;
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.08),
+    0 12px 36px rgba(239, 68, 68, 0.14),
+    0 0 0 1px rgba(239, 68, 68, 0.08);
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 5px;
