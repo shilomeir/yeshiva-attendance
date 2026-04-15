@@ -21,6 +21,17 @@ export interface QuotaCheckResult {
   quota?: number
 }
 
+export interface AbsenceQuotaResult {
+  hasSpace: boolean
+  current: number
+  quota: number
+  overlapping: Array<{
+    studentName: string
+    endDate: string | null
+    endTime: string
+  }>
+}
+
 export interface GetStudentsOptions {
   filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING'
   search?: string
@@ -109,8 +120,17 @@ export interface IApiClient {
   getClassStats(): Promise<ClassStat[]>
   getClassOutsideCount(classId: string): Promise<number>
   cancelAbsenceRequest(id: string): Promise<void>
+  checkAbsenceQuota(
+    classId: string,
+    date: string,
+    endDate: string | null,
+    startTime: string,
+    endTime: string,
+    excludeStudentId?: string
+  ): Promise<AbsenceQuotaResult>
   markOverdueStudents(): Promise<number>
   autoReturnStudents(): Promise<number>
+  autoCheckoutStudents(): Promise<number>
   createCheckoutWithQuotaCheck(
     studentId: string,
     classId: string,

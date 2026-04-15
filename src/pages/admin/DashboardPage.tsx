@@ -96,8 +96,12 @@ export function DashboardPage() {
 
   const loadData = async (isBackground = false) => {
     if (!isBackground) setIsLoading(true)
-    // Auto-return students whose expected return time has passed
-    api.autoReturnStudents().catch(() => {})
+    // Run auto-checkout + auto-return BEFORE fetching data so the DB reflects
+    // the current status based on approved absence requests.
+    await Promise.all([
+      api.autoCheckoutStudents().catch(() => {}),
+      api.autoReturnStudents().catch(() => {}),
+    ])
     try {
       // Fetch everything in parallel — including approved requests that were previously serial
       const [data, absent, urgent, clsStats, allStudents, approvedRequests] = await Promise.all([
@@ -137,11 +141,16 @@ export function DashboardPage() {
       }))
       setUrgentRequests(enriched)
 
-      const departures = todayReqs.map((req) => ({
-        ...req,
-        studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
-        studentClass: studentMap[req.studentId]?.classId ?? '',
-      }))
+      const departures = todayReqs
+        .filter((req) => {
+          const s = studentMap[req.studentId]
+          return s?.currentStatus === 'OFF_CAMPUS' || s?.currentStatus === 'OVERDUE'
+        })
+        .map((req) => ({
+          ...req,
+          studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
+          studentClass: studentMap[req.studentId]?.classId ?? '',
+        }))
       departures.sort((a, b) => a.startTime.localeCompare(b.startTime))
       setTodayDepartures(departures)
     } catch {
@@ -164,8 +173,9 @@ export function DashboardPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData(true))
       .subscribe()
 
-    // Poll auto-return every 60 seconds
+    // Poll auto-checkout + auto-return every 60 seconds
     const autoReturnInterval = setInterval(() => {
+      api.autoCheckoutStudents().catch(() => {})
       api.autoReturnStudents().catch(() => {})
     }, 60000)
 

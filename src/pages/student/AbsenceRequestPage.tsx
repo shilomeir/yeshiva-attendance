@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle, AlertOctagon, Trash2 } from 'lucide-react'
+import { CalendarIcon, Plus, Clock, CheckCircle, XCircle, AlertCircle, AlertOctagon, Trash2, User } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import type { AbsenceRequest } from '@/types'
+import type { AbsenceQuotaResult } from '@/lib/api/types'
 
 const STATUS_CONFIG = {
   PENDING: { label: 'ממתין לאישור', icon: AlertCircle, color: 'text-[var(--orange)]', variant: 'warning' as const },
@@ -46,6 +47,8 @@ export function AbsenceRequestPage() {
   const [isUrgent, setIsUrgent] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [quotaStage, setQuotaStage] = useState<'form' | 'full'>('form')
+  const [quotaInfo, setQuotaInfo] = useState<AbsenceQuotaResult | null>(null)
 
   const endDateMin = startDate || todayStr()
   const isEndBeforeStart = endDate !== '' && startDate !== '' && endDate < startDate
@@ -79,40 +82,82 @@ export function AbsenceRequestPage() {
     return () => { supabase.removeChannel(channel) }
   }, [currentUser?.id])
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!currentUser || !startDate || !reason || isEndBeforeStart) return
+  const resetForm = () => {
+    setStartDate('')
+    setEndDate('')
+    setReason('')
+    setStartTime('08:00')
+    setEndTime('20:00')
+    setIsUrgent(false)
+    setShowForm(false)
+    setQuotaStage('form')
+    setQuotaInfo(null)
+  }
 
+  const submitRequest = async (urgent: boolean) => {
+    if (!currentUser || !startDate || !reason || isEndBeforeStart) return
     setIsSubmitting(true)
     try {
-      await api.createAbsenceRequest({
+      const req = await api.createAbsenceRequest({
         studentId: currentUser.id,
         date: startDate,
         endDate: endDate && endDate !== startDate ? endDate : undefined,
         reason,
         startTime,
         endTime,
-        isUrgent,
+        isUrgent: urgent,
       })
-
       toast({
-        title: isUrgent ? 'בקשה חריגה נשלחה' : 'הבקשה נשלחה בהצלחה',
-        description: isUrgent
-          ? 'הבקשה מסומנת כחריגה ותועבר לאישור מיידי'
-          : 'מנהל הישיבה יאשר את הבקשה בהקדם',
+        title: urgent
+          ? 'בקשה חריגה נשלחה לאישור'
+          : req.status === 'APPROVED'
+          ? 'הבקשה אושרה אוטומטית'
+          : 'הבקשה נשלחה לאישור',
+        description: req.status === 'APPROVED'
+          ? `${startDate} · ${startTime}–${endTime}`
+          : 'ממתינה לאישור מנהל',
       })
-
-      setStartDate('')
-      setEndDate('')
-      setReason('')
-      setStartTime('08:00')
-      setEndTime('20:00')
-      setIsUrgent(false)
-      setShowForm(false)
+      resetForm()
       await loadRequests()
     } catch {
       toast({ title: 'שגיאה בשליחת הבקשה', variant: 'destructive' })
     } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!currentUser || !startDate || !reason || isEndBeforeStart) return
+
+    // Urgent requests always go to PENDING — no quota check needed
+    if (isUrgent) {
+      await submitRequest(true)
+      return
+    }
+
+    // Non-urgent: check quota first
+    setIsSubmitting(true)
+    try {
+      const quota = await api.checkAbsenceQuota(
+        currentUser.classId,
+        startDate,
+        endDate && endDate !== startDate ? endDate : null,
+        startTime,
+        endTime,
+        currentUser.id,
+      )
+      if (quota.hasSpace) {
+        // Space available — submit and let server auto-approve
+        await submitRequest(false)
+      } else {
+        // Quota full — show banner with choices
+        setQuotaInfo(quota)
+        setQuotaStage('full')
+        setIsSubmitting(false)
+      }
+    } catch {
+      toast({ title: 'שגיאה בבדיקת מכסה', variant: 'destructive' })
       setIsSubmitting(false)
     }
   }
@@ -147,7 +192,65 @@ export function AbsenceRequestPage() {
             <CardTitle className="text-base">הגשת בקשת היעדרות</CardTitle>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            {/* ── Quota-full banner ── */}
+            {quotaStage === 'full' && quotaInfo && (
+              <div className="flex flex-col gap-4 mb-2">
+                <div className="flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20">
+                  <div className="flex items-start gap-2">
+                    <AlertOctagon className="mt-0.5 h-5 w-5 shrink-0 text-[var(--red)]" />
+                    <div>
+                      <p className="font-bold text-[var(--red)]">אוי אוי אוי... נגמר המקום</p>
+                      <p className="mt-0.5 text-sm text-[var(--red)]">
+                        הכיתה מלאה — {quotaInfo.current} מתוך {quotaInfo.quota} מקומות תפוסים
+                      </p>
+                    </div>
+                  </div>
+                  {quotaInfo.overlapping.length > 0 && (
+                    <div className="flex flex-col gap-1.5 rounded-lg bg-red-100/60 px-3 py-2 dark:bg-red-900/20">
+                      {quotaInfo.overlapping.map((s, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 text-sm text-[var(--red)]">
+                          <div className="flex items-center gap-2">
+                            <User className="h-3.5 w-3.5 shrink-0" />
+                            <span>{s.studentName}</span>
+                          </div>
+                          <span className="flex items-center gap-1 text-xs opacity-75">
+                            <Clock className="h-3 w-3" />
+                            {s.endDate && s.endDate !== startDate ? s.endDate : s.endTime}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <p className="text-sm text-center text-[var(--text-muted)]">רוצה להגיש בכל זאת?</p>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    onClick={() => submitRequest(false)}
+                    disabled={isSubmitting}
+                    variant="outline"
+                    className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400"
+                  >
+                    בקשה רגילה (ממתינה לאישור)
+                  </Button>
+                  <Button
+                    onClick={() => submitRequest(true)}
+                    disabled={isSubmitting}
+                    className="w-full bg-[var(--orange)] hover:bg-orange-600 text-white"
+                  >
+                    בקשה חריגה (דחופה)
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => { setQuotaStage('form'); setQuotaInfo(null) }}
+                    disabled={isSubmitting}
+                    className="w-full text-[var(--text-muted)]"
+                  >
+                    חזור לטופס
+                  </Button>
+                </div>
+              </div>
+            )}
+            <form onSubmit={handleSubmit} className={`flex flex-col gap-4 ${quotaStage === 'full' ? 'hidden' : ''}`}>
 
               {/* Urgent toggle */}
               <button

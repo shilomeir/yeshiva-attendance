@@ -149,7 +149,7 @@ export class SupabaseApiClient implements IApiClient {
           })
           if (res.error) {
             failed++
-            lastError = res.error?.message ?? JSON.stringify(res.error)
+            lastError = (res.data as { error?: string } | null)?.error ?? res.error?.message ?? JSON.stringify(res.error)
           } else {
             sent++
           }
@@ -213,10 +213,81 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async createAbsenceRequest(payload: CreateAbsenceRequestPayload): Promise<AbsenceRequest> {
-    const request = { id: uuidv4(), studentId: payload.studentId, date: payload.date, endDate: payload.endDate ?? null, reason: payload.reason, startTime: payload.startTime, endTime: payload.endTime, status: 'PENDING' as const, adminNote: null, isUrgent: payload.isUrgent ?? false, createdAt: new Date().toISOString() }
+    const isUrgent = payload.isUrgent ?? false
+    let status: 'PENDING' | 'APPROVED' = 'PENDING'
+
+    if (!isUrgent) {
+      // Auto-approve if quota allows; stay PENDING if full (admin must override)
+      try {
+        const student = await this.getStudent(payload.studentId)
+        if (student) {
+          const quotaData = await this.checkAbsenceQuota(
+            student.classId,
+            payload.date,
+            payload.endDate ?? null,
+            payload.startTime,
+            payload.endTime,
+            payload.studentId,
+          )
+          if (quotaData.hasSpace) status = 'APPROVED'
+        }
+      } catch {
+        // Quota check failed — fall through to PENDING for safety
+      }
+    }
+
+    const request = {
+      id: uuidv4(),
+      studentId: payload.studentId,
+      date: payload.date,
+      endDate: payload.endDate ?? null,
+      reason: payload.reason,
+      startTime: payload.startTime,
+      endTime: payload.endTime,
+      status,
+      adminNote: null,
+      isUrgent,
+      createdAt: new Date().toISOString(),
+    }
     const { data, error } = await supabase.from('absence_requests').insert(request).select().single()
     if (error) throw error
+
+    // If auto-approved and departure time has already passed → checkout immediately
+    if (status === 'APPROVED') {
+      const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+      const todayStr = new Date().toISOString().slice(0, 10)
+      if (payload.date <= todayStr && payload.startTime <= nowStr) {
+        supabase.rpc('auto_checkout_students').catch(() => {})
+      }
+    }
+
     return data as AbsenceRequest
+  }
+
+  async checkAbsenceQuota(
+    classId: string,
+    date: string,
+    endDate: string | null,
+    startTime: string,
+    endTime: string,
+    excludeStudentId?: string,
+  ): Promise<import('./types').AbsenceQuotaResult> {
+    const { data, error } = await supabase.rpc('check_absence_quota', {
+      p_class_id: classId,
+      p_date: date,
+      p_end_date: endDate ?? date,
+      p_start_time: startTime,
+      p_end_time: endTime,
+      p_exclude_student_id: excludeStudentId ?? null,
+    })
+    if (error) throw error
+    return data as import('./types').AbsenceQuotaResult
+  }
+
+  async autoCheckoutStudents(): Promise<number> {
+    const { data, error } = await supabase.rpc('auto_checkout_students')
+    if (error) throw error
+    return (data as number) ?? 0
   }
 
   async updateAbsenceRequestStatus(id: string, status: AbsenceRequest['status'], adminNote?: string): Promise<void> {

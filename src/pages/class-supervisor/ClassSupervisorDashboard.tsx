@@ -432,6 +432,10 @@ export function ClassSupervisorDashboard() {
 
   const loadData = async () => {
     if (!classId) return
+    await Promise.all([
+      api.autoCheckoutStudents().catch(() => {}),
+      api.autoReturnStudents().catch(() => {}),
+    ])
     try {
       const [gs, sts, cs] = await Promise.all([
         api.getDashboardStats(),

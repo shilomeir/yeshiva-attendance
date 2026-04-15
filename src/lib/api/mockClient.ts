@@ -22,6 +22,7 @@ import type {
   CreateEventPayload,
   CreateAbsenceRequestPayload,
   QuotaCheckResult,
+  AbsenceQuotaResult,
 } from './types'
 
 export class MockApiClient implements IApiClient {
@@ -306,7 +307,7 @@ export class MockApiClient implements IApiClient {
       reason: payload.reason,
       startTime: payload.startTime,
       endTime: payload.endTime,
-      status: 'PENDING',
+      status: 'PENDING' as AbsenceRequest['status'], // quota check handled by checkAbsenceQuota
       adminNote: null,
       createdAt: new Date().toISOString(),
       isUrgent: payload.isUrgent ?? false,
@@ -526,6 +527,58 @@ export class MockApiClient implements IApiClient {
   async markOverdueStudents(): Promise<number> {
     // OVERDUE status removed — no longer used
     return 0
+  }
+
+  async checkAbsenceQuota(
+    _classId: string,
+    _date: string,
+    _endDate: string | null,
+    _startTime: string,
+    _endTime: string,
+    _excludeStudentId?: string,
+  ): Promise<AbsenceQuotaResult> {
+    // Mock always reports space available
+    return { hasSpace: true, current: 0, quota: 3, overlapping: [] }
+  }
+
+  async autoCheckoutStudents(): Promise<number> {
+    const now = new Date()
+    const todayStr = now.toISOString().slice(0, 10)
+    const nowTime = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+
+    const approved = await db.absenceRequests
+      .where('status').equals('APPROVED')
+      .toArray()
+
+    let count = 0
+    for (const req of approved) {
+      if (req.date > todayStr) continue
+      const endDate = req.endDate ?? req.date
+      if (endDate < todayStr) continue
+      if (req.startTime > nowTime) continue
+      if (endDate === todayStr && req.endTime <= nowTime) continue
+
+      const student = await db.students.get(req.studentId)
+      if (!student || student.currentStatus !== 'ON_CAMPUS') continue
+
+      await db.events.add({
+        id: uuidv4(),
+        studentId: req.studentId,
+        type: 'CHECK_OUT',
+        timestamp: now.toISOString(),
+        reason: req.reason,
+        expectedReturn: `${endDate}T${req.endTime}:00`,
+        gpsLat: null,
+        gpsLng: null,
+        gpsStatus: 'UNAVAILABLE',
+        distanceFromCampus: null,
+        note: null,
+        syncedAt: now.toISOString(),
+      })
+      await db.students.update(req.studentId, { currentStatus: 'OFF_CAMPUS', lastSeen: now.toISOString() })
+      count++
+    }
+    return count
   }
 
   async createCheckoutWithQuotaCheck(
