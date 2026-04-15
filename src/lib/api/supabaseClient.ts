@@ -257,7 +257,7 @@ export class SupabaseApiClient implements IApiClient {
       const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
       const todayStr = new Date().toISOString().slice(0, 10)
       if (payload.date <= todayStr && payload.startTime <= nowStr) {
-        supabase.rpc('auto_checkout_students').catch(() => {})
+        void supabase.rpc('auto_checkout_students')
       }
     }
 

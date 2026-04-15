@@ -179,23 +179,23 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
             <div className="flex flex-col gap-2">
               <Button
                 onClick={() => createRequest(false)}
-                disabled={stage === 'submitting'}
+                disabled={isSubmitting}
                 variant="outline"
                 className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400"
               >
-                {stage === 'submitting' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'בקשה רגילה (ממתינה לאישור)'}
+                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'בקשה רגילה (ממתינה לאישור)'}
               </Button>
               <Button
                 onClick={() => createRequest(true)}
-                disabled={stage === 'submitting'}
+                disabled={isSubmitting}
                 className="w-full bg-[var(--orange)] hover:bg-orange-600 text-white"
               >
-                {stage === 'submitting' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'בקשה חריגה (דחופה)'}
+                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'בקשה חריגה (דחופה)'}
               </Button>
               <Button
                 variant="ghost"
                 onClick={() => setStage('form')}
-                disabled={stage === 'submitting'}
+                disabled={isSubmitting}
                 className="w-full text-[var(--text-muted)]"
               >
                 חזור לטופס
