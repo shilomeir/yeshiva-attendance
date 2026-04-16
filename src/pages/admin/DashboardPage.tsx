@@ -367,23 +367,63 @@ export function DashboardPage() {
 
       {/* Pie chart — 3 location categories */}
       {!isLoading && pieData.length > 0 && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <MapPin className="h-4 w-4 text-[var(--blue)]" />
-              <CardTitle className="text-base">התפלגות מיקום תלמידים</CardTitle>
+        <div
+          className="overflow-hidden rounded-2xl p-5"
+          style={{
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            boxShadow: 'var(--shadow-card)',
+          }}
+        >
+          {/* Section title */}
+          <div className="flex items-center gap-2 mb-5">
+            <MapPin className="h-4 w-4 text-[var(--blue)]" />
+            <span className="text-base font-semibold text-[var(--text)]">התפלגות מיקום תלמידים</span>
+          </div>
+
+          {/* RTL row: legend on the right, pie on the left */}
+          <div className="flex flex-col-reverse sm:flex-row items-center gap-4" dir="rtl">
+
+            {/* ── Legend — right side in RTL ── */}
+            <div className="flex flex-col gap-6 flex-1 min-w-0 sm:pr-2">
+              {pieData.map((entry) => (
+                <div key={entry.name} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className="inline-block h-3.5 w-3.5 rounded-full shrink-0"
+                      style={{ backgroundColor: entry.color }}
+                    />
+                    <span className="text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+                      {entry.name}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-2.5 pr-6">
+                    <span
+                      className="text-5xl font-black tabular-nums leading-none"
+                      style={{ color: entry.color }}
+                    >
+                      {entry.value}
+                    </span>
+                    {stats && (
+                      <span className="text-xl font-bold text-[var(--text-muted)]">
+                        {Math.round((entry.value / stats.total) * 100)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-col items-center sm:flex-row sm:items-center sm:justify-center gap-4">
-              <PieChart width={220} height={200}>
+
+            {/* ── Pie — left side in RTL ── */}
+            <div className="shrink-0">
+              <PieChart width={270} height={270}>
                 <Pie
                   data={pieData}
-                  cx={110}
-                  cy={95}
-                  innerRadius={55}
-                  outerRadius={90}
-                  paddingAngle={2}
+                  cx={135}
+                  cy={130}
+                  innerRadius={68}
+                  outerRadius={118}
+                  paddingAngle={3}
                   dataKey="value"
                   startAngle={90}
                   endAngle={-270}
@@ -398,30 +438,13 @@ export function DashboardPage() {
                     border: '1px solid var(--border)',
                     borderRadius: '8px',
                     direction: 'rtl',
+                    fontFamily: 'Heebo, sans-serif',
                   }}
                 />
               </PieChart>
-              {/* Legend */}
-              <div className="flex flex-col gap-2.5">
-                {pieData.map((entry) => (
-                  <div key={entry.name} className="flex items-center gap-2.5">
-                    <span
-                      className="inline-block h-3 w-3 rounded-full shrink-0"
-                      style={{ backgroundColor: entry.color }}
-                    />
-                    <span className="text-sm text-[var(--text)]">{entry.name}</span>
-                    <span className="text-sm font-bold text-[var(--text)]">{entry.value}</span>
-                    {stats && (
-                      <span className="text-xs text-[var(--text-muted)]">
-                        ({Math.round((entry.value / stats.total) * 100)}%)
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
 
       {/* Stats grid */}

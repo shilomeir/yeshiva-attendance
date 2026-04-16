@@ -224,3 +224,40 @@ button:active:not(:disabled) {
 .hero-pulse {
   animation: hero-pulse 0.7s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
+
+/* ── Departure Timeline ───────────────────────────────────────────────── */
+@keyframes timeline-bar-in {
+  from { opacity: 0; transform: scaleX(0); transform-origin: right; }
+  to   { opacity: 1; transform: scaleX(1); transform-origin: right; }
+}
+
+@keyframes timeline-row-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes now-line-pulse {
+  0%, 100% { opacity: 0.75; }
+  50%       { opacity: 1; }
+}
+
+@keyframes overdue-flash {
+  0%, 100% { opacity: 0.9; }
+  50%       { opacity: 0.55; }
+}
+
+.timeline-bar-enter {
+  animation: timeline-bar-in 0.55s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.timeline-row-enter {
+  animation: timeline-row-in 0.4s ease-out both;
+}
+
+.timeline-now-line {
+  animation: now-line-pulse 2.5s ease-in-out infinite;
+}
+
+.timeline-overdue {
+  animation: overdue-flash 1.8s ease-in-out infinite;
+}
