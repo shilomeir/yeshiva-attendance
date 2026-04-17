@@ -132,24 +132,34 @@ export class SupabaseApiClient implements IApiClient {
   async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
     const { data, error } = await supabase
       .from('students')
-      .select('push_token')
+      .select('id, push_token')
       .not('push_token', 'is', null)
     if (error) throw error
 
-    const tokens = (data ?? []).map((s: { push_token: string }) => s.push_token).filter(Boolean)
+    const students = (data ?? []).filter((s: { id: string; push_token: string }) => s.push_token)
     let sent = 0
     let failed = 0
     let lastError: string | undefined
 
     await Promise.all(
-      tokens.map(async (token) => {
+      students.map(async (s: { id: string; push_token: string }) => {
         try {
           const res = await supabase.functions.invoke('send-push', {
-            body: { subscription: token, title, body },
+            body: { subscription: s.push_token, title, body },
           })
+          const resData = res.data as { sent?: boolean; gone?: boolean; error?: string } | null
           if (res.error) {
+            // Edge function itself failed (e.g. VAPID keys missing)
             failed++
-            lastError = (res.data as { error?: string } | null)?.error ?? res.error?.message ?? JSON.stringify(res.error)
+            lastError = resData?.error ?? res.error?.message ?? JSON.stringify(res.error)
+          } else if (resData?.sent === false) {
+            // Push service rejected the notification
+            failed++
+            lastError = resData?.error
+            if (resData?.gone) {
+              // Subscription expired or unregistered — remove stale token
+              await supabase.from('students').update({ push_token: null }).eq('id', s.id)
+            }
           } else {
             sent++
           }

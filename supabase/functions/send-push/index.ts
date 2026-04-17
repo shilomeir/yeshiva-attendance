@@ -208,7 +208,16 @@ serve(async (req) => {
 
     if (!pushResp.ok) {
       const text = await pushResp.text()
-      throw new Error(`Push service ${pushResp.status}: ${text}`)
+      // Return 200 so the caller can read the actual error details.
+      // 410 = subscription expired/unregistered → caller should remove the token.
+      return new Response(
+        JSON.stringify({
+          sent: false,
+          gone: pushResp.status === 410 || pushResp.status === 404,
+          error: `Push service ${pushResp.status}: ${text}`,
+        }),
+        { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } },
+      )
     }
 
     return new Response(JSON.stringify({ sent: true }), {
