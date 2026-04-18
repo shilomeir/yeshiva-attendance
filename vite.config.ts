@@ -1,3 +1,4 @@
+// Supabase: Frankfurt (frxjddevnehprauoapiv) — migrated 2026-04-19
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
