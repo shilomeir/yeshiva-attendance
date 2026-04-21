@@ -13,14 +13,20 @@
 
 
 -- ─── 1. check_absence_quota ──────────────────────────────────────────────────
+--
+-- Bug fixes applied (see fix_check_absence_quota_type_casts migration):
+-- 1. p_exclude_student_id was UUID but absence_requests.studentId is TEXT → crash
+-- 2. p_date/p_end_date were DATE but absence_requests.date is TEXT → crash
+-- 3. Urgent approved requests were counted toward quota (they must be exempt)
+-- 4. Stale approved requests from already-returned students consumed quota slots
 
 CREATE OR REPLACE FUNCTION check_absence_quota(
   p_class_id            TEXT,
-  p_date                DATE,
-  p_end_date            DATE,   -- pass p_date again for single-day requests
-  p_start_time          TEXT,   -- HH:MM
-  p_end_time            TEXT,   -- HH:MM
-  p_exclude_student_id  UUID DEFAULT NULL
+  p_date                TEXT,    -- YYYY-MM-DD
+  p_end_date            TEXT,    -- YYYY-MM-DD (same as p_date for single-day)
+  p_start_time          TEXT,    -- HH:MM
+  p_end_time            TEXT,    -- HH:MM
+  p_exclude_student_id  TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -32,16 +38,24 @@ DECLARE
   v_quota         INT;
   v_current_count INT;
   v_overlapping   JSONB;
+  v_today         TEXT;
+  v_now_time      TEXT;
 BEGIN
-  -- Class size (all non-pending students)
+  v_today    := (NOW() AT TIME ZONE 'Asia/Jerusalem')::DATE::TEXT;
+  v_now_time := TO_CHAR(NOW() AT TIME ZONE 'Asia/Jerusalem', 'HH24:MI');
+
+  -- Class size (all students in class)
   SELECT COUNT(*) INTO v_class_size
   FROM students
   WHERE "classId" = p_class_id;
 
-  -- Same dynamic quota formula as create_checkout_with_quota_check
+  -- Dynamic quota: ~3 slots per 25 students (minimum 1)
   v_quota := GREATEST(1, ROUND((v_class_size * 3)::numeric / 25));
 
-  -- Count approved requests that overlap in both date range and time range
+  -- Count approved, non-urgent requests overlapping in date AND time.
+  -- A request only consumes a slot if the student is still outside,
+  -- or their departure is in the future (prevents stale approved requests
+  -- from blocking new departures after students return early).
   SELECT
     COUNT(*),
     COALESCE(
@@ -57,13 +71,27 @@ BEGIN
   JOIN students s ON ar."studentId" = s.id
   WHERE s."classId" = p_class_id
     AND ar.status = 'APPROVED'
+    -- Urgent requests are quota-exempt
+    AND (ar."isUrgent" IS NULL OR ar."isUrgent" = false)
+    -- Exclude the submitting student's own requests
     AND (p_exclude_student_id IS NULL OR ar."studentId" != p_exclude_student_id)
-    -- Date range overlap: [ar.date, COALESCE(ar.endDate, ar.date)] ∩ [p_date, p_end_date] ≠ ∅
-    AND ar.date                               <= p_end_date
-    AND COALESCE(ar."endDate", ar.date)       >= p_date
-    -- Time range overlap: [ar.startTime, ar.endTime] ∩ [p_start_time, p_end_time] ≠ ∅
+    -- Date range overlap (TEXT YYYY-MM-DD comparison is lexicographically correct)
+    AND ar.date                             <= p_end_date
+    AND COALESCE(ar."endDate", ar.date)     >= p_date
+    -- Time range overlap
     AND ar."startTime" < p_end_time
-    AND ar."endTime"   > p_start_time;
+    AND ar."endTime"   > p_start_time
+    -- Only count if student is still outside OR departure hasn't happened yet
+    AND (
+      s."currentStatus" IN ('OFF_CAMPUS', 'OVERDUE')
+      OR (
+        s."currentStatus" = 'ON_CAMPUS'
+        AND (
+          ar.date > v_today
+          OR (ar.date = v_today AND ar."startTime" > v_now_time)
+        )
+      )
+    );
 
   RETURN jsonb_build_object(
     'hasSpace',    v_current_count < v_quota,
@@ -74,8 +102,8 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION check_absence_quota(TEXT, DATE, DATE, TEXT, TEXT, UUID) TO authenticated;
-GRANT EXECUTE ON FUNCTION check_absence_quota(TEXT, DATE, DATE, TEXT, TEXT, UUID) TO anon;
+GRANT EXECUTE ON FUNCTION check_absence_quota(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION check_absence_quota(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO anon;
 
 
 -- ─── 2. auto_checkout_students ───────────────────────────────────────────────
