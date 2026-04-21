@@ -131,6 +131,7 @@ export interface IApiClient {
   markOverdueStudents(): Promise<number>
   autoReturnStudents(): Promise<number>
   autoCheckoutStudents(): Promise<number>
+  getEventsByDateRange(startDate: string, endDate: string): Promise<Event[]>
   createCheckoutWithQuotaCheck(
     studentId: string,
     classId: string,

@@ -267,7 +267,7 @@ export class SupabaseApiClient implements IApiClient {
       const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
       const todayStr = new Date().toISOString().slice(0, 10)
       if (payload.date <= todayStr && payload.startTime <= nowStr) {
-        void supabase.rpc('auto_checkout_students')
+        await supabase.rpc('auto_checkout_students')
       }
     }
 
@@ -298,6 +298,18 @@ export class SupabaseApiClient implements IApiClient {
     const { data, error } = await supabase.rpc('auto_checkout_students')
     if (error) throw error
     return (data as number) ?? 0
+  }
+
+  async getEventsByDateRange(startDate: string, endDate: string): Promise<Event[]> {
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .eq('type', 'CHECK_OUT')
+      .gte('timestamp', `${startDate}T00:00:00`)
+      .lte('timestamp', `${endDate}T23:59:59.999`)
+      .order('timestamp', { ascending: false })
+    if (error) throw error
+    return (data as Event[]) ?? []
   }
 
   async updateAbsenceRequestStatus(id: string, status: AbsenceRequest['status'], adminNote?: string): Promise<void> {

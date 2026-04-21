@@ -581,6 +581,13 @@ export class MockApiClient implements IApiClient {
     return count
   }
 
+  async getEventsByDateRange(startDate: string, endDate: string): Promise<Event[]> {
+    const events = await db.events.toArray()
+    return events
+      .filter(e => e.type === 'CHECK_OUT' && e.timestamp >= `${startDate}T00:00:00` && e.timestamp <= `${endDate}T23:59:59.999`)
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+  }
+
   async createCheckoutWithQuotaCheck(
     studentId: string,
     classId: string,

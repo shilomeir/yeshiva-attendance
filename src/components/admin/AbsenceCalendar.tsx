@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils/cn'
-import type { AbsenceRequest, Student } from '@/types'
+import type { AbsenceRequest, Event, Student } from '@/types'
 
 interface EnrichedRequest extends AbsenceRequest {
   studentName: string
@@ -26,6 +26,16 @@ interface DayData {
   exitCount: number
   requests: EnrichedRequest[]
   totalStudents: number
+}
+
+function toIsraelDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' })
+}
+
+function toIsraelTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem',
+  })
 }
 
 export function AbsenceCalendar() {
@@ -41,23 +51,22 @@ export function AbsenceCalendar() {
       const monthStart = startOfMonth(currentMonth)
       const monthEnd = endOfMonth(currentMonth)
       const days = eachDayOfInterval({ start: monthStart, end: monthEnd })
+      const monthStartStr = format(monthStart, 'yyyy-MM-dd')
+      const monthEndStr = format(monthEnd, 'yyyy-MM-dd')
 
-      // Fetch approved requests and all students in parallel
-      const [approvedRequests, allStudents] = await Promise.all([
+      const [approvedRequests, allStudents, checkoutEvents] = await Promise.all([
         api.getAbsenceRequests({ status: 'APPROVED' }),
         api.getStudents(),
+        api.getEventsByDateRange(monthStartStr, monthEndStr),
       ])
 
       const total = (allStudents as Student[]).length
       setTotalStudents(total)
 
-      // Build a studentId → Student map for fast lookup
       const studentMap = new Map<string, Student>()
-      for (const s of allStudents as Student[]) {
-        studentMap.set(s.id, s)
-      }
+      for (const s of allStudents as Student[]) studentMap.set(s.id, s)
 
-      // Enrich all requests with student info
+      // Enrich approved absence requests
       const enriched: EnrichedRequest[] = approvedRequests.map((r) => {
         const s = studentMap.get(r.studentId)
         return {
@@ -68,11 +77,54 @@ export function AbsenceCalendar() {
         }
       })
 
+      // Build a set of (studentId|date) pairs already covered by a request
+      // so we don't double-count when an event also exists for the same student+day
+      const coveredKeys = new Set<string>()
+      for (const r of enriched) {
+        const endD = r.endDate ?? r.date
+        // mark every day covered by this multi-day (or single-day) request
+        const start = new Date(r.date)
+        const end = new Date(endD)
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          coveredKeys.add(`${r.studentId}|${format(d, 'yyyy-MM-dd')}`)
+        }
+      }
+
+      // Convert checkout events that are NOT already covered by an absence request
+      const eventRows: EnrichedRequest[] = (checkoutEvents as Event[])
+        .filter((e) => {
+          const eventDate = toIsraelDate(e.timestamp)
+          return !coveredKeys.has(`${e.studentId}|${eventDate}`)
+        })
+        .map((e) => {
+          const s = studentMap.get(e.studentId)
+          const eventDate = toIsraelDate(e.timestamp)
+          const startTime = toIsraelTime(e.timestamp)
+          const endTime = e.expectedReturn ? toIsraelTime(e.expectedReturn) : '–'
+          return {
+            id: e.id,
+            studentId: e.studentId,
+            date: eventDate,
+            endDate: e.expectedReturn ? toIsraelDate(e.expectedReturn) : null,
+            reason: e.reason ?? 'יציאה',
+            startTime,
+            endTime,
+            status: 'APPROVED' as const,
+            adminNote: null,
+            isUrgent: false,
+            createdAt: e.timestamp,
+            studentName: s?.fullName ?? 'לא ידוע',
+            studentClass: s?.classId ?? '',
+            studentGrade: s?.grade ?? '',
+          }
+        })
+
+      const allDepartures = [...enriched, ...eventRows]
+
       const newDayData = new Map<string, DayData>()
       for (const day of days) {
         const dateStr = format(day, 'yyyy-MM-dd')
-        // Count approved requests whose date range covers this day
-        const dayRequests = enriched.filter((r) => {
+        const dayRequests = allDepartures.filter((r) => {
           if (r.date > dateStr) return false
           const end = r.endDate ?? r.date
           return end >= dateStr
@@ -197,7 +249,7 @@ export function AbsenceCalendar() {
                   {format(selectedDay.date, 'EEEE, d בMMMM', { locale: he })}
                 </h3>
                 <p className="text-sm text-[var(--text-muted)] mt-0.5">
-                  {selectedDay.exitCount} יציאות מאושרות
+                  {selectedDay.exitCount} יציאות
                   {selectedDay.totalStudents > 0 && ` (${((selectedDay.exitCount / selectedDay.totalStudents) * 100).toFixed(1)}%)`}
                 </p>
               </div>
@@ -207,7 +259,7 @@ export function AbsenceCalendar() {
             </div>
 
             {selectedDay.requests.length === 0 ? (
-              <p className="text-sm text-[var(--text-muted)]">אין יציאות מאושרות ביום זה</p>
+              <p className="text-sm text-[var(--text-muted)]">אין יציאות ביום זה</p>
             ) : (
               <div className="flex flex-col gap-2">
                 {selectedDay.requests.map((req) => (
@@ -227,7 +279,7 @@ export function AbsenceCalendar() {
                         {req.startTime}–{req.endTime}
                       </span>
                     </div>
-                    {req.reason && (
+                    {req.reason && req.reason !== 'יציאה' && (
                       <p className="text-xs text-[var(--text-muted)] mt-1">{req.reason}</p>
                     )}
                   </div>
