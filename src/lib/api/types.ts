@@ -3,7 +3,6 @@ import type {
   Event,
   SmsEvent,
   AdminOverride,
-  AbsenceRequest,
   RecurringAbsence,
   StudentStatus,
   DashboardStats,
@@ -11,26 +10,16 @@ import type {
   ReasonData,
   HourlyData,
   ClassStat,
+  Departure,
+  CalendarDeparture,
+  DepartureStatus,
+  DepartureSource,
+  SubmitDepartureResult,
 } from '@/types'
 
-export interface QuotaCheckResult {
-  success: boolean
-  eventId?: string
-  error?: 'quota_exceeded' | 'server_error'
-  current?: number
-  quota?: number
-}
-
-export interface AbsenceQuotaResult {
-  hasSpace: boolean
-  current: number
-  quota: number
-  overlapping: Array<{
-    studentName: string
-    endDate: string | null
-    endTime: string
-  }>
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Input payloads
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface GetStudentsOptions {
   filter?: 'ALL' | 'OFF_CAMPUS' | 'PENDING'
@@ -39,6 +28,29 @@ export interface GetStudentsOptions {
   classId?: string
   limit?: number
   offset?: number
+}
+
+export interface SubmitDeparturePayload {
+  studentId: string
+  startAt: Date | string   // departure start (may be now or future)
+  endAt: Date | string     // expected return
+  reason?: string | null
+  isUrgent?: boolean
+  source?: DepartureSource
+  approvedBy?: string | null
+  forcePending?: boolean   // true = create PENDING even when quota is full
+  actorId?: string | null
+  actorRole?: 'STUDENT' | 'ADMIN' | 'SUPERVISOR'
+}
+
+export interface ListDeparturesOptions {
+  studentId?: string
+  classId?: string
+  grade?: string
+  status?: DepartureStatus | DepartureStatus[]
+  from?: Date | string   // start_at >= from
+  to?: Date | string     // start_at <= to (or end_at >= to for calendar range)
+  limit?: number
 }
 
 export interface CreateEventPayload {
@@ -51,20 +63,15 @@ export interface CreateEventPayload {
   gpsStatus?: Event['gpsStatus']
   distanceFromCampus?: number | null
   note?: string | null
+  departureId?: string | null
 }
 
-export interface CreateAbsenceRequestPayload {
-  studentId: string
-  date: string        // YYYY-MM-DD start date
-  endDate?: string    // YYYY-MM-DD end date (optional, multi-day)
-  reason: string
-  startTime: string
-  endTime: string
-  isUrgent?: boolean
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// IApiClient — single interface for Supabase + Mock implementations
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface IApiClient {
-  // Students
+  // ── Students ───────────────────────────────────────────────────────────────
   getStudents(options?: GetStudentsOptions): Promise<Student[]>
   getStudent(id: string): Promise<Student | null>
   getStudentsByIds(ids: string[]): Promise<Record<string, Student>>
@@ -75,67 +82,55 @@ export interface IApiClient {
   updateStudentFcmToken(id: string, token: string): Promise<void>
   updatePushToken(id: string, token: string | null): Promise<void>
   sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }>
-
-  // Events
-  getEvents(studentId: string): Promise<Event[]>
-  createEvent(payload: CreateEventPayload): Promise<Event>
-  deleteEvent(id: string): Promise<void>
-  getRecentEvents(limit?: number): Promise<Event[]>
-
-  // SMS
-  getSmsEvents(): Promise<SmsEvent[]>
-  createSmsEvent(raw: string, studentPhone?: string): Promise<SmsEvent>
-
-  // Admin overrides
-  getAdminOverrides(): Promise<AdminOverride[]>
-  createAdminOverride(
-    studentId: string,
-    newStatus: StudentStatus,
-    note?: string
-  ): Promise<AdminOverride>
-
-  // Absence requests
-  getAbsenceRequests(options?: { studentId?: string; status?: AbsenceRequest['status'] }): Promise<AbsenceRequest[]>
-  createAbsenceRequest(payload: CreateAbsenceRequestPayload): Promise<AbsenceRequest>
-  updateAbsenceRequestStatus(
-    id: string,
-    status: AbsenceRequest['status'],
-    adminNote?: string
-  ): Promise<void>
-  getUrgentRequests(): Promise<AbsenceRequest[]>
-
-  // Recurring absences
-  getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]>
-
-  // Student management — students are managed via Google Sheets sync only
   deleteStudent(id: string): Promise<void>
   getClassSize(classId: string): Promise<number>
   getLongAbsentStudents(days?: number): Promise<Student[]>
 
-  // Analytics
+  // ── Departures (unified — replaces absence_requests) ──────────────────────
+  /** Single entry point for all departure submissions. */
+  submitDeparture(payload: SubmitDeparturePayload): Promise<SubmitDepartureResult>
+
+  /** Approve a PENDING departure. Returns updated status (APPROVED or ACTIVE). */
+  approveDeparture(id: string, actorId: string, actorRole?: 'ADMIN' | 'SUPERVISOR', note?: string): Promise<{ status: DepartureStatus } | { error: string }>
+
+  /** Reject a PENDING departure. */
+  rejectDeparture(id: string, actorId: string, actorRole?: 'ADMIN' | 'SUPERVISOR', note?: string): Promise<{ status: 'REJECTED' } | { error: string }>
+
+  /** Cancel any non-terminal departure. Returns student ON_CAMPUS if was ACTIVE. */
+  cancelDeparture(id: string, actorId: string, actorRole?: 'STUDENT' | 'ADMIN' | 'SUPERVISOR', note?: string): Promise<{ status: 'CANCELLED' } | { error: string }>
+
+  /** Student returns early — completes ACTIVE departure and creates CHECK_IN event. */
+  returnDeparture(id: string, studentId?: string, gpsLat?: number, gpsLng?: number): Promise<{ status: 'COMPLETED' } | { error: string }>
+
+  /** Query the v_calendar_departures view. */
+  listDepartures(options?: ListDeparturesOptions): Promise<CalendarDeparture[]>
+
+  /** Manually trigger the tick (for testing / manual dashboard refresh). */
+  tickDepartures(): Promise<number>
+
+  // ── Events (append-only audit log) ────────────────────────────────────────
+  getEvents(studentId: string): Promise<Event[]>
+  /** Only used for OVERRIDE / SMS events. Check-outs go through submitDeparture. */
+  createEvent(payload: CreateEventPayload): Promise<Event>
+  deleteEvent(id: string): Promise<void>
+  getRecentEvents(limit?: number): Promise<Event[]>
+
+  // ── SMS ────────────────────────────────────────────────────────────────────
+  getSmsEvents(): Promise<SmsEvent[]>
+  createSmsEvent(raw: string, studentPhone?: string): Promise<SmsEvent>
+
+  // ── Audit log ──────────────────────────────────────────────────────────────
+  getAdminOverrides(): Promise<AdminOverride[]>
+  /** Direct admin status override (bypasses quota, creates ADMIN_OVERRIDE departure). */
+  createAdminOverride(studentId: string, newStatus: StudentStatus, note?: string): Promise<AdminOverride>
+
+  // ── Recurring absences (read-only for now) ────────────────────────────────
+  getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]>
+
+  // ── Analytics ─────────────────────────────────────────────────────────────
   getDashboardStats(): Promise<DashboardStats>
   getDailyPresence(days?: number): Promise<DailyPresenceData[]>
   getReasonBreakdown(): Promise<ReasonData[]>
   getHourlyDepartures(): Promise<HourlyData[]>
   getClassStats(): Promise<ClassStat[]>
-  getClassOutsideCount(classId: string): Promise<number>
-  cancelAbsenceRequest(id: string): Promise<void>
-  checkAbsenceQuota(
-    classId: string,
-    date: string,
-    endDate: string | null,
-    startTime: string,
-    endTime: string,
-    excludeStudentId?: string
-  ): Promise<AbsenceQuotaResult>
-  markOverdueStudents(): Promise<number>
-  autoReturnStudents(): Promise<number>
-  autoCheckoutStudents(): Promise<number>
-  createCheckoutWithQuotaCheck(
-    studentId: string,
-    classId: string,
-    grade: string,
-    reason: string | null,
-    expectedReturn: string | null
-  ): Promise<QuotaCheckResult>
 }

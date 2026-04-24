@@ -1,148 +1,189 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { format } from 'date-fns'
 import { he } from 'date-fns/locale'
-import { Check, X, Clock, User, AlertOctagon, Trash2 } from 'lucide-react'
+import { Check, X, Clock, User, AlertOctagon, Trash2, Users } from 'lucide-react'
 import { Card, CardContent, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { api } from '@/lib/api'
-import { supabase } from '@/lib/supabase'
+import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
-import type { AbsenceRequest, Student } from '@/types'
+import type { CalendarDeparture } from '@/types'
 
-interface RequestWithStudent extends AbsenceRequest {
-  student: Student | undefined
+function getTimeStr(isoStr: string): string {
+  const d = new Date(isoStr)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 export function PendingRequestsPage() {
-  const [requests, setRequests] = useState<RequestWithStudent[]>([])
+  const [pending, setPending] = useState<CalendarDeparture[]>([])
+  const [activeByClass, setActiveByClass] = useState<Record<string, CalendarDeparture[]>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [adminNote, setAdminNote] = useState<Record<string, string>>({})
+  const [acting, setActing] = useState<Record<string, boolean>>({})
 
-  const loadRequests = async () => {
+  const loadRequests = useCallback(async () => {
     setIsLoading(true)
     try {
-      const pending = await api.getAbsenceRequests({ status: 'PENDING' })
-      const students = await api.getStudents()
-      const studentMap = new Map(students.map((s) => [s.id, s]))
-      setRequests(pending.map((r) => ({ ...r, student: studentMap.get(r.studentId) })))
+      const [pendingDeps, activeDeps] = await Promise.all([
+        api.listDepartures({ status: 'PENDING' }),
+        api.listDepartures({ status: 'ACTIVE' }),
+      ])
+      setPending(pendingDeps)
+
+      // Build class → active departures map for quota-full context
+      const byClass: Record<string, CalendarDeparture[]> = {}
+      for (const d of activeDeps) {
+        if (!byClass[d.class_id]) byClass[d.class_id] = []
+        byClass[d.class_id].push(d)
+      }
+      setActiveByClass(byClass)
     } catch {
-      console.error('Failed to load absence requests')
+      console.error('Failed to load pending departures')
     } finally {
       setIsLoading(false)
     }
-  }
-
-  useEffect(() => {
-    loadRequests()
   }, [])
 
-  // Realtime subscription
-  useEffect(() => {
-    const channel = supabase
-      .channel('pending-requests-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => {
-        loadRequests()
-      })
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [])
+  useEffect(() => { loadRequests() }, [])
 
-  const handleApprove = async (req: RequestWithStudent) => {
+  useDeparturesRealtime({ onAnyChange: loadRequests })
+
+  const act = async (depId: string, action: () => Promise<unknown>, successMsg: string, failMsg: string) => {
+    setActing((prev) => ({ ...prev, [depId]: true }))
     try {
-      await api.updateAbsenceRequestStatus(req.id, 'APPROVED', adminNote[req.id])
-      toast({ title: 'הבקשה אושרה' })
-      setRequests((prev) => prev.filter((r) => r.id !== req.id))
+      const result = await action()
+      if (result && typeof result === 'object' && 'error' in result) {
+        toast({ title: failMsg, description: (result as { error: string }).error, variant: 'destructive' })
+      } else {
+        toast({ title: successMsg })
+        // Realtime subscription will remove the card
+      }
     } catch {
-      toast({ title: 'שגיאה באישור הבקשה', variant: 'destructive' })
+      toast({ title: failMsg, variant: 'destructive' })
+    } finally {
+      setActing((prev) => ({ ...prev, [depId]: false }))
     }
   }
 
-  const handleReject = async (req: RequestWithStudent) => {
-    try {
-      await api.updateAbsenceRequestStatus(req.id, 'REJECTED', adminNote[req.id])
-      toast({ title: 'הבקשה נדחתה' })
-      setRequests((prev) => prev.filter((r) => r.id !== req.id))
-    } catch {
-      toast({ title: 'שגיאה בדחיית הבקשה', variant: 'destructive' })
-    }
-  }
+  const handleApprove = (dep: CalendarDeparture) =>
+    act(dep.id, () => api.approveDeparture(dep.id, 'admin', 'ADMIN', adminNote[dep.id]), 'הבקשה אושרה', 'שגיאה באישור')
 
-  const handleCancel = async (req: RequestWithStudent) => {
-    try {
-      await api.updateAbsenceRequestStatus(req.id, 'CANCELLED', 'בוטל ע"י מנהל')
-      toast({ title: 'הבקשה בוטלה' })
-      setRequests((prev) => prev.filter((r) => r.id !== req.id))
-    } catch {
-      toast({ title: 'שגיאה בביטול הבקשה', variant: 'destructive' })
-    }
-  }
+  const handleReject = (dep: CalendarDeparture) =>
+    act(dep.id, () => api.rejectDeparture(dep.id, 'admin', 'ADMIN', adminNote[dep.id]), 'הבקשה נדחתה', 'שגיאה בדחייה')
 
-  const urgentRequests = requests.filter((r) => r.isUrgent)
-  const regularRequests = requests.filter((r) => !r.isUrgent)
+  const handleCancel = (dep: CalendarDeparture) =>
+    act(dep.id, () => api.cancelDeparture(dep.id, 'admin', 'ADMIN', 'בוטל ע"י מנהל'), 'הבקשה בוטלה', 'שגיאה בביטול')
 
-  const RequestCard = ({ req }: { req: RequestWithStudent }) => (
-    <Card key={req.id} className={req.isUrgent ? 'border-orange-300 dark:border-orange-700' : ''}>
-      <CardContent className="p-4">
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-2)]">
-              <User className="h-4 w-4 text-[var(--text-muted)]" />
+  const urgentRequests = pending.filter((d) => d.is_urgent)
+  const regularRequests = pending.filter((d) => !d.is_urgent)
+
+  const RequestCard = ({ dep }: { dep: CalendarDeparture }) => {
+    const isActing = acting[dep.id] ?? false
+    const classActive = activeByClass[dep.class_id] ?? []
+
+    return (
+      <Card className={dep.is_urgent ? 'border-orange-300 dark:border-orange-700' : ''}>
+        <CardContent className="p-4">
+          <div className="flex flex-col gap-3">
+            {/* Student info */}
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-2)]">
+                <User className="h-4 w-4 text-[var(--text-muted)]" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-[var(--text)]">{dep.student_name}</p>
+                <p className="text-xs text-[var(--text-muted)]">{dep.grade} · {dep.class_id}</p>
+              </div>
+              {dep.is_urgent && (
+                <span className="flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-xs font-bold text-orange-600 dark:bg-orange-900/30">
+                  <AlertOctagon className="h-3 w-3" />
+                  חריגה
+                </span>
+              )}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-[var(--text)]">{req.student?.fullName ?? 'לא ידוע'}</p>
-              <p className="text-xs text-[var(--text-muted)]">ת.ז. {req.student?.idNumber} · {req.student?.classId}</p>
+
+            {/* Request details */}
+            <div className="rounded-lg bg-[var(--bg-2)] p-3 text-sm">
+              {dep.reason && <p className="font-medium text-[var(--text)]">{dep.reason}</p>}
+              <p className="mt-1 text-[var(--text-muted)]">
+                {format(new Date(dep.start_at), 'EEEE, d בMMMM yyyy', { locale: he })}
+                {(() => {
+                  const startDate = new Date(dep.start_at).toISOString().slice(0, 10)
+                  const endDate = new Date(dep.end_at).toISOString().slice(0, 10)
+                  if (endDate !== startDate) return ` — ${format(new Date(dep.end_at), 'd בMMMM', { locale: he })}`
+                  return null
+                })()}
+              </p>
+              <div className="mt-1 flex items-center gap-1 text-[var(--text-muted)]">
+                <Clock className="h-3.5 w-3.5" />
+                {getTimeStr(dep.start_at)} — {getTimeStr(dep.end_at)}
+              </div>
             </div>
-          </div>
 
-          <div className="rounded-lg bg-[var(--bg-2)] p-3 text-sm">
-            <p className="font-medium text-[var(--text)]">{req.reason}</p>
-            <p className="mt-1 text-[var(--text-muted)]">
-              {format(new Date(req.date), 'EEEE, d בMMMM yyyy', { locale: he })}
-              {req.endDate && req.endDate !== req.date && ` — ${format(new Date(req.endDate), 'd בMMMM', { locale: he })}`}
-            </p>
-            <div className="mt-1 flex items-center gap-1 text-[var(--text-muted)]">
-              <Clock className="h-3.5 w-3.5" />
-              {req.startTime} — {req.endTime}
+            {/* Quota context for non-urgent PENDING: show who's currently out from same class */}
+            {!dep.is_urgent && classActive.length > 0 && (
+              <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950/20">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Users className="h-3.5 w-3.5 text-orange-600" />
+                  <span className="text-xs font-semibold text-orange-700 dark:text-orange-400">
+                    כרגע מחוץ לישיבה מאותה כיתה:
+                  </span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  {classActive.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between text-xs text-orange-700 dark:text-orange-400">
+                      <span>{d.student_name}</span>
+                      <span className="text-orange-500">חזרה {getTimeStr(d.end_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Admin note */}
+            <Input
+              placeholder="הערה לתלמיד (אופציונלי)"
+              value={adminNote[dep.id] ?? ''}
+              onChange={(e) => setAdminNote((prev) => ({ ...prev, [dep.id]: e.target.value }))}
+              className="text-sm"
+              disabled={isActing}
+            />
+
+            {/* Actions */}
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                className="flex-1 border-[var(--red)] text-[var(--red)] hover:bg-red-50"
+                onClick={() => handleReject(dep)}
+                disabled={isActing}
+              >
+                <X className="h-4 w-4" />
+                דחייה
+              </Button>
+              <Button
+                className="flex-1 bg-[var(--green)] hover:bg-green-600"
+                onClick={() => handleApprove(dep)}
+                disabled={isActing}
+              >
+                <Check className="h-4 w-4" />
+                {isActing ? 'מעבד...' : 'אישור'}
+              </Button>
             </div>
-          </div>
 
-          <Input
-            placeholder="הערה לתלמיד (אופציונלי)"
-            value={adminNote[req.id] ?? ''}
-            onChange={(e) => setAdminNote((prev) => ({ ...prev, [req.id]: e.target.value }))}
-            className="text-sm"
-          />
-
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              className="flex-1 border-[var(--red)] text-[var(--red)] hover:bg-red-50"
-              onClick={() => handleReject(req)}
+            <button
+              onClick={() => handleCancel(dep)}
+              disabled={isActing}
+              className="flex items-center gap-1 self-end rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-red-50 hover:text-[var(--red)] transition-colors dark:hover:bg-red-950/20 disabled:opacity-50"
             >
-              <X className="h-4 w-4" />
-              דחייה
-            </Button>
-            <Button
-              className="flex-1 bg-[var(--green)] hover:bg-green-600"
-              onClick={() => handleApprove(req)}
-            >
-              <Check className="h-4 w-4" />
-              אישור
-            </Button>
+              <Trash2 className="h-3 w-3" />
+              ביטול בקשה
+            </button>
           </div>
-
-          <button
-            onClick={() => handleCancel(req)}
-            className="flex items-center gap-1 self-end rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-red-50 hover:text-[var(--red)] transition-colors dark:hover:bg-red-950/20"
-          >
-            <Trash2 className="h-3 w-3" />
-            ביטול בקשה
-          </button>
-        </div>
-      </CardContent>
-    </Card>
-  )
+        </CardContent>
+      </Card>
+    )
+  }
 
   if (isLoading) {
     return (
@@ -156,32 +197,34 @@ export function PendingRequestsPage() {
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       <div>
         <h2 className="text-2xl font-bold text-[var(--text)]">בקשות ממתינות</h2>
-        <p className="text-sm text-[var(--text-muted)]">{requests.length} בקשות ממתינות לאישור</p>
+        <p className="text-sm text-[var(--text-muted)]">{pending.length} בקשות ממתינות לאישור</p>
       </div>
 
-      {requests.length === 0 ? (
+      {pending.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-16 text-[var(--text-muted)]">
           <Check className="h-10 w-10 opacity-40" />
           <p>אין בקשות ממתינות</p>
         </div>
       ) : (
         <>
-          {/* Urgent requests section */}
           {urgentRequests.length > 0 && (
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
                 <AlertOctagon className="h-5 w-5 text-[var(--orange)]" />
-                <CardTitle className="text-base text-[var(--orange)]">בקשות חריגות ({urgentRequests.length})</CardTitle>
+                <CardTitle className="text-base text-[var(--orange)]">
+                  בקשות חריגות ({urgentRequests.length})
+                </CardTitle>
               </div>
-              {urgentRequests.map((req) => <RequestCard key={req.id} req={req} />)}
+              {urgentRequests.map((dep) => <RequestCard key={dep.id} dep={dep} />)}
             </div>
           )}
 
-          {/* Regular requests section */}
           {regularRequests.length > 0 && (
             <div className="flex flex-col gap-3">
-              <CardTitle className="text-base text-[var(--text)]">בקשות רגילות ({regularRequests.length})</CardTitle>
-              {regularRequests.map((req) => <RequestCard key={req.id} req={req} />)}
+              <CardTitle className="text-base text-[var(--text)]">
+                בקשות רגילות ({regularRequests.length})
+              </CardTitle>
+              {regularRequests.map((dep) => <RequestCard key={dep.id} dep={dep} />)}
             </div>
           )}
         </>

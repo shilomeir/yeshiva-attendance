@@ -11,8 +11,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
+import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
-import type { DashboardStats, Student, AbsenceRequest, ClassStat } from '@/types'
+import type { DashboardStats, Student, CalendarDeparture, ClassStat } from '@/types'
+
+function getTimeStr(isoStr: string): string {
+  const d = new Date(isoStr)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function minsFromNow(isoStr: string): number {
+  return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
+}
 
 // ── location helpers ────────────────────────────────────────────────────────
 function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -62,25 +72,14 @@ const STAT_CARDS = [
   },
 ]
 
-type UrgentWithStudent = AbsenceRequest & { studentName: string; studentClass: string }
-type DepartureEntry = AbsenceRequest & { studentName: string; studentClass: string }
-
-function getTodayStr() { return new Date().toISOString().slice(0, 10) }
-function parseTimeToday(t: string): Date {
-  const [h, m] = t.split(':').map(Number)
-  const d = new Date(); d.setHours(h, m, 0, 0); return d
-}
-function minsRemaining(endTime: string) {
-  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
-}
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
-  const [urgentRequests, setUrgentRequests] = useState<UrgentWithStudent[]>([])
+  const [urgentRequests, setUrgentRequests] = useState<CalendarDeparture[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [locationBreakdown, setLocationBreakdown] = useState({ inYeshiva: 0, inArea: 0, far: 0 })
-  const [todayDepartures, setTodayDepartures] = useState<DepartureEntry[]>([])
+  const [todayDepartures, setTodayDepartures] = useState<CalendarDeparture[]>([])
   const [, setTick] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [displayPct, setDisplayPct] = useState(0)
@@ -96,63 +95,35 @@ export function DashboardPage() {
 
   const loadData = async (isBackground = false) => {
     if (!isBackground) setIsLoading(true)
-    // Run auto-checkout + auto-return BEFORE fetching data so the DB reflects
-    // the current status based on approved absence requests.
-    await Promise.all([
-      api.autoCheckoutStudents().catch(() => {}),
-      api.autoReturnStudents().catch(() => {}),
-    ])
+    api.tickDepartures().catch(() => {})
     try {
-      // Fetch everything in parallel — including approved requests that were previously serial
-      const [data, absent, urgent, clsStats, allStudents, approvedRequests] = await Promise.all([
+      const [data, absent, clsStats, allStudents, pendingDeps, activeDeps] = await Promise.all([
         api.getDashboardStats(),
         api.getLongAbsentStudents(7),
-        api.getUrgentRequests(),
         api.getClassStats(),
         api.getStudents(),
-        api.getAbsenceRequests({ status: 'APPROVED' }),
+        api.listDepartures({ status: 'PENDING' }),
+        api.listDepartures({ status: ['ACTIVE', 'APPROVED'] }),
       ])
       setStats(data)
       setLongAbsentStudents(absent)
       setClassStats(clsStats)
 
-      // Compute location-based breakdown for pie chart
       const breakdown = { inYeshiva: 0, inArea: 0, far: 0 }
       for (const s of allStudents as Student[]) {
         breakdown[getLocationCategory(s)]++
       }
       setLocationBreakdown(breakdown)
 
-      // Filter today's approved departures
-      const today = getTodayStr()
-      const todayReqs = approvedRequests.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
+      setUrgentRequests(pendingDeps.filter((d) => d.is_urgent))
 
-      // Batch-fetch all students needed for enrichment in a single query (no N+1)
-      const neededIds = [...new Set([
-        ...urgent.map((r: AbsenceRequest) => r.studentId),
-        ...todayReqs.map((r) => r.studentId),
-      ])]
-      const studentMap = await api.getStudentsByIds(neededIds)
-
-      const enriched = urgent.map((req: AbsenceRequest) => ({
-        ...req,
-        studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
-        studentClass: studentMap[req.studentId]?.classId ?? '',
-      }))
-      setUrgentRequests(enriched)
-
-      const departures = todayReqs
-        .filter((req) => {
-          const s = studentMap[req.studentId]
-          return s?.currentStatus === 'OFF_CAMPUS' || s?.currentStatus === 'OVERDUE'
-        })
-        .map((req) => ({
-          ...req,
-          studentName: studentMap[req.studentId]?.fullName ?? 'לא ידוע',
-          studentClass: studentMap[req.studentId]?.classId ?? '',
-        }))
-      departures.sort((a, b) => a.startTime.localeCompare(b.startTime))
-      setTodayDepartures(departures)
+      const todayStr = new Date().toISOString().slice(0, 10)
+      const todayDeps = activeDeps.filter((d) => {
+        const depDate = new Date(d.start_at).toISOString().slice(0, 10)
+        return depDate === todayStr && minsFromNow(d.end_at) > -60
+      })
+      todayDeps.sort((a, b) => a.start_at.localeCompare(b.start_at))
+      setTodayDepartures(todayDeps)
     } catch {
       console.error('Failed to load dashboard stats')
     } finally {
@@ -168,31 +139,22 @@ export function DashboardPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData(true))
       .subscribe()
 
-    const requestsChannel = supabase
-      .channel('dashboard-requests-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData(true))
-      .subscribe()
-
-    // Poll auto-checkout + auto-return every 60 seconds
-    const autoReturnInterval = setInterval(() => {
-      api.autoCheckoutStudents().catch(() => {})
-      api.autoReturnStudents().catch(() => {})
-    }, 60000)
-
-    // Tick every minute to keep departure countdowns live
     const tickInterval = setInterval(() => setTick((t) => t + 1), 60000)
 
     return () => {
       supabase.removeChannel(studentsChannel)
-      supabase.removeChannel(requestsChannel)
-      clearInterval(autoReturnInterval)
       clearInterval(tickInterval)
     }
   }, [])
 
-  const handleUrgent = async (id: string, status: 'APPROVED' | 'REJECTED') => {
-    await api.updateAbsenceRequestStatus(id, status)
-    setUrgentRequests((prev) => prev.filter((r) => r.id !== id))
+  useDeparturesRealtime({ onAnyChange: () => loadData(true) })
+
+  const handleUrgent = async (id: string, action: 'APPROVED' | 'REJECTED') => {
+    if (action === 'APPROVED') {
+      await api.approveDeparture(id, 'admin', 'ADMIN')
+    } else {
+      await api.rejectDeparture(id, 'admin', 'ADMIN')
+    }
   }
 
   const handleBroadcast = async (e: React.FormEvent) => {
@@ -343,19 +305,20 @@ export function DashboardPage() {
           <CardContent className="p-0">
             <div className="divide-y divide-[var(--border)]">
               {todayDepartures.map((dep) => {
-                const mins = minsRemaining(dep.endTime)
-                const isActive = minsRemaining(dep.startTime) <= 0 && mins > 0
-                const isPending = minsRemaining(dep.startTime) > 0
+                const minsEnd = minsFromNow(dep.end_at)
+                const minsStart = minsFromNow(dep.start_at)
+                const isActive = minsStart <= 0 && minsEnd > 0
+                const isPending = minsStart > 0
                 return (
                   <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
                     <div className="flex-1 min-w-0">
-                      <span className="font-medium text-sm text-[var(--text)]">{dep.studentName}</span>
+                      <span className="font-medium text-sm text-[var(--text)]">{dep.student_name}</span>
                       <span className="mx-1.5 text-[var(--text-muted)] text-xs">·</span>
-                      <span className="text-xs text-[var(--text-muted)]">{dep.studentClass}</span>
+                      <span className="text-xs text-[var(--text-muted)]">{dep.class_id}</span>
                     </div>
-                    <span className="text-xs text-[var(--text-muted)] shrink-0">{dep.startTime}–{dep.endTime}</span>
+                    <span className="text-xs text-[var(--text-muted)] shrink-0">{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
                     <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
-                      {isActive ? `נותרו ${mins} דק'` : isPending ? `בעוד ${minsRemaining(dep.startTime)} דק'` : 'הסתיים'}
+                      {isActive ? `נותרו ${minsEnd} דק'` : isPending ? `בעוד ${minsStart} דק'` : 'הסתיים'}
                     </span>
                   </div>
                 )
@@ -503,34 +466,38 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent>
             <ul className="divide-y divide-orange-100 dark:divide-orange-900/30">
-              {urgentRequests.map((req) => (
-                <li key={req.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-[var(--text)]">{req.studentName}</p>
-                    <p className="text-xs text-[var(--text-muted)]">
-                      {req.studentClass} · {req.date}
-                      {req.endDate && req.endDate !== req.date ? ` — ${req.endDate}` : ''}
-                    </p>
-                    <p className="text-xs text-[var(--text-muted)]">{req.reason}</p>
-                  </div>
-                  <div className="flex shrink-0 gap-1.5">
-                    <button
-                      onClick={() => handleUrgent(req.id, 'APPROVED')}
-                      className="flex items-center gap-1 rounded-lg bg-green-100 px-2.5 py-1.5 text-xs font-medium text-[var(--green)] hover:bg-green-200 transition-colors dark:bg-green-900/30"
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      אשר
-                    </button>
-                    <button
-                      onClick={() => handleUrgent(req.id, 'REJECTED')}
-                      className="flex items-center gap-1 rounded-lg bg-red-100 px-2.5 py-1.5 text-xs font-medium text-[var(--red)] hover:bg-red-200 transition-colors dark:bg-red-900/30"
-                    >
-                      <XCircle className="h-3.5 w-3.5" />
-                      דחה
-                    </button>
-                  </div>
-                </li>
-              ))}
+              {urgentRequests.map((req) => {
+                const startDate = new Date(req.start_at).toISOString().slice(0, 10)
+                const endDate = new Date(req.end_at).toISOString().slice(0, 10)
+                return (
+                  <li key={req.id} className="flex items-center justify-between gap-3 py-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-[var(--text)]">{req.student_name}</p>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        {req.class_id} · {startDate}
+                        {endDate !== startDate ? ` — ${endDate}` : ''}
+                      </p>
+                      {req.reason && <p className="text-xs text-[var(--text-muted)]">{req.reason}</p>}
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      <button
+                        onClick={() => handleUrgent(req.id, 'APPROVED')}
+                        className="flex items-center gap-1 rounded-lg bg-green-100 px-2.5 py-1.5 text-xs font-medium text-[var(--green)] hover:bg-green-200 transition-colors dark:bg-green-900/30"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        אשר
+                      </button>
+                      <button
+                        onClick={() => handleUrgent(req.id, 'REJECTED')}
+                        className="flex items-center gap-1 rounded-lg bg-red-100 px-2.5 py-1.5 text-xs font-medium text-[var(--red)] hover:bg-red-200 transition-colors dark:bg-red-900/30"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        דחה
+                      </button>
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           </CardContent>
         </Card>
@@ -651,9 +618,7 @@ export function DashboardPage() {
                       const gHighAbs   = gAbsRate > 20
                       const multiClass = gradeClasses.length > 1
 
-                      const gradeQuota = gradeClasses.reduce((sum) => {
-                        return sum + (gTotal >= 50 ? 6 : 3)
-                      }, 0)
+                      const gradeQuota = gradeClasses.reduce((sum, cs) => sum + calcQuota(cs.total), 0)
                       const gradeQuotaExceeded = gOffCampus >= gradeQuota
 
                       return (
@@ -688,7 +653,7 @@ export function DashboardPage() {
                             const classLabel = cs.classId.includes(' כיתה ')
                               ? `כיתה ${cs.classId.split(' כיתה ')[1]}`
                               : cs.classId
-                            const classQuota = gTotal >= 50 ? 6 : 3
+                            const classQuota = calcQuota(cs.total)
                             const classQuotaExceeded = cs.offCampus >= classQuota
                             return (
                               <tr

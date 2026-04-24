@@ -7,6 +7,7 @@ import type {
   SyncQueueItem,
   RecurringAbsence,
   AbsenceRequest,
+  Departure,
 } from '@/types'
 import { DEFAULT_GRADE, DEFAULT_CLASS } from '@/lib/constants/grades'
 
@@ -18,6 +19,7 @@ export class YeshivaDB extends Dexie {
   syncQueue!: Table<SyncQueueItem, string>
   recurringAbsences!: Table<RecurringAbsence, string>
   absenceRequests!: Table<AbsenceRequest, string>
+  departures!: Table<Departure, string>
 
   constructor() {
     super('YeshivaAttendanceDB')
@@ -62,6 +64,26 @@ export class YeshivaDB extends Dexie {
         if (!s.grade) s.grade = DEFAULT_GRADE
         if (!s.classId) s.classId = DEFAULT_CLASS
       })
+    })
+
+    // v3 — unified departures table + departure_id index on events
+    this.version(3).stores({
+      students:
+        '&id, fullName, idNumber, phone, deviceToken, currentStatus, lastSeen, pendingApproval, createdAt, grade, classId',
+      events:
+        '&id, studentId, type, timestamp, reason, expectedReturn, gpsStatus, syncedAt, departure_id',
+      smsEvents:
+        '&id, studentId, parsedType, timestamp, parsedCorrectly',
+      adminOverrides:
+        '&id, studentId, adminId, action, timestamp',
+      syncQueue:
+        '&id, tableName, operation, clientTimestamp, retryCount',
+      recurringAbsences:
+        '&id, studentId, dayOfWeek, isActive',
+      absenceRequests:
+        '&id, studentId, date, status, createdAt',
+      departures:
+        '&id, student_id, class_id, status, start_at, end_at',
     })
   }
 }

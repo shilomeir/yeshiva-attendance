@@ -26,16 +26,16 @@ export function PresenceChart() {
       // Past 4 days including today
       const past = await api.getDailyPresence(4)
 
-      // Future 4 days from approved requests
-      const approvedRequests = await api.getAbsenceRequests({ status: 'APPROVED' })
+      // Future 4 days from approved/active departures
+      const approvedDeps = await api.listDepartures({ status: ['APPROVED', 'ACTIVE'] })
       const futureDays: ChartItem[] = []
       for (let i = 1; i <= 4; i++) {
         const d = new Date()
         d.setDate(d.getDate() + i)
         const dateStr = d.toISOString().split('T')[0]
-        // Count approved requests covering this date
-        const expectedOut = approvedRequests.filter((r) =>
-          r.date <= dateStr && (!r.endDate || r.endDate >= dateStr)
+        // Count departures covering this date
+        const expectedOut = approvedDeps.filter((dep) =>
+          dep.start_at.slice(0, 10) <= dateStr && dep.end_at.slice(0, 10) >= dateStr
         ).length
         futureDays.push({ date: dateStr, onCampus: 0, offCampus: expectedOut, isFuture: true })
       }

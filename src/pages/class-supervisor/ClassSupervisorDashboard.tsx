@@ -17,11 +17,12 @@ import {
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
-import { GRADE_LEVELS } from '@/lib/constants/grades'
+import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
-import type { Student, DashboardStats, ClassStat, AbsenceRequest } from '@/types'
+import type { Student, DashboardStats, ClassStat, CalendarDeparture } from '@/types'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -50,11 +51,6 @@ const LOCATION_LABELS: Record<LocationCategory, { label: string; color: string; 
   unknown:   { label: 'לא ידוע',   color: 'text-[var(--text-muted)]', dot: '#94A3B8' },
 }
 
-function getQuotaForGrade(gradeName: string): number {
-  const level = GRADE_LEVELS.find((g) => g.name === gradeName)
-  if (!level) return 3
-  return level.capacity >= 50 ? 6 : 3
-}
 
 function toDateInput(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -109,7 +105,13 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     if (!student) return
     setIsSubmitting(true)
     try {
-      await api.createEvent({ studentId: student.id, type: 'CHECK_IN' })
+      // Complete the student's active departure if one exists
+      const activeDeps = await api.listDepartures({ studentId: student.id, status: 'ACTIVE' })
+      if (activeDeps.length > 0) {
+        await api.returnDeparture(activeDeps[0].id, student.id)
+      } else {
+        await api.createAdminOverride(student.id, 'ON_CAMPUS', 'עדכון ידני על ידי אחראי כיתה')
+      }
       toast({ title: `${student.fullName} סומן כנוכח` })
       onSuccess()
       handleClose()
@@ -123,29 +125,36 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     if (!student) return
     setIsSubmitting(true)
     try {
-      let expectedReturn: string | null = null
+      const now = new Date()
+      let endAt: Date
       if (exitType === 'today' && returnTime) {
-        const d = new Date()
         const [h, m] = returnTime.split(':').map(Number)
-        d.setHours(h, m, 0, 0)
-        expectedReturn = d.toISOString()
+        endAt = new Date(); endAt.setHours(h, m, 0, 0)
       } else if (exitType === 'multiday' && returnDate) {
         const [y, mo, d] = returnDate.split('-').map(Number)
-        const dt = new Date(y, mo - 1, d)
-        if (returnTime) { const [h, m] = returnTime.split(':').map(Number); dt.setHours(h, m, 0, 0) }
-        else dt.setHours(23, 59, 0, 0)
-        expectedReturn = dt.toISOString()
+        endAt = new Date(y, mo - 1, d)
+        if (returnTime) { const [h, m] = returnTime.split(':').map(Number); endAt.setHours(h, m, 0, 0) }
+        else endAt.setHours(23, 59, 0, 0)
+      } else {
+        endAt = new Date(now.getTime() + 4 * 3600_000) // default: 4 hours from now
       }
-      await api.createEvent({
+      const result = await api.submitDeparture({
         studentId: student.id,
-        type: 'CHECK_OUT',
+        startAt: now,
+        endAt,
         reason: reason || null,
-        expectedReturn,
-        gpsStatus: 'PENDING',
+        source: 'SUPERVISOR',
+        actorRole: 'SUPERVISOR',
       })
-      toast({ title: `יציאה נרשמה עבור ${student.fullName}` })
-      onSuccess()
-      handleClose()
+      if ('error' in result) {
+        toast({ title: 'שגיאה', description: result.error, variant: 'destructive' })
+      } else if (result.status === 'QUOTA_FULL') {
+        toast({ title: 'המכסה מלאה', description: 'לא ניתן לרשום יציאה — המכסה מלאה', variant: 'destructive' })
+      } else {
+        toast({ title: `יציאה נרשמה עבור ${student.fullName}` })
+        onSuccess()
+        handleClose()
+      }
     } catch {
       toast({ title: 'שגיאה ברישום היציאה', variant: 'destructive' })
     } finally { setIsSubmitting(false) }
@@ -156,17 +165,28 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
     if (!student || !reqStartDate || !reqReason) return
     setIsSubmitting(true)
     try {
-      const req = await api.createAbsenceRequest({
+      const startAt = new Date(`${reqStartDate}T${reqStartTime}:00`)
+      const endAt   = new Date(`${reqEndDate || reqStartDate}T${reqEndTime}:00`)
+      const result  = await api.submitDeparture({
         studentId: student.id,
-        date: reqStartDate,
-        endDate: reqEndDate || undefined,
+        startAt,
+        endAt,
         reason: reqReason,
-        startTime: reqStartTime,
-        endTime: reqEndTime,
         isUrgent: reqIsUrgent,
+        source: 'SUPERVISOR',
+        forcePending: true,
+        actorRole: 'SUPERVISOR',
       })
-      // Supervisor has admin authority for their class — auto-approve immediately
-      await api.updateAbsenceRequestStatus(req.id, 'APPROVED', 'אושר על ידי אחראי כיתה')
+      if ('error' in result) {
+        toast({ title: 'שגיאה', description: result.error, variant: 'destructive' })
+        return
+      }
+      if (result.status === 'QUOTA_FULL') {
+        toast({ title: 'שגיאה בלתי צפויה', variant: 'destructive' })
+        return
+      }
+      // Auto-approve as supervisor
+      await api.approveDeparture(result.id, 'supervisor', 'SUPERVISOR', 'אושר על ידי אחראי כיתה')
       toast({ title: `היעדרות אושרה עבור ${student.fullName}` })
       onSuccess()
       handleClose()
@@ -405,13 +425,12 @@ function getAvatarColor(id: string): string {
 }
 
 // ── Main dashboard ───────────────────────────────────────────────────────────
-function getTodayStr() { return new Date().toISOString().slice(0, 10) }
-function parseTimeToday(t: string): Date {
-  const [h, m] = t.split(':').map(Number)
-  const d = new Date(); d.setHours(h, m, 0, 0); return d
+function getTimeStr(isoStr: string): string {
+  const d = new Date(isoStr)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
-function minsRemaining(endTime: string) {
-  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
+function minsFromNow(isoStr: string): number {
+  return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
 }
 
 export function ClassSupervisorDashboard() {
@@ -421,7 +440,7 @@ export function ClassSupervisorDashboard() {
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [editStudent, setEditStudent] = useState<Student | null>(null)
-  const [todayDepartures, setTodayDepartures] = useState<AbsenceRequest[]>([])
+  const [todayDepartures, setTodayDepartures] = useState<CalendarDeparture[]>([])
   const [, setTick] = useState(0)
   const [manualAuditActive, setManualAuditActive] = useState(false)
   const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
@@ -432,19 +451,25 @@ export function ClassSupervisorDashboard() {
 
   const loadData = async () => {
     if (!classId) return
-    await Promise.all([
-      api.autoCheckoutStudents().catch(() => {}),
-      api.autoReturnStudents().catch(() => {}),
-    ])
+    api.tickDepartures().catch(() => {})
     try {
-      const [gs, sts, cs] = await Promise.all([
+      const [gs, sts, cs, activeDeps] = await Promise.all([
         api.getDashboardStats(),
         api.getStudents({ classId }),
         api.getClassStats(),
+        api.listDepartures({ classId, status: ['ACTIVE', 'APPROVED'] }),
       ])
       setGlobalStats(gs)
       setStudents(sts as Student[])
       setClassStats(cs)
+
+      const todayStr = new Date().toISOString().slice(0, 10)
+      setTodayDepartures(
+        activeDeps.filter((d) => {
+          const depDate = d.start_at.slice(0, 10)
+          return depDate === todayStr && minsFromNow(d.end_at) > -60
+        })
+      )
     } catch {
       console.error('Failed to load supervisor data')
     } finally {
@@ -456,25 +481,14 @@ export function ClassSupervisorDashboard() {
     if (!classId) return
     loadData()
     const ch = supabase
-      .channel('supervisor-realtime')
+      .channel('supervisor-students-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, loadData)
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
+    const tick = setInterval(() => setTick((t) => t + 1), 60000)
+    return () => { supabase.removeChannel(ch); clearInterval(tick) }
   }, [classId])
 
-  // Load today's departures for this class
-  useEffect(() => {
-    if (!classId) return
-    const today = getTodayStr()
-    api.getAbsenceRequests({ status: 'APPROVED' }).then((reqs) => {
-      setTodayDepartures(
-        reqs.filter((r) => r.date === today && minsRemaining(r.endTime) > -60)
-      )
-    })
-    const tick = setInterval(() => setTick((t) => t + 1), 60000)
-    return () => clearInterval(tick)
-  }, [classId])
+  useDeparturesRealtime({ onAnyChange: loadData })
 
   // Subscribe to manual audit broadcasts from admin
   useEffect(() => {
@@ -494,7 +508,7 @@ export function ClassSupervisorDashboard() {
 
   if (!classSupervisor) return null
 
-  const quota = getQuotaForGrade(gradeName)
+  const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
 
   // Class stats
@@ -679,7 +693,7 @@ export function ClassSupervisorDashboard() {
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {gradeLevelClasses.map(cs => {
                   const isSelf = cs.classId === classId
-                  const cQuota = getQuotaForGrade(cs.grade)
+                  const cQuota = calcQuota(cs.total)
                   const spotsUsed = cs.offCampus
                   const spotsLeft = Math.max(0, cQuota - spotsUsed)
                   const isFull = spotsLeft === 0
@@ -803,40 +817,35 @@ export function ClassSupervisorDashboard() {
       </div>
 
       {/* Today's departures */}
-      {todayDepartures.length > 0 && (() => {
-        const classStudentIds = new Set(students.map(s => s.id))
-        const classDeps = todayDepartures.filter(d => classStudentIds.has(d.studentId))
-        if (classDeps.length === 0) return null
-        return (
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Clock className="h-4 w-4 text-[var(--blue)]" />
-                יציאות היום ({classDeps.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="divide-y divide-[var(--border)]">
-                {classDeps.map((dep) => {
-                  const s = students.find(st => st.id === dep.studentId)
-                  const mins = minsRemaining(dep.endTime)
-                  const isActive = minsRemaining(dep.startTime) <= 0 && mins > 0
-                  const isPending = minsRemaining(dep.startTime) > 0
-                  return (
-                    <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
-                      <span className="font-medium text-sm text-[var(--text)] flex-1">{s?.fullName ?? '—'}</span>
-                      <span className="text-xs text-[var(--text-muted)] shrink-0">{dep.startTime}–{dep.endTime}</span>
-                      <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
-                        {isActive ? `נותרו ${mins} דק'` : isPending ? `בעוד ${minsRemaining(dep.startTime)} דק'` : 'הסתיים'}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        )
-      })()}
+      {todayDepartures.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Clock className="h-4 w-4 text-[var(--blue)]" />
+              יציאות היום ({todayDepartures.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="divide-y divide-[var(--border)]">
+              {todayDepartures.map((dep) => {
+                const minsEnd   = minsFromNow(dep.end_at)
+                const minsStart = minsFromNow(dep.start_at)
+                const isActive  = minsStart <= 0 && minsEnd > 0
+                const isPending = minsStart > 0
+                return (
+                  <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <span className="font-medium text-sm text-[var(--text)] flex-1">{dep.student_name}</span>
+                    <span className="text-xs text-[var(--text-muted)] shrink-0">{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
+                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
+                      {isActive ? `נותרו ${minsEnd} דק'` : isPending ? `בעוד ${minsStart} דק'` : 'הסתיים'}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Edit sheet */}
       <EditStudentSheet

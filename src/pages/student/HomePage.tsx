@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { Clock, Undo2 } from 'lucide-react'
 import { StatusButtons } from '@/components/student/StatusButtons'
 import { StatusBadge } from '@/components/shared/StatusBadge'
@@ -7,74 +7,68 @@ import { useAuthStore } from '@/store/authStore'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { supabase } from '@/lib/supabase'
+import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
-import type { Student, AbsenceRequest } from '@/types'
+import type { Student, CalendarDeparture } from '@/types'
 
-function getTodayStr() {
-  return new Date().toISOString().slice(0, 10)
+function getTimeStr(isoStr: string): string {
+  const d = new Date(isoStr)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-function parseTimeToday(timeStr: string): Date {
-  const [h, m] = timeStr.split(':').map(Number)
-  const d = new Date()
-  d.setHours(h, m, 0, 0)
-  return d
-}
-
-function getMinutesRemaining(endTime: string): number {
-  return Math.round((parseTimeToday(endTime).getTime() - Date.now()) / 60000)
+function getMinutesFromNow(isoStr: string): number {
+  return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
 }
 
 export function HomePage() {
   const { currentUser } = useAuthStore()
   const [student, setStudent] = useState<Student | null>(currentUser)
-  const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; eventId: string } | null>(null)
-  const [todayDeparture, setTodayDeparture] = useState<AbsenceRequest | null>(null)
+  const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; departureId: string } | null>(null)
+  const [activeDeparture, setActiveDeparture] = useState<CalendarDeparture | null>(null)
   const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const refreshStudent = async () => {
+  const refreshStudent = useCallback(async () => {
     if (!currentUser) return
     const updated = await api.getStudent(currentUser.id)
     if (updated) setStudent(updated)
-  }
+  }, [currentUser?.id])
+
+  const refreshDeparture = useCallback(async () => {
+    if (!currentUser) return
+    const deps = await api.listDepartures({
+      studentId: currentUser.id,
+      status: ['ACTIVE', 'APPROVED'],
+    })
+    // Find a departure that hasn't been over for more than 60 minutes
+    const relevant = deps.find(
+      (d) => getMinutesFromNow(d.end_at) > -60
+    )
+    setActiveDeparture(relevant ?? null)
+  }, [currentUser?.id])
 
   useEffect(() => {
     refreshStudent()
+    refreshDeparture()
   }, [currentUser?.id])
 
+  // Tick every minute to update countdown
   useEffect(() => {
-    if (!currentUser) return
-    api.getAbsenceRequests({ studentId: currentUser.id, status: 'APPROVED' }).then((reqs) => {
-      const today = getTodayStr()
-      const active = reqs.find(
-        (r) => r.date === today && getMinutesRemaining(r.endTime) > -60
-      )
-      setTodayDeparture(active ?? null)
-    })
-  }, [currentUser?.id])
-
-  useEffect(() => {
-    if (!todayDeparture) return
+    if (!activeDeparture) return
     const id = setInterval(() => setTick((t) => t + 1), 60000)
     return () => clearInterval(id)
-  }, [todayDeparture])
+  }, [activeDeparture])
 
+  // Undo timeout
   useEffect(() => {
     if (!undoCheckout) return
     const remaining = undoCheckout.expiresAt - Date.now()
-    if (remaining <= 0) {
-      setUndoCheckout(null)
-      return
-    }
-    undoTimerRef.current = setTimeout(() => {
-      setUndoCheckout(null)
-    }, remaining)
-    return () => {
-      if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
-    }
+    if (remaining <= 0) { setUndoCheckout(null); return }
+    undoTimerRef.current = setTimeout(() => setUndoCheckout(null), remaining)
+    return () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current) }
   }, [undoCheckout])
 
+  // GPS location broadcast listener
   useEffect(() => {
     if (!currentUser) return
     const channel = supabase.channel('location-requests')
@@ -89,13 +83,21 @@ export function HomePage() {
     return () => { supabase.removeChannel(channel) }
   }, [currentUser?.id])
 
+  // Realtime updates on departures table
+  useDeparturesRealtime({
+    onAnyChange: () => {
+      refreshStudent()
+      refreshDeparture()
+    },
+  })
+
   const handleUndoCheckout = async () => {
     if (!currentUser || !undoCheckout) return
     try {
-      await api.deleteEvent(undoCheckout.eventId)
-      await api.updateStudentStatus(currentUser.id, 'ON_CAMPUS')
+      await api.cancelDeparture(undoCheckout.departureId, currentUser.id, 'STUDENT')
       setStudent((prev) => prev ? { ...prev, currentStatus: 'ON_CAMPUS' } : prev)
       setUndoCheckout(null)
+      setActiveDeparture(null)
       toast({ title: 'היציאה בוטלה', description: 'הסטטוס חזר ל"בישיבה"' })
     } catch {
       toast({ title: 'שגיאה בביטול', variant: 'destructive' })
@@ -109,7 +111,7 @@ export function HomePage() {
 
   return (
     <div className="flex flex-col gap-4 p-4 pt-5 animate-fade-in">
-      {/* ── Undo checkout banner ──────────────────────────────────────── */}
+      {/* ── Undo checkout banner ────────────────────────────────────── */}
       {undoCheckout && Date.now() < undoCheckout.expiresAt && (
         <div className="animate-slide-up flex items-center justify-between gap-3 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3.5 dark:border-orange-900/50 dark:bg-orange-950/20">
           <div className="flex items-center gap-2.5">
@@ -127,10 +129,10 @@ export function HomePage() {
         </div>
       )}
 
-      {/* ── Approved departure banner ────────────────────────────────── */}
-      {todayDeparture && (() => {
-        const minsToStart = getMinutesRemaining(todayDeparture.startTime)
-        const minsToEnd = getMinutesRemaining(todayDeparture.endTime)
+      {/* ── Active/approved departure banner ────────────────────────── */}
+      {activeDeparture && (() => {
+        const minsToStart = getMinutesFromNow(activeDeparture.start_at)
+        const minsToEnd = getMinutesFromNow(activeDeparture.end_at)
         if (minsToEnd <= -60) return null
         const isActive = minsToStart <= 0 && minsToEnd > 0
         return (
@@ -140,7 +142,7 @@ export function HomePage() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-blue-800 dark:text-blue-200">
-                יציאה מאושרת: {todayDeparture.startTime}–{todayDeparture.endTime}
+                יציאה מאושרת: {getTimeStr(activeDeparture.start_at)}–{getTimeStr(activeDeparture.end_at)}
               </p>
               <p className="text-xs text-blue-600 dark:text-blue-400 mt-0.5">
                 {isActive
@@ -152,7 +154,7 @@ export function HomePage() {
         )
       })()}
 
-      {/* ── Current status card ──────────────────────────────────────── */}
+      {/* ── Current status card ─────────────────────────────────────── */}
       <div
         className="animate-slide-up delay-200 flex items-center justify-between rounded-2xl px-5 py-4"
         style={{
@@ -172,7 +174,7 @@ export function HomePage() {
         <StatusBadge status={student.currentStatus} />
       </div>
 
-      {/* ── Status buttons ───────────────────────────────────────────── */}
+      {/* ── Status buttons ──────────────────────────────────────────── */}
       <div className="animate-slide-up delay-300 flex-1">
         <StatusButtons
           currentStatus={student.currentStatus}
@@ -181,10 +183,11 @@ export function HomePage() {
             await refreshStudent()
             if (newStatus === 'ON_CAMPUS') {
               setUndoCheckout(null)
+              setActiveDeparture(null)
             }
           }}
-          onCheckoutSuccess={(eventId) => {
-            setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000, eventId })
+          onCheckoutSuccess={(departureId) => {
+            setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000, departureId })
           }}
         />
       </div>

@@ -42,42 +42,43 @@
 - In all UI — OVERDUE is displayed and handled **identically to OFF_CAMPUS**.
 - Never show the word "איחור" (late/overdue) to any user.
 
-### Iron Rule #3 — Cancelling a departure hard-deletes the event
-- When a student (or admin) cancels a departure — the event is **deleted from DB** (`deleteEvent`).
-- No counter CHECK_IN is created. Status is reset to ON_CAMPUS directly via `updateStudentStatus`.
-- This applies **regardless of time elapsed** — no difference between cancelling after 2 minutes or 2 hours.
+### Iron Rule #3 — One table, one RPC, one ticker
+- All departures (student self-submit, admin override, supervisor, SMS) go through the **`submit_departure` RPC** — no other code inserts into `departures`.
+- Cancellation calls the **`cancel_departure` RPC** which sets `status='CANCELLED'` (no hard-delete; row retained for 30-day audit window).
+- The **`tick_departures()` cron (every 60 s)** is the only code that advances departure state based on time. No client-side timers, no `auto_return_students`.
+- The `absence_requests` table no longer exists. The `departures` table is the single source of truth.
 
 ---
 
 ## 3. Grade & Class Structure
 
-| Grade | Hebrew Name | Classes | Capacity per class |
-|-------|-------------|---------|-------------------|
-| 1st year | שיעור א' | 6 (כיתה 1–6) | 25 |
-| 2nd year | שיעור ב' | 4 (כיתה 1–4) | 25 |
-| 3rd year | שיעור ג' | 3 (כיתה 1–3) | 25 |
-| 4th year | שיעור ד' | 1 (classId = grade name) | 25 |
-| Advanced | אברכים | 1 (classId = grade name) | 50 |
-| Graduates | בוגרצים | 1 (classId = grade name) | 50 |
+> ⚠️ **These are the EXACT strings stored in the DB.** No apostrophes, no mapping — GAS sends them as-is.
 
-**Total: 16 classes, ~400 students.**
+| DB `grade` value | Classes (`classId`) | Students |
+|-----------------|---------------------|---------|
+| `שיעור א` | `כיתה הרב אבישי` (26), `כיתה הרב בועז` (24), `כיתה הרב הלל` (16), `כיתה הרב יעקב` (25), `כיתה הרב משה` (20), `כיתה הרב תמיר` (28) | 139 |
+| `שיעור ב` | `כיתה הרב אהרלה` (23), `כיתה הרב דוד לנדאו` (9), `כיתה הרב דודו` (27), `כיתה הרב מוטי` (24) | 83 |
+| `שיעור ג` | `כיתה הרב בועז רויטל` (27), `כיתה הרב חגי` (10), `כיתה הרב רפי` (17) | 54 |
+| `שיעור ד-ה` | `כיתה שיעור ד` (17), `כיתה שיעור ה` (3) | 20 |
+| `אברכים ובוגרצ` | `כיתה אברכים ובוגרצ` (85) | 85 |
 
-- Single-class grades: `classId === gradeName` (e.g. `classId = "אברכים"`).
-- Multi-class grades: `classId = "${gradeName} כיתה ${n}"` (e.g. `"שיעור א' כיתה 3"`).
+**Total: 5 grade values, 16 classes, 381 students.**
 
-### Sheet tab names vs DB grade names
-| Sheet tab (`SHEET_GRADE_NAMES`) | DB value (`GRADE_LEVELS`) |
-|---------------------------------|--------------------------|
-| שיעור א' | שיעור א' |
-| שיעור ב' | שיעור ב' |
-| שיעור ג' | שיעור ג' |
-| שיעור ד'-ה' | שיעור ד' |
-| אברכים ובוגרצ' | אברכים / בוגרצים |
+- The `grade` and `classId` strings in the DB are **identical to the tab/header names in Google Sheets**.
+- The `sync-from-sheets` Edge Function does **no name mapping** — grade keys from the GAS payload flow directly into `grade`, and `classId` is taken from the sheet row data.
+- `classId` always has the `כיתה ` prefix, including single-class grades (e.g. `classId = "כיתה אברכים ובוגרצ"`).
 
-The mapping between sheet names and DB names is handled inside the `sync-from-sheets` Edge Function.
+### Sheet tab names (GAS) → DB `grade` values
+| GAS payload key | DB `grade` stored |
+|----------------|------------------|
+| `שיעור א` | `שיעור א` |
+| `שיעור ב` | `שיעור ב` |
+| `שיעור ג` | `שיעור ג` |
+| `שיעור ד-ה` | `שיעור ד-ה` |
+| `אברכים ובוגרצ` | `אברכים ובוגרצ` |
 
 ### Hebrew string comparison
-Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`) to handle different apostrophe variants (`'` / `'` / `׳`). This was the root cause of the student filter bug.
+Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`) to handle different apostrophe variants (`'` / `'` / `׳`) that may appear in UI dropdowns vs. stored strings. Always compare normalised forms.
 
 ---
 
@@ -88,11 +89,22 @@ Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`
 | Status | Meaning | UI color |
 |--------|---------|---------|
 | `ON_CAMPUS` | Student is at yeshiva | Green |
-| `OFF_CAMPUS` | Student has left | Orange |
+| `OFF_CAMPUS` | Student has left (driven by departure `ACTIVE` state) | Orange |
 | `OVERDUE` | **Deprecated** — displayed as OFF_CAMPUS everywhere | Orange |
 | `PENDING` | Awaiting admin approval (new registration only) | Gray |
 
-### Event types (`events.type`)
+### Departure statuses (`departures.status`)
+
+| Status | Meaning |
+|--------|---------|
+| `PENDING` | Awaiting admin approval (urgent or quota-full requests) |
+| `APPROVED` | Approved; start_at not yet reached |
+| `ACTIVE` | Student is currently outside (`students.currentStatus = OFF_CAMPUS`) |
+| `COMPLETED` | Student returned |
+| `REJECTED` | Admin denied |
+| `CANCELLED` | Cancelled by student or admin |
+
+### Event types (`events.type`) — immutable audit log
 
 | Type | Action | Status change |
 |------|--------|--------------|
@@ -101,6 +113,8 @@ Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`
 | `OVERRIDE` | Admin manual change | any |
 | `SMS_IN` | Return via SMS | → ON_CAMPUS |
 | `SMS_OUT` | Departure via SMS | → OFF_CAMPUS |
+
+Events are linked to a departure via `departure_id` FK.
 
 ---
 
@@ -115,37 +129,41 @@ Grade/class name comparisons MUST use `normalizeHebrew()` (in `studentsStore.ts`
 | 30–37 | 4 |
 | 38–45 | 5 |
 | 46–54 | 6 |
-| 50 (אברכים/בוגרצים) | 6 |
+| 85 (אברכים ובוגרצ) | 10 |
 
 **Rules:**
 - Quota is calculated from the **actual enrolled student count**, not static capacity.
-- The formula is identical server-side (RPC `create_checkout_with_quota_check`) and client-side (`calcQuota()` in OffCampusSheet.tsx).
-- A student with an **approved urgent absence request** is **exempt from quota** for the entire request period (`date` → `endDate`).
-- Admin OVERRIDE bypasses quota entirely — no check performed.
-- The RPC uses an advisory lock (`pg_try_advisory_xact_lock`) to prevent race conditions.
+- Single source of truth: `calcQuota(classSize)` in `src/lib/quota.ts`. Both the client UI and the `submit_departure` RPC use this exact formula.
+- `is_urgent = true` → departure goes to `PENDING` state (bypasses quota; admin reviews).
+- `source = 'ADMIN_OVERRIDE'` → `APPROVED` immediately, quota not checked.
+- The `submit_departure` RPC holds `pg_advisory_xact_lock(hashtext(class_id))` for the entire transaction — quota check and insert are atomic.
 
 ---
 
-## 6. Absence Requests
+## 6. Departure Lifecycle
 
-### Lifecycle
+### State machine
 ```
-Student submits → PENDING
-    ↓
-Admin reviews:
-  APPROVED → student receives push notification
-  REJECTED → no notification
-  CANCELLED → cancelled by admin
-    ↓
-Student returns → prompt to cancel the request
+submit_departure(RPC)
+    │
+    ├── quota ok, non-urgent, non-override → APPROVED
+    │       └── start_at ≤ now (tick) → ACTIVE → COMPLETED (tick / return)
+    ├── is_urgent = true → PENDING
+    │       └── admin approves → APPROVED → ACTIVE → COMPLETED
+    │       └── admin rejects → REJECTED (terminal)
+    ├── quota full + force_pending = true → PENDING (admin decides)
+    └── quota full + force_pending = false → QUOTA_FULL result (no row inserted)
+
+(any non-terminal) ─── cancel_departure(RPC) ──► CANCELLED
 ```
 
 ### Rules
-- Requests can be **single-day** (`date`) or **multi-day** (`date` to `endDate`).
-- `startTime` / `endTime` are HH:MM strings (hours within a day).
-- `isUrgent = true` → exempt from quota for the full period.
+- `start_at` / `end_at` are **full TIMESTAMPTZ** in `Asia/Jerusalem` — no HH:MM strings.
+- `is_urgent = true` → always PENDING, notifies admin with push (edge function `notify-admin-quota-full`).
 - Approval push message: _"בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉"_
-- Every action (approve / reject / cancel) is **logged in `admin_overrides`** (audit trail).
+- Every lifecycle transition (approve / reject / cancel / override) is logged in `admin_overrides` via DB trigger.
+- `CANCELLED` / `REJECTED` rows are retained for 30 days (purged by `tick_departures()`), not shown in calendar.
+- The view `v_calendar_departures` includes `PENDING / APPROVED / ACTIVE / COMPLETED` — all other states are hidden.
 
 ---
 
@@ -222,17 +240,27 @@ Student returns → prompt to cancel the request
 | `note` | TEXT | Admin note |
 | `syncedAt` | TIMESTAMPTZ | null = not yet synced from offline queue |
 
-### `absence_requests`
-| Column | Notes |
-|--------|-------|
-| `date` | Start date YYYY-MM-DD |
-| `endDate` | End date (optional, multi-day requests) |
-| `startTime` / `endTime` | HH:MM |
-| `status` | PENDING / APPROVED / REJECTED / CANCELLED |
-| `isUrgent` | boolean — quota exempt |
+### `departures`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | PK |
+| `student_id` | UUID | FK → students (CASCADE) |
+| `class_id` | TEXT | Denormalized at submission time |
+| `start_at` | TIMESTAMPTZ | Full timestamp (Asia/Jerusalem) |
+| `end_at` | TIMESTAMPTZ | Must be > start_at and < start_at + 30 days |
+| `status` | TEXT | PENDING / APPROVED / ACTIVE / COMPLETED / REJECTED / CANCELLED |
+| `source` | TEXT | SELF / ADMIN_OVERRIDE / SUPERVISOR / SMS / SHEETS |
+| `is_urgent` | BOOLEAN | True → PENDING regardless of quota |
+| `reason` | TEXT | Optional departure reason |
+| `admin_note` | TEXT | Admin note on approve/reject |
+| `approved_by` | TEXT | Actor ID who approved |
+| `created_at / approved_at / activated_at / completed_at / cancelled_at / rejected_at` | TIMESTAMPTZ | One non-null per lifecycle event |
+| `gps_lat / gps_lng` | FLOAT | Filled on CHECK_IN events only |
+
+**Key constraint:** GiST EXCLUDE prevents a student from having two overlapping live departures.
 
 ### `admin_overrides` — Audit Log
-Every admin action is recorded here: approve/reject requests, manual status override, departure cancellation.
+Every admin/supervisor lifecycle action is recorded here automatically (DB trigger on `departures`).
 
 ### `app_settings` — Key-value config
 - `admin_pin` — admin PIN
@@ -242,21 +270,34 @@ Every admin action is recorded here: approve/reject requests, manual status over
 
 ## 10. RPC Functions (Supabase)
 
-### `create_checkout_with_quota_check(p_student_id, p_class_id, p_grade, p_reason, p_expected_return)`
-- **Does:** Checks quota + creates CHECK_OUT event **atomically**.
-- **Quota:** Dynamic — `GREATEST(1, ROUND((class_size × 3)::numeric / 25))`.
-- **Exempt from quota:** Students with approved urgent request covering today's date range.
-- **Returns:** `{success: true, eventId}` or `{success: false, error, current, quota}`.
-- **Timezone:** Uses `Asia/Jerusalem` for date calculations.
-- **Latest migration:** `20260409_dynamic_quota.sql`
+### `submit_departure(p_student_id, p_start_at, p_end_at, p_reason, p_is_urgent, p_source, p_approved_by, p_force_pending, p_actor_id, p_actor_role)`
+- **The single entry point for all departures.** No other code inserts into `departures`.
+- Holds `pg_advisory_xact_lock(hashtext(class_id))` — quota check + insert are atomic.
+- **Returns:** `{id, status, quota, current}` (success) or `{status:'QUOTA_FULL', current, quota, overlapping:[...]}` (no row inserted) or `{error}`.
+- **Migration:** `supabase/migrations/20260423_unified_departures.sql`
 
-### `auto_return_students()`
-- **Does:** Returns students to ON_CAMPUS when `expectedReturn` has passed.
-- **Returns:** Count of students returned.
-- **Trigger:** Called manually from DashboardPage. No cron job yet.
+### `approve_departure(p_id, p_actor_id, p_actor_role, p_note)`
+- Transitions PENDING → APPROVED; sends push to student.
 
-### `mark_overdue_students()` — **Disabled**
-- Always returns 0. Kept for backward compatibility only.
+### `reject_departure(p_id, p_actor_id, p_actor_role, p_note)`
+- Transitions PENDING → REJECTED; no push to student.
+
+### `cancel_departure(p_id, p_actor_id, p_actor_role, p_note)`
+- Transitions any non-terminal state → CANCELLED.
+
+### `return_departure(p_id)`
+- Student presses "חזרתי" — transitions ACTIVE → COMPLETED; sets `students.currentStatus = ON_CAMPUS`.
+
+### `tick_departures()`
+- pg_cron job, runs every 60 s.
+- Activates APPROVED → ACTIVE when `start_at ≤ now`.
+- Completes ACTIVE → COMPLETED when `end_at ≤ now`.
+- Flags overstay alerts (`ACTIVE AND end_at < now - 24h`).
+- Purges COMPLETED/CANCELLED/REJECTED rows older than 30 days.
+- **Replaces** the old `auto_return_students()` and `auto_checkout_students()` RPCs.
+
+### Deprecated (removed)
+`create_checkout_with_quota_check`, `auto_return_students`, `auto_checkout_students`, `mark_overdue_students`, `checkAbsenceQuota` — all deleted in migration `20260423_unified_departures.sql`.
 
 ---
 
@@ -341,6 +382,8 @@ src/
 │   ├── studentsStore.ts        # Student list + filters + normalizeHebrew()
 │   ├── syncStore.ts            # Offline sync status
 │   └── uiStore.ts              # Theme, sidebar (persisted)
+├── hooks/
+│   └── useDeparturesRealtime.ts  # Shared Realtime subscription on departures table
 ├── lib/
 │   ├── api/
 │   │   ├── supabaseClient.ts   # IApiClient implementation
@@ -348,7 +391,8 @@ src/
 │   │   └── types.ts            # IApiClient interface
 │   ├── constants/grades.ts     # GRADE_LEVELS, getClasses, ALL_CLASS_IDS
 │   ├── db/schema.ts            # Dexie (IndexedDB) schema
-│   ├── sync/syncEngine.ts      # Offline sync engine
+│   ├── quota.ts                # calcQuota(classSize) — single formula for client + mock
+│   ├── sync/syncEngine.ts      # Offline sync engine (supports RPC operations)
 │   ├── location/gps.ts         # GPS utils + Haversine distance
 │   └── sms/parser.ts           # Hebrew SMS message parser
 ├── types/index.ts              # All TypeScript types
@@ -358,11 +402,13 @@ supabase/
 │   ├── 20260405_overdue_transition.sql
 │   ├── 20260406_auto_return.sql
 │   ├── fix_checkout_and_push_token.sql
-│   └── 20260409_dynamic_quota.sql   ← CURRENT quota logic
+│   ├── 20260409_dynamic_quota.sql
+│   └── 20260423_unified_departures.sql  ← CURRENT schema (departures table, RPCs, cron)
 └── functions/
-    ├── sync-from-sheets/       # GAS → Supabase sync
-    ├── send-push/              # Web Push (RFC 8291)
-    └── broadcast-location-request/  # FCM broadcast
+    ├── sync-from-sheets/           # GAS → Supabase sync (transactional)
+    ├── send-push/                  # Web Push (RFC 8291)
+    ├── notify-admin-quota-full/    # Push to admins when PENDING created due to quota-full
+    └── broadcast-location-request/ # FCM broadcast
 GoogleAppsScript.gs             # GAS code for sheet sync
 ```
 
@@ -405,39 +451,41 @@ VAPID_SUBJECT            # mailto:... for VAPID
 - ❌ Add any UI for creating/editing/importing students (Sheets only).
 - ❌ Create new OVERDUE status entries anywhere.
 - ❌ Use or restore `addStudent()` — intentionally removed from IApiClient.
-- ❌ Change quota formula in OffCampusSheet without also updating the RPC (and vice versa).
+- ❌ INSERT into `departures` from any path except `submit_departure` RPC.
+- ❌ Call `autoCheckoutStudents()` or `autoReturnStudents()` — replaced by `tick_departures()` cron.
+- ❌ Change `calcQuota()` in `src/lib/quota.ts` without also updating the `submit_departure` RPC (and vice versa).
 - ❌ Collect GPS during a regular student departure (RollCall only).
 - ❌ Compare grade/class strings without `normalizeHebrew()`.
 
 ### Always do
-- ✅ Log every admin action to `admin_overrides`.
-- ✅ Cancel departure = `deleteEvent(id)` + `updateStudentStatus('ON_CAMPUS')`.
-- ✅ Quota enforcement = always through RPC, never client-side only.
+- ✅ All departures go through `api.submitDeparture()` → `submit_departure` RPC.
+- ✅ Cancel departure = `api.cancelDeparture(id, note)` → `cancel_departure` RPC (sets CANCELLED, retains row).
+- ✅ Quota enforcement is server-side inside `submit_departure`. Client shows quota info but never enforces alone.
 - ✅ Server-side date calculations = `Asia/Jerusalem` timezone.
 - ✅ Both `IApiClient` implementations (`supabaseClient` + `mockClient`) must stay in sync.
+- ✅ All dashboards subscribe via `useDeparturesRealtime` hook — one shared channel, not per-page subscriptions.
 
 ---
 
 ## 19. Known Debt (TODO)
 
 - [ ] Add password authentication for students (currently ID-only).
-- [ ] Supabase Row Level Security (RLS) — currently all students can read all data.
+- [ ] Supabase Row Level Security (RLS) — currently all students can read all data; `source='ADMIN_OVERRIDE'` validation is PIN-based only until RLS arrives.
 - [ ] Automatic notification to supervisors when Admin PIN changes.
 - [ ] Time-restricted quota (currently 24/7).
-- [ ] Offline conflict resolution (currently last-write-wins).
-- [ ] Schedule `auto_return_students` as a cron job (currently manual).
+- [ ] Offline conflict resolution (currently last-write-wins; if server returns `QUOTA_FULL` for an offline-queued departure, a toast informs the student on reconnect).
 - [ ] Automated tests (unit / integration).
-- [ ] Apply `20260409_dynamic_quota.sql` migration in Supabase Dashboard SQL Editor.
+- [ ] Apply `20260423_unified_departures.sql` migration in Supabase Dashboard SQL Editor (main schema migration for unified departures).
 
 ---
 
 ## 20. Quick Reference — FAQ
 
 **Q: Student tries to leave but quota is full. What can they do?**  
-A: Wait for a classmate to return (system shows expected return times) — or submit an urgent absence request (`isUrgent = true`).
+A: The UI shows the `overlapping` list (classmates currently out + their return times). Student can wait, or press "בקש אישור" to send the request as PENDING for admin to decide.
 
 **Q: Student accidentally pressed checkout. Can they undo?**  
-A: Yes — 5-minute window. Cancellation hard-deletes the event from DB (no trace remains in history).
+A: Yes — cancellation calls `cancel_departure` RPC which sets `status='CANCELLED'`. The departure row is retained for audit (30-day window) but hidden from all dashboards.
 
 **Q: Is a class edit via ClassEditModal permanent?**  
 A: No — next Google Sheets sync overwrites it.

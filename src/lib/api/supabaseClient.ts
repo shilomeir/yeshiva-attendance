@@ -3,12 +3,23 @@ import { supabase } from '@/lib/supabase'
 import { db } from '@/lib/db/schema'
 import { notifyQueueChanged } from '@/lib/sync/syncEngine'
 import type {
-  Student, Event, SmsEvent, AdminOverride, AbsenceRequest, RecurringAbsence,
+  Student, Event, SmsEvent, AdminOverride, RecurringAbsence,
   StudentStatus, DashboardStats, DailyPresenceData, ReasonData, HourlyData, ClassStat,
+  CalendarDeparture, DepartureStatus, SubmitDepartureResult,
 } from '@/types'
-import type { IApiClient, GetStudentsOptions, CreateEventPayload, CreateAbsenceRequestPayload, QuotaCheckResult } from './types'
+import type {
+  IApiClient, GetStudentsOptions, SubmitDeparturePayload,
+  ListDeparturesOptions, CreateEventPayload,
+} from './types'
+
+function toIso(d: Date | string): string {
+  return d instanceof Date ? d.toISOString() : d
+}
 
 export class SupabaseApiClient implements IApiClient {
+
+  // ── Students ───────────────────────────────────────────────────────────────
+
   async getStudents(options?: GetStudentsOptions): Promise<Student[]> {
     let query = supabase.from('students').select('*')
     if (options?.filter === 'OFF_CAMPUS') query = query.in('currentStatus', ['OFF_CAMPUS', 'OVERDUE'])
@@ -20,6 +31,7 @@ export class SupabaseApiClient implements IApiClient {
       query = query.or(`fullName.ilike.%${q}%,idNumber.ilike.%${q}%,phone.ilike.%${q}%`)
     }
     if (options?.limit) query = query.limit(options.limit)
+    if (options?.offset) query = query.range(options.offset, options.offset + (options.limit ?? 50) - 1)
     const { data, error } = await query.order('fullName')
     if (error) throw error
     return (data as Student[]) ?? []
@@ -48,7 +60,10 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async updateStudentStatus(id: string, status: StudentStatus): Promise<void> {
-    const { error } = await supabase.from('students').update({ currentStatus: status, lastSeen: new Date().toISOString() }).eq('id', id)
+    const { error } = await supabase
+      .from('students')
+      .update({ currentStatus: status, lastSeen: new Date().toISOString() })
+      .eq('id', id)
     if (error) throw error
   }
 
@@ -57,8 +72,271 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
   }
 
+  async updateStudentLocation(id: string, lat: number, lng: number): Promise<void> {
+    const { error } = await supabase
+      .from('students')
+      .update({ lastLocation: { lat, lng }, lastSeen: new Date().toISOString() })
+      .eq('id', id)
+    if (error) throw error
+  }
+
+  async updateStudentFcmToken(id: string, token: string): Promise<void> {
+    const { error } = await supabase.from('students').update({ fcm_token: token }).eq('id', id)
+    if (error) throw error
+  }
+
+  async updatePushToken(id: string, token: string | null): Promise<void> {
+    const { error } = await supabase.from('students').update({ push_token: token }).eq('id', id)
+    if (error) throw error
+  }
+
+  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
+    const { data, error } = await supabase
+      .from('students')
+      .select('id, push_token')
+      .not('push_token', 'is', null)
+    if (error) throw error
+
+    const students = (data ?? []).filter((s: { id: string; push_token: string }) => s.push_token)
+    let sent = 0, failed = 0
+    let lastError: string | undefined
+
+    await Promise.all(
+      students.map(async (s: { id: string; push_token: string }) => {
+        try {
+          const res = await supabase.functions.invoke('send-push', {
+            body: { subscription: s.push_token, title, body },
+          })
+          const resData = res.data as { sent?: boolean; gone?: boolean; error?: string } | null
+          if (res.error || resData?.sent === false) {
+            failed++
+            lastError = resData?.error ?? res.error?.message
+            if (resData?.gone) {
+              await supabase.from('students').update({ push_token: null }).eq('id', s.id)
+            }
+          } else {
+            sent++
+          }
+        } catch (e) {
+          failed++
+          lastError = e instanceof Error ? e.message : String(e)
+        }
+      })
+    )
+    return { sent, failed, lastError }
+  }
+
+  async deleteStudent(id: string): Promise<void> {
+    const { error } = await supabase.from('students').delete().eq('id', id)
+    if (error) throw error
+  }
+
+  async getClassSize(classId: string): Promise<number> {
+    const { count, error } = await supabase
+      .from('students')
+      .select('id', { count: 'exact', head: true })
+      .eq('classId', classId)
+    if (error) throw error
+    return count ?? 0
+  }
+
+  async getLongAbsentStudents(days = 7): Promise<Student[]> {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+    const { data, error } = await supabase
+      .from('students')
+      .select('*')
+      .neq('currentStatus', 'ON_CAMPUS')
+      .lt('lastSeen', cutoff)
+    if (error) throw error
+    return (data as Student[]) ?? []
+  }
+
+  // ── Departures ─────────────────────────────────────────────────────────────
+
+  async submitDeparture(payload: SubmitDeparturePayload): Promise<SubmitDepartureResult> {
+    const { data, error } = await supabase.rpc('submit_departure', {
+      p_student_id:    payload.studentId,
+      p_start_at:      toIso(payload.startAt),
+      p_end_at:        toIso(payload.endAt),
+      p_reason:        payload.reason ?? null,
+      p_is_urgent:     payload.isUrgent ?? false,
+      p_source:        payload.source ?? 'SELF',
+      p_approved_by:   payload.approvedBy ?? null,
+      p_force_pending: payload.forcePending ?? false,
+      p_actor_id:      payload.actorId ?? null,
+      p_actor_role:    payload.actorRole ?? 'STUDENT',
+    })
+    if (error) throw error
+    const result = data as SubmitDepartureResult
+
+    // If the server says notifyAdmin — fire the edge function asynchronously
+    if ('notifyAdmin' in result && result.notifyAdmin && 'id' in result) {
+      void this._notifyAdminQuotaFull(result as { id: string; quota: number; current: number }, payload)
+    }
+
+    return result
+  }
+
+  private async _notifyAdminQuotaFull(
+    result: { id: string; quota: number; current: number },
+    payload: SubmitDeparturePayload,
+  ): Promise<void> {
+    try {
+      const student = await this.getStudent(payload.studentId)
+      await supabase.functions.invoke('notify-admin-quota-full', {
+        body: {
+          action:       'notify',
+          studentName:  student?.fullName ?? payload.studentId,
+          classId:      student?.classId ?? '',
+          quota:        result.quota,
+          current:      result.current,
+          departureId:  result.id,
+        },
+      })
+    } catch {
+      // Non-fatal — admin will see it via realtime subscription
+    }
+  }
+
+  async approveDeparture(
+    id: string,
+    actorId: string,
+    actorRole: 'ADMIN' | 'SUPERVISOR' = 'ADMIN',
+    note?: string,
+  ): Promise<{ status: DepartureStatus } | { error: string }> {
+    const { data, error } = await supabase.rpc('approve_departure', {
+      p_id:         id,
+      p_actor_id:   actorId,
+      p_actor_role: actorRole,
+      p_note:       note ?? null,
+    })
+    if (error) throw error
+    const res = data as { status?: DepartureStatus; error?: string }
+
+    // Send push to student on approval
+    if (res.status && res.status !== ('error' as DepartureStatus)) {
+      void this._sendApprovalPush(id, note)
+    }
+
+    return res as { status: DepartureStatus } | { error: string }
+  }
+
+  private async _sendApprovalPush(departureId: string, adminNote?: string): Promise<void> {
+    try {
+      const { data: dep } = await supabase
+        .from('departures')
+        .select('student_id')
+        .eq('id', departureId)
+        .single()
+      if (!dep) return
+      const { data: student } = await supabase
+        .from('students')
+        .select('push_token')
+        .eq('id', dep.student_id)
+        .single()
+      if (student?.push_token) {
+        await supabase.functions.invoke('send-push', {
+          body: {
+            subscription: student.push_token,
+            title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
+            body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
+          },
+        })
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  async rejectDeparture(
+    id: string,
+    actorId: string,
+    actorRole: 'ADMIN' | 'SUPERVISOR' = 'ADMIN',
+    note?: string,
+  ): Promise<{ status: 'REJECTED' } | { error: string }> {
+    const { data, error } = await supabase.rpc('reject_departure', {
+      p_id:         id,
+      p_actor_id:   actorId,
+      p_actor_role: actorRole,
+      p_note:       note ?? null,
+    })
+    if (error) throw error
+    return data as { status: 'REJECTED' } | { error: string }
+  }
+
+  async cancelDeparture(
+    id: string,
+    actorId: string,
+    actorRole: 'STUDENT' | 'ADMIN' | 'SUPERVISOR' = 'STUDENT',
+    note?: string,
+  ): Promise<{ status: 'CANCELLED' } | { error: string }> {
+    const { data, error } = await supabase.rpc('cancel_departure', {
+      p_id:         id,
+      p_actor_id:   actorId,
+      p_actor_role: actorRole,
+      p_note:       note ?? null,
+    })
+    if (error) throw error
+    return data as { status: 'CANCELLED' } | { error: string }
+  }
+
+  async returnDeparture(
+    id: string,
+    studentId?: string,
+    gpsLat?: number,
+    gpsLng?: number,
+  ): Promise<{ status: 'COMPLETED' } | { error: string }> {
+    const { data, error } = await supabase.rpc('return_departure', {
+      p_id:         id,
+      p_student_id: studentId ?? null,
+      p_gps_lat:    gpsLat ?? null,
+      p_gps_lng:    gpsLng ?? null,
+    })
+    if (error) throw error
+    return data as { status: 'COMPLETED' } | { error: string }
+  }
+
+  async listDepartures(options?: ListDeparturesOptions): Promise<CalendarDeparture[]> {
+    let query = supabase
+      .from('v_calendar_departures')
+      .select('*')
+      .order('start_at', { ascending: false })
+
+    if (options?.studentId) query = query.eq('student_id', options.studentId)
+    if (options?.classId) query = query.eq('class_id', options.classId)
+    if (options?.grade) query = query.eq('grade', options.grade)
+
+    if (options?.status) {
+      if (Array.isArray(options.status)) {
+        query = query.in('status', options.status)
+      } else {
+        query = query.eq('status', options.status)
+      }
+    }
+
+    if (options?.from) query = query.gte('end_at', toIso(options.from))
+    if (options?.to) query = query.lte('start_at', toIso(options.to))
+    if (options?.limit) query = query.limit(options.limit)
+
+    const { data, error } = await query
+    if (error) throw error
+    return (data as CalendarDeparture[]) ?? []
+  }
+
+  async tickDepartures(): Promise<number> {
+    const { data, error } = await supabase.rpc('tick_departures')
+    if (error) throw error
+    return (data as number) ?? 0
+  }
+
+  // ── Events (audit log) ─────────────────────────────────────────────────────
+
   async getEvents(studentId: string): Promise<Event[]> {
-    const { data, error } = await supabase.from('events').select('*').eq('studentId', studentId).order('timestamp', { ascending: false })
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .eq('studentId', studentId)
+      .order('timestamp', { ascending: false })
     if (error) throw error
     return (data as Event[]) ?? []
   }
@@ -66,10 +344,19 @@ export class SupabaseApiClient implements IApiClient {
   async createEvent(payload: CreateEventPayload): Promise<Event> {
     const now = new Date().toISOString()
     const event: Event = {
-      id: uuidv4(), studentId: payload.studentId, type: payload.type, timestamp: now,
-      reason: payload.reason ?? null, expectedReturn: payload.expectedReturn ?? null,
-      gpsLat: payload.gpsLat ?? null, gpsLng: payload.gpsLng ?? null, gpsStatus: payload.gpsStatus ?? 'PENDING',
-      distanceFromCampus: payload.distanceFromCampus ?? null, note: payload.note ?? null, syncedAt: null,
+      id: uuidv4(),
+      studentId: payload.studentId,
+      type: payload.type,
+      timestamp: now,
+      reason: payload.reason ?? null,
+      expectedReturn: payload.expectedReturn ?? null,
+      gpsLat: payload.gpsLat ?? null,
+      gpsLng: payload.gpsLng ?? null,
+      gpsStatus: payload.gpsStatus ?? 'PENDING',
+      distanceFromCampus: payload.distanceFromCampus ?? null,
+      note: payload.note ?? null,
+      syncedAt: null,
+      departure_id: payload.departureId ?? null,
     }
 
     const newStatus: StudentStatus = payload.type === 'CHECK_IN' ? 'ON_CAMPUS' : 'OFF_CAMPUS'
@@ -78,7 +365,6 @@ export class SupabaseApiClient implements IApiClient {
       : {}
 
     if (!navigator.onLine) {
-      // Offline path — persist locally and queue for sync when back online
       await db.events.put(event)
       await db.students.update(payload.studentId, { currentStatus: newStatus, lastSeen: now, ...locationUpdate })
       await db.syncQueue.add({
@@ -95,82 +381,19 @@ export class SupabaseApiClient implements IApiClient {
       return event
     }
 
-    // Online path — write directly to Supabase
-    const { data, error } = await supabase.from('events').insert({ ...event, syncedAt: now }).select().single()
+    const { data, error } = await supabase
+      .from('events')
+      .insert({ ...event, syncedAt: now })
+      .select()
+      .single()
     if (error) throw error
 
-    const studentUpdate: Record<string, unknown> = { lastSeen: now, currentStatus: newStatus, ...locationUpdate }
-    await supabase.from('students').update(studentUpdate).eq('id', payload.studentId)
+    await supabase
+      .from('students')
+      .update({ lastSeen: now, currentStatus: newStatus, ...locationUpdate })
+      .eq('id', payload.studentId)
 
     return data as Event
-  }
-
-  async updateStudentLocation(id: string, lat: number, lng: number): Promise<void> {
-    const { error } = await supabase
-      .from('students')
-      .update({ lastLocation: { lat, lng }, lastSeen: new Date().toISOString() })
-      .eq('id', id)
-    if (error) throw error
-  }
-
-  async updateStudentFcmToken(id: string, token: string): Promise<void> {
-    const { error } = await supabase
-      .from('students')
-      .update({ fcm_token: token })
-      .eq('id', id)
-    if (error) throw error
-  }
-
-  async updatePushToken(id: string, token: string | null): Promise<void> {
-    const { error } = await supabase
-      .from('students')
-      .update({ push_token: token })
-      .eq('id', id)
-    if (error) throw error
-  }
-
-  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
-    const { data, error } = await supabase
-      .from('students')
-      .select('id, push_token')
-      .not('push_token', 'is', null)
-    if (error) throw error
-
-    const students = (data ?? []).filter((s: { id: string; push_token: string }) => s.push_token)
-    let sent = 0
-    let failed = 0
-    let lastError: string | undefined
-
-    await Promise.all(
-      students.map(async (s: { id: string; push_token: string }) => {
-        try {
-          const res = await supabase.functions.invoke('send-push', {
-            body: { subscription: s.push_token, title, body },
-          })
-          const resData = res.data as { sent?: boolean; gone?: boolean; error?: string } | null
-          if (res.error) {
-            // Edge function itself failed (e.g. VAPID keys missing)
-            failed++
-            lastError = resData?.error ?? res.error?.message ?? JSON.stringify(res.error)
-          } else if (resData?.sent === false) {
-            // Push service rejected the notification
-            failed++
-            lastError = resData?.error
-            if (resData?.gone) {
-              // Subscription expired or unregistered — remove stale token
-              await supabase.from('students').update({ push_token: null }).eq('id', s.id)
-            }
-          } else {
-            sent++
-          }
-        } catch (e) {
-          failed++
-          lastError = e instanceof Error ? e.message : String(e)
-        }
-      })
-    )
-
-    return { sent, failed, lastError }
   }
 
   async deleteEvent(id: string): Promise<void> {
@@ -179,273 +402,192 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async getRecentEvents(limit = 50): Promise<Event[]> {
-    const { data, error } = await supabase.from('events').select('*').order('timestamp', { ascending: false }).limit(limit)
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .order('timestamp', { ascending: false })
+      .limit(limit)
     if (error) throw error
     return (data as Event[]) ?? []
   }
 
-  async getSmsEvents(): Promise<SmsEvent[]> {
-    const { data, error } = await supabase.from('sms_events').select('*').order('timestamp', { ascending: false })
+  // ── SMS ────────────────────────────────────────────────────────────────────
+
+  async getSmsEvents(): Promise<import('@/types').SmsEvent[]> {
+    const { data, error } = await supabase
+      .from('sms_events')
+      .select('*')
+      .order('timestamp', { ascending: false })
     if (error) throw error
-    return (data as SmsEvent[]) ?? []
+    return (data as import('@/types').SmsEvent[]) ?? []
   }
 
-  async createSmsEvent(raw: string, _studentPhone?: string): Promise<SmsEvent> {
-    const smsEvent = { id: uuidv4(), studentId: null, rawMessage: raw, parsedCorrectly: false, parsedType: null, parsedTime: null, parsedReason: null, timestamp: new Date().toISOString(), webhookError: null }
+  async createSmsEvent(raw: string, _studentPhone?: string): Promise<import('@/types').SmsEvent> {
+    const smsEvent = {
+      id: uuidv4(), studentId: null, rawMessage: raw,
+      parsedCorrectly: false, parsedType: null, parsedTime: null,
+      parsedReason: null, timestamp: new Date().toISOString(), webhookError: null,
+    }
     const { data, error } = await supabase.from('sms_events').insert(smsEvent).select().single()
     if (error) throw error
-    return data as SmsEvent
+    return data as import('@/types').SmsEvent
   }
 
+  // ── Audit log ──────────────────────────────────────────────────────────────
+
   async getAdminOverrides(): Promise<AdminOverride[]> {
-    const { data, error } = await supabase.from('admin_overrides').select('*').order('timestamp', { ascending: false })
+    const { data, error } = await supabase
+      .from('admin_overrides')
+      .select('*')
+      .order('timestamp', { ascending: false })
     if (error) throw error
     return (data as AdminOverride[]) ?? []
   }
 
   async createAdminOverride(studentId: string, newStatus: StudentStatus, note?: string): Promise<AdminOverride> {
+    // Admin direct status override → creates an ADMIN_OVERRIDE departure when setting OFF_CAMPUS,
+    // or cancels the active departure when setting ON_CAMPUS.
+    if (newStatus === 'OFF_CAMPUS') {
+      // Create a departure with ADMIN_OVERRIDE source (valid until end of day by default)
+      const startAt = new Date()
+      const endAt = new Date()
+      endAt.setHours(23, 59, 0, 0)
+      if (endAt <= startAt) endAt.setDate(endAt.getDate() + 1)
+
+      await this.submitDeparture({
+        studentId,
+        startAt,
+        endAt,
+        reason: note ?? null,
+        source: 'ADMIN_OVERRIDE',
+        actorId: 'admin',
+        actorRole: 'ADMIN',
+      })
+    } else if (newStatus === 'ON_CAMPUS') {
+      // Cancel any active departure for this student
+      const activeDeps = await this.listDepartures({ studentId, status: 'ACTIVE' })
+      for (const dep of activeDeps) {
+        await this.cancelDeparture(dep.id, 'admin', 'ADMIN', note)
+      }
+    } else {
+      // Direct status update for other statuses (e.g. resetting PENDING)
+      await this.updateStudentStatus(studentId, newStatus)
+    }
+
+    // Write explicit audit record for direct admin override
     const student = await this.getStudent(studentId)
-    const previousStatus: StudentStatus = student?.currentStatus ?? 'ON_CAMPUS'
-    const override = { id: uuidv4(), studentId, adminId: 'admin', action: 'manual_override', previousStatus, newStatus, timestamp: new Date().toISOString(), note: note ?? null }
+    const override = {
+      id: uuidv4(),
+      studentId,
+      adminId: 'admin',
+      action: 'manual_override',
+      previousStatus: student?.currentStatus ?? 'ON_CAMPUS',
+      newStatus,
+      timestamp: new Date().toISOString(),
+      note: note ?? null,
+    }
     const { data, error } = await supabase.from('admin_overrides').insert(override).select().single()
     if (error) throw error
-    await supabase.from('students').update({ currentStatus: newStatus }).eq('id', studentId)
     return data as AdminOverride
   }
 
-  async getAbsenceRequests(options?: { studentId?: string; status?: AbsenceRequest['status'] }): Promise<AbsenceRequest[]> {
-    let query = supabase.from('absence_requests').select('*').order('createdAt', { ascending: false })
-    if (options?.studentId) query = query.eq('studentId', options.studentId)
-    if (options?.status) query = query.eq('status', options.status)
-    const { data, error } = await query
-    if (error) throw error
-    return (data as AbsenceRequest[]) ?? []
-  }
-
-  async createAbsenceRequest(payload: CreateAbsenceRequestPayload): Promise<AbsenceRequest> {
-    const isUrgent = payload.isUrgent ?? false
-    let status: 'PENDING' | 'APPROVED' = 'PENDING'
-
-    if (!isUrgent) {
-      // Auto-approve if quota allows; stay PENDING if full (admin must override)
-      try {
-        const student = await this.getStudent(payload.studentId)
-        if (student) {
-          const quotaData = await this.checkAbsenceQuota(
-            student.classId,
-            payload.date,
-            payload.endDate ?? null,
-            payload.startTime,
-            payload.endTime,
-            payload.studentId,
-          )
-          if (quotaData.hasSpace) status = 'APPROVED'
-        }
-      } catch {
-        // Quota check failed — fall through to PENDING for safety
-      }
-    }
-
-    const request = {
-      id: uuidv4(),
-      studentId: payload.studentId,
-      date: payload.date,
-      endDate: payload.endDate ?? null,
-      reason: payload.reason,
-      startTime: payload.startTime,
-      endTime: payload.endTime,
-      status,
-      adminNote: null,
-      isUrgent,
-      createdAt: new Date().toISOString(),
-    }
-    const { data, error } = await supabase.from('absence_requests').insert(request).select().single()
-    if (error) throw error
-
-    // If auto-approved and departure time has already passed → checkout immediately
-    if (status === 'APPROVED') {
-      const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
-      const todayStr = new Date().toISOString().slice(0, 10)
-      if (payload.date <= todayStr && payload.startTime <= nowStr) {
-        void supabase.rpc('auto_checkout_students')
-      }
-    }
-
-    return data as AbsenceRequest
-  }
-
-  async checkAbsenceQuota(
-    classId: string,
-    date: string,
-    endDate: string | null,
-    startTime: string,
-    endTime: string,
-    excludeStudentId?: string,
-  ): Promise<import('./types').AbsenceQuotaResult> {
-    const { data, error } = await supabase.rpc('check_absence_quota', {
-      p_class_id: classId,
-      p_date: date,
-      p_end_date: endDate ?? date,
-      p_start_time: startTime,
-      p_end_time: endTime,
-      p_exclude_student_id: excludeStudentId ?? null,
-    })
-    if (error) throw error
-    return data as import('./types').AbsenceQuotaResult
-  }
-
-  async autoCheckoutStudents(): Promise<number> {
-    const { data, error } = await supabase.rpc('auto_checkout_students')
-    if (error) throw error
-    return (data as number) ?? 0
-  }
-
-  async updateAbsenceRequestStatus(id: string, status: AbsenceRequest['status'], adminNote?: string): Promise<void> {
-    // Fetch request first to get studentId for audit log
-    const { data: req } = await supabase.from('absence_requests').select('studentId').eq('id', id).single()
-
-    const { error } = await supabase.from('absence_requests').update({ status, adminNote: adminNote ?? null }).eq('id', id)
-    if (error) throw error
-
-    // Send push notification when request is approved
-    if (status === 'APPROVED' && req) {
-      try {
-        const { data: studentData } = await supabase
-          .from('students')
-          .select('push_token')
-          .eq('id', req.studentId)
-          .single()
-        if (studentData?.push_token) {
-          await supabase.functions.invoke('send-push', {
-            body: {
-              subscription: studentData.push_token,
-              title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
-              body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
-            },
-          })
-        }
-      } catch (pushErr) {
-        // Non-fatal — approval already succeeded
-        console.warn('[Push] Failed to send approval notification:', pushErr)
-      }
-    }
-
-    // Create audit record for approve / reject / cancel actions
-    if ((status === 'APPROVED' || status === 'REJECTED' || status === 'CANCELLED') && req) {
-      const student = await this.getStudent(req.studentId)
-      const currentStatus = student?.currentStatus ?? 'ON_CAMPUS'
-      const auditNote = adminNote
-        ? adminNote
-        : status === 'APPROVED' ? 'בקשת היעדרות אושרה'
-        : status === 'REJECTED' ? 'בקשת היעדרות נדחתה'
-        : 'בקשת היעדרות בוטלה ע"י מנהל'
-      const action = status === 'APPROVED' ? 'approve_absence_request'
-        : status === 'REJECTED' ? 'reject_absence_request'
-        : 'cancel_absence_request'
-      await supabase.from('admin_overrides').insert({
-        id: uuidv4(),
-        studentId: req.studentId,
-        adminId: 'admin',
-        action,
-        previousStatus: currentStatus,
-        newStatus: currentStatus,
-        timestamp: new Date().toISOString(),
-        note: auditNote,
-      })
-    }
-  }
-
-  async getUrgentRequests(): Promise<AbsenceRequest[]> {
-    const { data, error } = await supabase.from('absence_requests').select('*').eq('isUrgent', true).eq('status', 'PENDING').order('createdAt', { ascending: false })
-    if (error) throw error
-    return (data as AbsenceRequest[]) ?? []
-  }
+  // ── Recurring absences ────────────────────────────────────────────────────
 
   async getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]> {
-    const { data, error } = await supabase.from('recurring_absences').select('*').eq('studentId', studentId)
+    const { data, error } = await supabase
+      .from('recurring_absences')
+      .select('*')
+      .eq('studentId', studentId)
     if (error) throw error
     return (data as RecurringAbsence[]) ?? []
   }
 
-  // Students are managed exclusively via Google Sheets sync.
-  // addStudent is intentionally removed — do not add it back.
-
-  async deleteStudent(id: string): Promise<void> {
-    const { error } = await supabase.from('students').delete().eq('id', id)
-    if (error) throw error
-  }
-
-  /** Count all students enrolled in a given class (for dynamic quota calculation). */
-  async getClassSize(classId: string): Promise<number> {
-    const { count, error } = await supabase
-      .from('students')
-      .select('id', { count: 'exact', head: true })
-      .eq('classId', classId)
-    if (error) throw error
-    return count ?? 0
-  }
-
-  async getLongAbsentStudents(days = 7): Promise<Student[]> {
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
-    const { data, error } = await supabase.from('students').select('*').neq('currentStatus', 'ON_CAMPUS').lt('lastSeen', cutoff)
-    if (error) throw error
-    return (data as Student[]) ?? []
-  }
+  // ── Analytics ─────────────────────────────────────────────────────────────
 
   async getDashboardStats(): Promise<DashboardStats> {
-    const { data, error } = await supabase.from('students').select('currentStatus, pendingApproval, lastSeen')
+    const { data, error } = await supabase
+      .from('students')
+      .select('currentStatus, pendingApproval, lastSeen')
     if (error) throw error
-    const students = (data ?? []) as any[]
+    const students = (data ?? []) as Array<{ currentStatus: string; pendingApproval: boolean; lastSeen: string | null }>
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
     return {
-      total: students.length,
-      onCampus: students.filter(s => s.currentStatus === 'ON_CAMPUS').length,
-      // OVERDUE treated as off-campus
+      total:     students.length,
+      onCampus:  students.filter(s => s.currentStatus === 'ON_CAMPUS').length,
       offCampus: students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length,
-      pending: students.filter(s => s.pendingApproval).length,
-      longAbsent: students.filter(s => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen && s.lastSeen < sevenDaysAgo).length,
+      pending:   students.filter(s => s.pendingApproval).length,
+      longAbsent: students.filter(s =>
+        s.currentStatus !== 'ON_CAMPUS' && s.lastSeen && s.lastSeen < sevenDaysAgo
+      ).length,
     }
   }
 
   async getDailyPresence(days = 30): Promise<DailyPresenceData[]> {
-    const since = new Date(); since.setDate(since.getDate() - days)
-    const { data, error } = await supabase.from('events').select('studentId, type, timestamp').gte('timestamp', since.toISOString()).order('timestamp', { ascending: true })
+    const since = new Date()
+    since.setDate(since.getDate() - days)
+    const { data, error } = await supabase
+      .from('events')
+      .select('studentId, type, timestamp')
+      .gte('timestamp', since.toISOString())
+      .order('timestamp', { ascending: true })
     if (error) throw error
     const dailyMap = new Map<string, { onCampus: Set<string>; offCampus: Set<string> }>()
-    for (const event of (data ?? []) as any[]) {
+    for (const event of (data ?? []) as Array<{ studentId: string; type: string; timestamp: string }>) {
       const date = event.timestamp.slice(0, 10)
       if (!dailyMap.has(date)) dailyMap.set(date, { onCampus: new Set(), offCampus: new Set() })
       const day = dailyMap.get(date)!
       if (event.type === 'CHECK_IN') day.onCampus.add(event.studentId)
       else if (event.type === 'CHECK_OUT') day.offCampus.add(event.studentId)
     }
-    return Array.from(dailyMap.entries()).map(([date, { onCampus, offCampus }]) => ({ date, onCampus: onCampus.size, offCampus: offCampus.size }))
+    return Array.from(dailyMap.entries()).map(([date, { onCampus, offCampus }]) => ({
+      date, onCampus: onCampus.size, offCampus: offCampus.size,
+    }))
   }
 
   async getReasonBreakdown(): Promise<ReasonData[]> {
-    const since = new Date(); since.setDate(since.getDate() - 30)
-    const { data, error } = await supabase.from('events').select('reason').eq('type', 'CHECK_OUT').gte('timestamp', since.toISOString()).not('reason', 'is', null)
+    const since = new Date()
+    since.setDate(since.getDate() - 30)
+    // Read from departures for richer data (includes all sources)
+    const { data, error } = await supabase
+      .from('departures')
+      .select('reason')
+      .gte('created_at', since.toISOString())
+      .not('reason', 'is', null)
     if (error) throw error
     const map = new Map<string, number>()
-    for (const e of (data ?? []) as any[]) { const r = e.reason || 'אחר'; map.set(r, (map.get(r) ?? 0) + 1) }
-    return Array.from(map.entries()).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count)
+    for (const d of (data ?? []) as Array<{ reason: string }>) {
+      const r = d.reason || 'אחר'
+      map.set(r, (map.get(r) ?? 0) + 1)
+    }
+    return Array.from(map.entries())
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
   }
 
   async getHourlyDepartures(): Promise<HourlyData[]> {
-    const since = new Date(); since.setDate(since.getDate() - 30)
-    const { data, error } = await supabase.from('events').select('timestamp').eq('type', 'CHECK_OUT').gte('timestamp', since.toISOString())
+    const since = new Date()
+    since.setDate(since.getDate() - 30)
+    const { data, error } = await supabase
+      .from('departures')
+      .select('start_at')
+      .gte('created_at', since.toISOString())
     if (error) throw error
     const hourMap = new Map<number, number>()
     for (let h = 0; h < 24; h++) hourMap.set(h, 0)
-    for (const e of (data ?? []) as any[]) { const hour = new Date(e.timestamp).getHours(); hourMap.set(hour, (hourMap.get(hour) ?? 0) + 1) }
+    for (const d of (data ?? []) as Array<{ start_at: string }>) {
+      const hour = new Date(d.start_at).getHours()
+      hourMap.set(hour, (hourMap.get(hour) ?? 0) + 1)
+    }
     return Array.from(hourMap.entries()).map(([hour, count]) => ({ hour, count }))
   }
 
   async getClassStats(): Promise<ClassStat[]> {
-    const { data, error } = await supabase.from('students').select('grade, classId, currentStatus')
+    const { data, error } = await supabase
+      .from('students')
+      .select('grade, classId, currentStatus')
     if (error) throw error
     const map = new Map<string, ClassStat>()
-    for (const s of (data ?? []) as any[]) {
+    for (const s of (data ?? []) as Array<{ grade: string; classId: string; currentStatus: string }>) {
       const key = `${s.grade}|${s.classId}`
       if (!map.has(key)) map.set(key, { grade: s.grade, classId: s.classId, total: 0, onCampus: 0, offCampus: 0 })
       const stat = map.get(key)!
@@ -454,66 +596,5 @@ export class SupabaseApiClient implements IApiClient {
       else if (s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE') stat.offCampus++
     }
     return Array.from(map.values())
-  }
-
-  async getClassOutsideCount(classId: string): Promise<number> {
-    // Count students currently outside — but exclude those who left via an approved urgent request
-    // (urgent requests don't consume a quota slot)
-    const { data: outsideStudents, error } = await supabase
-      .from('students')
-      .select('id')
-      .eq('classId', classId)
-      .in('currentStatus', ['OFF_CAMPUS', 'OVERDUE'])
-    if (error) throw error
-    if (!outsideStudents || outsideStudents.length === 0) return 0
-
-    const today = new Date().toISOString().split('T')[0]
-    const outsideIds = outsideStudents.map((s) => s.id)
-
-    // Find students outside because of an approved urgent exception today → they don't count
-    const { data: urgentApproved } = await supabase
-      .from('absence_requests')
-      .select('studentId')
-      .in('studentId', outsideIds)
-      .eq('isUrgent', true)
-      .eq('status', 'APPROVED')
-      .eq('date', today)
-
-    const urgentExemptIds = new Set((urgentApproved ?? []).map((r: { studentId: string }) => r.studentId))
-    return outsideStudents.filter((s) => !urgentExemptIds.has(s.id)).length
-  }
-
-  async cancelAbsenceRequest(id: string): Promise<void> {
-    const { error } = await supabase.from('absence_requests').update({ status: 'CANCELLED' }).eq('id', id)
-    if (error) throw error
-  }
-
-  async markOverdueStudents(): Promise<number> {
-    // OVERDUE status removed — no longer used
-    return 0
-  }
-
-  async autoReturnStudents(): Promise<number> {
-    const { data, error } = await supabase.rpc('auto_return_students')
-    if (error) throw error
-    return (data as number) ?? 0
-  }
-
-  async createCheckoutWithQuotaCheck(
-    studentId: string,
-    classId: string,
-    grade: string,
-    reason: string | null,
-    expectedReturn: string | null
-  ): Promise<QuotaCheckResult> {
-    const { data, error } = await supabase.rpc('create_checkout_with_quota_check', {
-      p_student_id: studentId,
-      p_class_id: classId,
-      p_grade: grade,
-      p_reason: reason,
-      p_expected_return: expectedReturn,
-    })
-    if (error) throw error
-    return data as QuotaCheckResult
   }
 }

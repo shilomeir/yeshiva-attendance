@@ -41,7 +41,10 @@ export async function processQueue(): Promise<void> {
 
     for (const item of queueItems) {
       try {
-        if (item.operation === 'INSERT') {
+        if (item.operation === 'RPC') {
+          const { error } = await supabase.rpc(item.tableName, item.payload)
+          if (error) throw error
+        } else if (item.operation === 'INSERT') {
           const { error } = await supabase.from(item.tableName).insert(item.payload)
           if (error) throw error
         } else if (item.operation === 'UPDATE') {

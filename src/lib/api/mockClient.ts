@@ -2,12 +2,12 @@ import { v4 as uuidv4 } from 'uuid'
 import { db } from '@/lib/db/schema'
 import { parseSmsMessage } from '@/lib/sms/parser'
 import { DEFAULT_GRADE, DEFAULT_CLASS } from '@/lib/constants/grades'
+import { calcQuota } from '@/lib/quota'
 import type {
   Student,
   Event,
   SmsEvent,
   AdminOverride,
-  AbsenceRequest,
   RecurringAbsence,
   StudentStatus,
   DashboardStats,
@@ -15,18 +15,32 @@ import type {
   ReasonData,
   HourlyData,
   ClassStat,
+  CalendarDeparture,
+  Departure,
+  DepartureStatus,
+  SubmitDepartureResult,
+  DepartureSubmitResult,
+  QuotaFullResult,
 } from '@/types'
 import type {
   IApiClient,
   GetStudentsOptions,
+  SubmitDeparturePayload,
+  ListDeparturesOptions,
   CreateEventPayload,
-  CreateAbsenceRequestPayload,
-  QuotaCheckResult,
-  AbsenceQuotaResult,
 } from './types'
 
+function toIso(d: Date | string): string {
+  return d instanceof Date ? d.toISOString() : d
+}
+
+function overlaps(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
+  return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart)
+}
+
 export class MockApiClient implements IApiClient {
-  // ---- STUDENTS ----
+
+  // ── Students ───────────────────────────────────────────────────────────────
 
   async getStudents(options: GetStudentsOptions = {}): Promise<Student[]> {
     const { filter = 'ALL', search = '', grade, classId, limit, offset = 0 } = options
@@ -39,12 +53,8 @@ export class MockApiClient implements IApiClient {
       students = students.filter((s) => s.pendingApproval)
     }
 
-    if (grade) {
-      students = students.filter((s) => s.grade === grade)
-    }
-    if (classId) {
-      students = students.filter((s) => s.classId === classId)
-    }
+    if (grade) students = students.filter((s) => s.grade === grade)
+    if (classId) students = students.filter((s) => s.classId === classId)
 
     if (search) {
       const q = search.toLowerCase()
@@ -56,8 +66,7 @@ export class MockApiClient implements IApiClient {
       )
     }
 
-    const paginated = students.slice(offset, limit ? offset + limit : undefined)
-    return paginated
+    return students.slice(offset, limit ? offset + limit : undefined)
   }
 
   async getStudent(id: string): Promise<Student | null> {
@@ -75,10 +84,7 @@ export class MockApiClient implements IApiClient {
   }
 
   async updateStudentStatus(id: string, status: StudentStatus): Promise<void> {
-    await db.students.update(id, {
-      currentStatus: status,
-      lastSeen: new Date().toISOString(),
-    })
+    await db.students.update(id, { currentStatus: status, lastSeen: new Date().toISOString() })
   }
 
   async updateStudentGrade(id: string, grade: string, classId: string): Promise<void> {
@@ -86,51 +92,32 @@ export class MockApiClient implements IApiClient {
   }
 
   async updateStudentLocation(id: string, lat: number, lng: number): Promise<void> {
-    await db.students.update(id, {
-      lastLocation: { lat, lng },
-      lastSeen: new Date().toISOString(),
-    })
+    await db.students.update(id, { lastLocation: { lat, lng }, lastSeen: new Date().toISOString() })
+  }
+
+  async updateStudentFcmToken(_id: string, _token: string): Promise<void> {
+    // no-op in browser/dev mode
   }
 
   async updatePushToken(id: string, token: string | null): Promise<void> {
     await db.students.update(id, { push_token: token })
   }
 
-  async sendPushToAll(_title: string, _body: string): Promise<{ sent: number; failed: number }> {
+  async sendPushToAll(_title: string, _body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
     return { sent: 0, failed: 0 }
-  }
-
-  // Students are managed via Google Sheets sync — addStudent kept only for mock/testing
-  async addStudent(data: { fullName: string; idNumber: string; phone: string; grade: string; classId: string }): Promise<Student> {
-    const student: Student = {
-      id: uuidv4(),
-      fullName: data.fullName,
-      idNumber: data.idNumber,
-      phone: data.phone,
-      deviceToken: null,
-      push_token: null,
-      currentStatus: 'ON_CAMPUS',
-      lastSeen: new Date().toISOString(),
-      lastLocation: null,
-      pendingApproval: false,
-      createdAt: new Date().toISOString(),
-      grade: data.grade,
-      classId: data.classId,
-    }
-    await db.students.add(student)
-    return student
   }
 
   async deleteStudent(id: string): Promise<void> {
     await db.students.delete(id)
     await db.events.where('studentId').equals(id).delete()
+    await db.departures.where('student_id').equals(id).delete()
   }
 
   async getClassSize(classId: string): Promise<number> {
     return db.students.where('classId').equals(classId).count()
   }
 
-  async getLongAbsentStudents(days: number = 7): Promise<Student[]> {
+  async getLongAbsentStudents(days = 7): Promise<Student[]> {
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - days)
     const cutoffISO = cutoff.toISOString()
@@ -140,14 +127,355 @@ export class MockApiClient implements IApiClient {
     )
   }
 
-  // ---- EVENTS ----
+  // ── Departures ─────────────────────────────────────────────────────────────
+
+  async submitDeparture(payload: SubmitDeparturePayload): Promise<SubmitDepartureResult> {
+    const now = new Date()
+    const startAt = toIso(payload.startAt)
+    const endAt = toIso(payload.endAt)
+
+    const student = await db.students.get(payload.studentId)
+    if (!student) return { error: 'Student not found' }
+
+    const classId = student.classId
+    const classSize = await this.getClassSize(classId)
+    const quota = calcQuota(classSize)
+
+    const allDepartures = await db.departures.where('class_id').equals(classId).toArray()
+
+    const overlapRows = allDepartures.filter(
+      (d) =>
+        !d.is_urgent &&
+        (d.status === 'APPROVED' || d.status === 'ACTIVE') &&
+        d.student_id !== payload.studentId &&
+        overlaps(d.start_at, d.end_at, startAt, endAt)
+    )
+    const current = overlapRows.length
+
+    // Determine initial status
+    let status: DepartureStatus
+    const isAdminOverride = payload.source === 'ADMIN_OVERRIDE'
+
+    if (isAdminOverride) {
+      status = 'APPROVED'
+    } else if (payload.isUrgent) {
+      status = 'PENDING'
+    } else if (current < quota) {
+      status = 'APPROVED'
+    } else if (!payload.forcePending) {
+      // Return QUOTA_FULL without inserting
+      const overlappingStudentIds = overlapRows.map((d) => d.student_id)
+      const overlappingStudents = await db.students.where('id').anyOf(overlappingStudentIds).toArray()
+      const studentMap = Object.fromEntries(overlappingStudents.map((s) => [s.id, s]))
+
+      return {
+        status: 'QUOTA_FULL',
+        current,
+        quota,
+        overlapping: overlapRows.map((d) => ({
+          studentId: d.student_id,
+          studentName: studentMap[d.student_id]?.fullName ?? '',
+          endAt: d.end_at,
+        })),
+      } satisfies QuotaFullResult
+    } else {
+      status = 'PENDING'
+    }
+
+    // Auto-activate if approved and start_at is now or past
+    if (status === 'APPROVED' && new Date(startAt) <= now) {
+      status = 'ACTIVE'
+    }
+
+    const id = uuidv4()
+    const departure: Departure = {
+      id,
+      student_id: payload.studentId,
+      class_id: classId,
+      start_at: startAt,
+      end_at: endAt,
+      status,
+      source: payload.source ?? 'SELF',
+      is_urgent: payload.isUrgent ?? false,
+      reason: payload.reason ?? null,
+      admin_note: null,
+      approved_by: payload.approvedBy ?? null,
+      created_at: now.toISOString(),
+      approved_at: (status === 'APPROVED' || status === 'ACTIVE') ? now.toISOString() : null,
+      activated_at: status === 'ACTIVE' ? now.toISOString() : null,
+      completed_at: null,
+      cancelled_at: null,
+      rejected_at: null,
+      gps_lat: null,
+      gps_lng: null,
+    }
+
+    await db.departures.add(departure)
+
+    if (status === 'ACTIVE') {
+      await db.students.update(payload.studentId, { currentStatus: 'OFF_CAMPUS', lastSeen: now.toISOString() })
+    }
+
+    await db.adminOverrides.add({
+      id: uuidv4(),
+      studentId: payload.studentId,
+      adminId: payload.actorId ?? 'system',
+      action: 'submit_departure',
+      previousStatus: student.currentStatus,
+      newStatus: status,
+      timestamp: now.toISOString(),
+      note: payload.reason ?? null,
+    })
+
+    return {
+      id,
+      status,
+      quota,
+      current,
+      notifyAdmin: status === 'PENDING' && current >= quota,
+    } satisfies DepartureSubmitResult
+  }
+
+  async approveDeparture(
+    id: string,
+    actorId: string,
+    _actorRole?: 'ADMIN' | 'SUPERVISOR',
+    note?: string,
+  ): Promise<{ status: DepartureStatus } | { error: string }> {
+    const dep = await db.departures.get(id)
+    if (!dep) return { error: 'Departure not found' }
+    if (dep.status !== 'PENDING') return { error: `Cannot approve departure in status ${dep.status}` }
+
+    const now = new Date()
+    const newStatus: DepartureStatus = new Date(dep.start_at) <= now ? 'ACTIVE' : 'APPROVED'
+
+    await db.departures.update(id, {
+      status: newStatus,
+      approved_by: actorId,
+      approved_at: now.toISOString(),
+      ...(newStatus === 'ACTIVE' ? { activated_at: now.toISOString() } : {}),
+      admin_note: note ?? null,
+    })
+
+    if (newStatus === 'ACTIVE') {
+      await db.students.update(dep.student_id, { currentStatus: 'OFF_CAMPUS', lastSeen: now.toISOString() })
+    }
+
+    await db.adminOverrides.add({
+      id: uuidv4(),
+      studentId: dep.student_id,
+      adminId: actorId,
+      action: 'approve_departure',
+      previousStatus: 'PENDING',
+      newStatus,
+      timestamp: now.toISOString(),
+      note: note ?? null,
+    })
+
+    return { status: newStatus }
+  }
+
+  async rejectDeparture(
+    id: string,
+    actorId: string,
+    _actorRole?: 'ADMIN' | 'SUPERVISOR',
+    note?: string,
+  ): Promise<{ status: 'REJECTED' } | { error: string }> {
+    const dep = await db.departures.get(id)
+    if (!dep) return { error: 'Departure not found' }
+    if (dep.status !== 'PENDING') return { error: `Cannot reject departure in status ${dep.status}` }
+
+    const now = new Date().toISOString()
+    await db.departures.update(id, { status: 'REJECTED', rejected_at: now, admin_note: note ?? null })
+
+    await db.adminOverrides.add({
+      id: uuidv4(),
+      studentId: dep.student_id,
+      adminId: actorId,
+      action: 'reject_departure',
+      previousStatus: 'PENDING',
+      newStatus: 'REJECTED',
+      timestamp: now,
+      note: note ?? null,
+    })
+
+    return { status: 'REJECTED' }
+  }
+
+  async cancelDeparture(
+    id: string,
+    actorId: string,
+    _actorRole?: 'STUDENT' | 'ADMIN' | 'SUPERVISOR',
+    note?: string,
+  ): Promise<{ status: 'CANCELLED' } | { error: string }> {
+    const dep = await db.departures.get(id)
+    if (!dep) return { error: 'Departure not found' }
+    const terminal: DepartureStatus[] = ['COMPLETED', 'CANCELLED', 'REJECTED']
+    if (terminal.includes(dep.status)) return { error: `Cannot cancel departure in status ${dep.status}` }
+
+    const now = new Date().toISOString()
+    await db.departures.update(id, { status: 'CANCELLED', cancelled_at: now, admin_note: note ?? null })
+
+    // Return student to ON_CAMPUS only if this was their active departure
+    if (dep.status === 'ACTIVE') {
+      const otherActive = await db.departures
+        .where('student_id')
+        .equals(dep.student_id)
+        .filter((d) => d.status === 'ACTIVE' && d.id !== id)
+        .count()
+      if (otherActive === 0) {
+        await db.students.update(dep.student_id, { currentStatus: 'ON_CAMPUS', lastSeen: now })
+      }
+    }
+
+    await db.adminOverrides.add({
+      id: uuidv4(),
+      studentId: dep.student_id,
+      adminId: actorId,
+      action: 'cancel_departure',
+      previousStatus: dep.status,
+      newStatus: 'CANCELLED',
+      timestamp: now,
+      note: note ?? null,
+    })
+
+    return { status: 'CANCELLED' }
+  }
+
+  async returnDeparture(
+    id: string,
+    studentId?: string,
+    gpsLat?: number,
+    gpsLng?: number,
+  ): Promise<{ status: 'COMPLETED' } | { error: string }> {
+    const dep = await db.departures.get(id)
+    if (!dep) return { error: 'Departure not found' }
+    if (dep.status !== 'ACTIVE') return { error: `Cannot return departure in status ${dep.status}` }
+
+    const now = new Date().toISOString()
+    await db.departures.update(id, { status: 'COMPLETED', completed_at: now })
+
+    // Create CHECK_IN audit event
+    await db.events.add({
+      id: uuidv4(),
+      studentId: dep.student_id,
+      type: 'CHECK_IN',
+      timestamp: now,
+      reason: null,
+      expectedReturn: null,
+      gpsLat: gpsLat ?? null,
+      gpsLng: gpsLng ?? null,
+      gpsStatus: gpsLat ? 'GRANTED' : 'PENDING',
+      distanceFromCampus: null,
+      note: null,
+      syncedAt: null,
+      departure_id: id,
+    })
+
+    const resolvedStudentId = studentId ?? dep.student_id
+    const otherActive = await db.departures
+      .where('student_id')
+      .equals(resolvedStudentId)
+      .filter((d) => d.status === 'ACTIVE' && d.id !== id)
+      .count()
+    if (otherActive === 0) {
+      await db.students.update(resolvedStudentId, { currentStatus: 'ON_CAMPUS', lastSeen: now })
+    }
+
+    return { status: 'COMPLETED' }
+  }
+
+  async listDepartures(options: ListDeparturesOptions = {}): Promise<CalendarDeparture[]> {
+    let departures = await db.departures.toArray()
+
+    if (options.studentId) departures = departures.filter((d) => d.student_id === options.studentId)
+    if (options.classId) {
+      const classStudents = await db.students.where('classId').equals(options.classId).toArray()
+      const ids = new Set(classStudents.map((s) => s.id))
+      departures = departures.filter((d) => ids.has(d.student_id))
+    }
+    if (options.from) {
+      const from = toIso(options.from)
+      departures = departures.filter((d) => d.start_at >= from)
+    }
+    if (options.to) {
+      const to = toIso(options.to)
+      departures = departures.filter((d) => d.start_at <= to)
+    }
+    if (options.status) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status]
+      departures = departures.filter((d) => statuses.includes(d.status))
+    }
+    if (options.limit) departures = departures.slice(0, options.limit)
+
+    const studentIds = [...new Set(departures.map((d) => d.student_id))]
+    const studentMap = await this.getStudentsByIds(studentIds)
+
+    const now = new Date()
+    return departures.map((d) => {
+      const student = studentMap[d.student_id]
+      return {
+        ...d,
+        student_name: student?.fullName ?? '',
+        grade: student?.grade ?? '',
+        is_overdue_alert: d.status === 'ACTIVE' && new Date(d.end_at) < new Date(now.getTime() - 24 * 60 * 60 * 1000),
+      }
+    })
+  }
+
+  async tickDepartures(): Promise<number> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+    let count = 0
+
+    // Activate APPROVED departures whose start_at has passed
+    const toActivate = await db.departures
+      .where('status')
+      .equals('APPROVED')
+      .filter((d) => d.start_at <= nowIso)
+      .toArray()
+
+    for (const d of toActivate) {
+      await db.departures.update(d.id, { status: 'ACTIVE', activated_at: nowIso })
+      await db.students.update(d.student_id, { currentStatus: 'OFF_CAMPUS', lastSeen: nowIso })
+      count++
+    }
+
+    // Complete ACTIVE departures whose end_at has passed
+    const toComplete = await db.departures
+      .where('status')
+      .equals('ACTIVE')
+      .filter((d) => d.end_at <= nowIso)
+      .toArray()
+
+    for (const d of toComplete) {
+      await db.departures.update(d.id, { status: 'COMPLETED', completed_at: nowIso })
+      const otherActive = await db.departures
+        .where('student_id')
+        .equals(d.student_id)
+        .filter((dep) => dep.status === 'ACTIVE' && dep.id !== d.id)
+        .count()
+      if (otherActive === 0) {
+        await db.students.update(d.student_id, { currentStatus: 'ON_CAMPUS', lastSeen: nowIso })
+      }
+      count++
+    }
+
+    // Purge departures older than 30 days
+    const cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const terminal: DepartureStatus[] = ['COMPLETED', 'CANCELLED', 'REJECTED']
+    const toPurge = await db.departures
+      .filter((d) => terminal.includes(d.status) && d.end_at < cutoff)
+      .toArray()
+    for (const d of toPurge) await db.departures.delete(d.id)
+
+    return count
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────────
 
   async getEvents(studentId: string): Promise<Event[]> {
-    const events = await db.events
-      .where('studentId')
-      .equals(studentId)
-      .toArray()
-    // Sort by timestamp descending (newest first)
+    const events = await db.events.where('studentId').equals(studentId).toArray()
     return events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
   }
 
@@ -166,30 +494,10 @@ export class MockApiClient implements IApiClient {
       distanceFromCampus: payload.distanceFromCampus ?? null,
       note: payload.note ?? null,
       syncedAt: null,
+      departure_id: payload.departureId ?? null,
     }
 
     await db.events.add(event)
-
-    // Update student status
-    const newStatus: StudentStatus = payload.type === 'CHECK_OUT' ? 'OFF_CAMPUS' : 'ON_CAMPUS'
-    await db.students.update(payload.studentId, {
-      currentStatus: newStatus,
-      lastSeen: now,
-      ...(payload.gpsLat && payload.gpsLng
-        ? { lastLocation: { lat: payload.gpsLat, lng: payload.gpsLng } }
-        : {}),
-    })
-
-    // Add to sync queue
-    await db.syncQueue.add({
-      id: uuidv4(),
-      tableName: 'events',
-      operation: 'INSERT',
-      payload: event as unknown as Record<string, unknown>,
-      clientTimestamp: now,
-      retryCount: 0,
-    })
-
     return event
   }
 
@@ -197,12 +505,11 @@ export class MockApiClient implements IApiClient {
     await db.events.delete(id)
   }
 
-  async getRecentEvents(limit: number = 50): Promise<Event[]> {
-    const events = await db.events.orderBy('timestamp').reverse().limit(limit).toArray()
-    return events
+  async getRecentEvents(limit = 50): Promise<Event[]> {
+    return db.events.orderBy('timestamp').reverse().limit(limit).toArray()
   }
 
-  // ---- SMS ----
+  // ── SMS ────────────────────────────────────────────────────────────────────
 
   async getSmsEvents(): Promise<SmsEvent[]> {
     return db.smsEvents.orderBy('timestamp').reverse().toArray()
@@ -232,12 +539,10 @@ export class MockApiClient implements IApiClient {
 
     await db.smsEvents.add(smsEvent)
 
-    // If parsed correctly and student found, create event
     if (parsed && studentId) {
-      const eventType = parsed.type
       await this.createEvent({
         studentId,
-        type: eventType,
+        type: parsed.type,
         reason: parsed.reason ?? null,
         note: `מ-SMS: ${raw}`,
       })
@@ -246,7 +551,7 @@ export class MockApiClient implements IApiClient {
     return smsEvent
   }
 
-  // ---- ADMIN OVERRIDES ----
+  // ── Audit log ──────────────────────────────────────────────────────────────
 
   async getAdminOverrides(): Promise<AdminOverride[]> {
     return db.adminOverrides.orderBy('timestamp').reverse().toArray()
@@ -255,12 +560,41 @@ export class MockApiClient implements IApiClient {
   async createAdminOverride(
     studentId: string,
     newStatus: StudentStatus,
-    note?: string
+    note?: string,
   ): Promise<AdminOverride> {
     const student = await db.students.get(studentId)
     if (!student) throw new Error('Student not found')
 
     const now = new Date().toISOString()
+
+    if (newStatus === 'OFF_CAMPUS') {
+      // Create an admin-override departure (24-hour window)
+      const endAt = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString()
+      await this.submitDeparture({
+        studentId,
+        startAt: now,
+        endAt,
+        reason: note ?? null,
+        source: 'ADMIN_OVERRIDE',
+        approvedBy: 'admin',
+        actorId: 'admin',
+        actorRole: 'ADMIN',
+      })
+    } else if (newStatus === 'ON_CAMPUS') {
+      // Cancel all active departures for this student
+      const active = await db.departures
+        .where('student_id')
+        .equals(studentId)
+        .filter((d) => d.status === 'ACTIVE' || d.status === 'APPROVED' || d.status === 'PENDING')
+        .toArray()
+      for (const d of active) {
+        await db.departures.update(d.id, { status: 'CANCELLED', cancelled_at: now })
+      }
+      await db.students.update(studentId, { currentStatus: 'ON_CAMPUS', lastSeen: now })
+    } else {
+      await db.students.update(studentId, { currentStatus: newStatus, lastSeen: now })
+    }
+
     const override: AdminOverride = {
       id: uuidv4(),
       studentId,
@@ -271,93 +605,11 @@ export class MockApiClient implements IApiClient {
       timestamp: now,
       note: note ?? null,
     }
-
     await db.adminOverrides.add(override)
-    await db.students.update(studentId, {
-      currentStatus: newStatus,
-      lastSeen: now,
-    })
-
     return override
   }
 
-  // ---- ABSENCE REQUESTS ----
-
-  async getAbsenceRequests(
-    options: { studentId?: string; status?: AbsenceRequest['status'] } = {}
-  ): Promise<AbsenceRequest[]> {
-    let requests = await db.absenceRequests.orderBy('createdAt').reverse().toArray()
-
-    if (options.studentId) {
-      requests = requests.filter((r) => r.studentId === options.studentId)
-    }
-    if (options.status) {
-      requests = requests.filter((r) => r.status === options.status)
-    }
-
-    return requests
-  }
-
-  async createAbsenceRequest(payload: CreateAbsenceRequestPayload): Promise<AbsenceRequest> {
-    const request: AbsenceRequest = {
-      id: uuidv4(),
-      studentId: payload.studentId,
-      date: payload.date,
-      endDate: payload.endDate ?? null,
-      reason: payload.reason,
-      startTime: payload.startTime,
-      endTime: payload.endTime,
-      status: 'PENDING' as AbsenceRequest['status'], // quota check handled by checkAbsenceQuota
-      adminNote: null,
-      createdAt: new Date().toISOString(),
-      isUrgent: payload.isUrgent ?? false,
-    }
-
-    await db.absenceRequests.add(request)
-    return request
-  }
-
-  async updateAbsenceRequestStatus(
-    id: string,
-    status: AbsenceRequest['status'],
-    adminNote?: string
-  ): Promise<void> {
-    await db.absenceRequests.update(id, { status, adminNote: adminNote ?? null })
-
-    // Write audit record for approve / reject / cancel
-    if (status === 'APPROVED' || status === 'REJECTED' || status === 'CANCELLED') {
-      const request = await db.absenceRequests.get(id)
-      if (request) {
-        const student = await db.students.get(request.studentId)
-        const currentStatus = student?.currentStatus ?? 'ON_CAMPUS'
-        const auditNote = adminNote
-          ? adminNote
-          : status === 'APPROVED' ? 'בקשת היעדרות אושרה'
-          : status === 'REJECTED' ? 'בקשת היעדרות נדחתה'
-          : 'בקשת היעדרות בוטלה ע"י מנהל'
-        const action = status === 'APPROVED' ? 'approve_absence_request'
-          : status === 'REJECTED' ? 'reject_absence_request'
-          : 'cancel_absence_request'
-        await db.adminOverrides.add({
-          id: uuidv4(),
-          studentId: request.studentId,
-          adminId: 'admin',
-          action,
-          previousStatus: currentStatus,
-          newStatus: currentStatus,
-          timestamp: new Date().toISOString(),
-          note: auditNote,
-        })
-      }
-    }
-  }
-
-  async getUrgentRequests(): Promise<AbsenceRequest[]> {
-    const requests = await db.absenceRequests.toArray()
-    return requests.filter((r) => r.isUrgent && r.status === 'PENDING')
-  }
-
-  // ---- RECURRING ABSENCES ----
+  // ── Recurring absences ────────────────────────────────────────────────────
 
   async getRecurringAbsences(studentId: string): Promise<RecurringAbsence[]> {
     return db.recurringAbsences
@@ -367,7 +619,7 @@ export class MockApiClient implements IApiClient {
       .toArray()
   }
 
-  // ---- ANALYTICS ----
+  // ── Analytics ─────────────────────────────────────────────────────────────
 
   async getDashboardStats(): Promise<DashboardStats> {
     const students = await db.students.toArray()
@@ -381,11 +633,10 @@ export class MockApiClient implements IApiClient {
     const longAbsent = students.filter(
       (s) => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen !== null && s.lastSeen < cutoffISO
     ).length
-
     return { total, onCampus, offCampus, pending, longAbsent }
   }
 
-  async getDailyPresence(days: number = 7): Promise<DailyPresenceData[]> {
+  async getDailyPresence(days = 7): Promise<DailyPresenceData[]> {
     const result: DailyPresenceData[] = []
     const now = new Date()
 
@@ -393,69 +644,48 @@ export class MockApiClient implements IApiClient {
       const date = new Date(now)
       date.setDate(date.getDate() - i)
       const dateStr = date.toISOString().split('T')[0]
+      const dayStart = dateStr + 'T00:00:00.000Z'
+      const dayEnd = dateStr + 'T23:59:59.999Z'
 
-      const dayStart = new Date(dateStr + 'T00:00:00.000Z')
-      const dayEnd = new Date(dateStr + 'T23:59:59.999Z')
-
-      const checkOuts = await db.events
-        .where('timestamp')
-        .between(dayStart.toISOString(), dayEnd.toISOString())
-        .filter((e) => e.type === 'CHECK_OUT')
+      const deps = await db.departures
+        .filter((d) =>
+          ['ACTIVE', 'COMPLETED', 'APPROVED'].includes(d.status) &&
+          overlaps(d.start_at, d.end_at, dayStart, dayEnd)
+        )
         .count()
 
       const total = await db.students.count()
-
-      result.push({
-        date: dateStr,
-        onCampus: Math.max(0, total - checkOuts),
-        offCampus: checkOuts,
-      })
+      result.push({ date: dateStr, onCampus: Math.max(0, total - deps), offCampus: deps })
     }
 
     return result
   }
 
   async getReasonBreakdown(): Promise<ReasonData[]> {
-    const events = await db.events
-      .where('type')
-      .equals('CHECK_OUT')
-      .toArray()
-
+    const departures = await db.departures.toArray()
     const reasonMap: Record<string, number> = {}
-    for (const event of events) {
-      const reason = event.reason ?? 'אחר'
+    for (const d of departures) {
+      const reason = d.reason ?? 'אחר'
       reasonMap[reason] = (reasonMap[reason] ?? 0) + 1
     }
-
     return Object.entries(reasonMap)
       .map(([reason, count]) => ({ reason, count }))
       .sort((a, b) => b.count - a.count)
   }
 
   async getHourlyDepartures(): Promise<HourlyData[]> {
-    const events = await db.events
-      .where('type')
-      .equals('CHECK_OUT')
-      .toArray()
-
+    const departures = await db.departures.toArray()
     const hourMap: Record<number, number> = {}
     for (let h = 0; h < 24; h++) hourMap[h] = 0
-
-    for (const event of events) {
-      const hour = new Date(event.timestamp).getHours()
+    for (const d of departures) {
+      const hour = new Date(d.start_at).getHours()
       hourMap[hour] = (hourMap[hour] ?? 0) + 1
     }
-
-    return Object.entries(hourMap).map(([hour, count]) => ({
-      hour: Number(hour),
-      count,
-    }))
+    return Object.entries(hourMap).map(([hour, count]) => ({ hour: Number(hour), count }))
   }
 
   async getClassStats(): Promise<ClassStat[]> {
     const students = await db.students.toArray()
-
-    // Group by classId
     const classMap = new Map<string, { grade: string; classId: string; students: Student[] }>()
     for (const s of students) {
       const key = s.classId
@@ -464,147 +694,19 @@ export class MockApiClient implements IApiClient {
       }
       classMap.get(key)!.students.push(s)
     }
-
     const stats: ClassStat[] = []
-    for (const [, { grade, classId, students: classStudents }] of classMap) {
-      const total = classStudents.length
-      const onCampus = classStudents.filter((s) => s.currentStatus === 'ON_CAMPUS').length
-      const offCampus = classStudents.filter((s) => s.currentStatus === 'OFF_CAMPUS').length
-      stats.push({ grade, classId, total, onCampus, offCampus })
+    for (const [, { grade, classId, students: cs }] of classMap) {
+      stats.push({
+        grade,
+        classId,
+        total: cs.length,
+        onCampus: cs.filter((s) => s.currentStatus === 'ON_CAMPUS').length,
+        offCampus: cs.filter((s) => s.currentStatus !== 'ON_CAMPUS').length,
+      })
     }
-
-    // Sort by grade name then classId
     return stats.sort((a, b) => {
       if (a.grade !== b.grade) return a.grade.localeCompare(b.grade, 'he')
       return a.classId.localeCompare(b.classId, 'he')
     })
-  }
-
-  // FCM token — no-op in mock/dev mode (only used in native APK)
-  async updateStudentFcmToken(_id: string, _token: string): Promise<void> {
-    // noop in browser/dev mode
-  }
-
-  async getClassOutsideCount(classId: string): Promise<number> {
-    const outside = await db.students
-      .where('classId').equals(classId)
-      .filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
-      .toArray()
-    if (outside.length === 0) return 0
-
-    const today = new Date().toISOString().split('T')[0]
-    const outsideIds = new Set(outside.map((s) => s.id))
-    const urgentApproved = await db.absenceRequests
-      .filter((r) => outsideIds.has(r.studentId) && r.isUrgent && r.status === 'APPROVED' && r.date === today)
-      .toArray()
-    const urgentExemptIds = new Set(urgentApproved.map((r) => r.studentId))
-    return outside.filter((s) => !urgentExemptIds.has(s.id)).length
-  }
-
-  async cancelAbsenceRequest(id: string): Promise<void> {
-    await db.absenceRequests.update(id, { status: 'CANCELLED' as const })
-  }
-
-  async autoReturnStudents(): Promise<number> {
-    const now = new Date().toISOString()
-    const offCampus = await db.students
-      .filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE')
-      .toArray()
-    let count = 0
-    for (const student of offCampus) {
-      const events = await db.events.where('studentId').equals(student.id).toArray()
-      const lastCheckout = events
-        .filter((e) => e.type === 'CHECK_OUT' && e.expectedReturn)
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
-      if (lastCheckout?.expectedReturn && lastCheckout.expectedReturn < now) {
-        await db.students.update(student.id, { currentStatus: 'ON_CAMPUS', lastSeen: now })
-        count++
-      }
-    }
-    return count
-  }
-
-  async markOverdueStudents(): Promise<number> {
-    // OVERDUE status removed — no longer used
-    return 0
-  }
-
-  async checkAbsenceQuota(
-    _classId: string,
-    _date: string,
-    _endDate: string | null,
-    _startTime: string,
-    _endTime: string,
-    _excludeStudentId?: string,
-  ): Promise<AbsenceQuotaResult> {
-    // Mock always reports space available
-    return { hasSpace: true, current: 0, quota: 3, overlapping: [] }
-  }
-
-  async autoCheckoutStudents(): Promise<number> {
-    const now = new Date()
-    const todayStr = now.toISOString().slice(0, 10)
-    const nowTime = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
-
-    const approved = await db.absenceRequests
-      .where('status').equals('APPROVED')
-      .toArray()
-
-    let count = 0
-    for (const req of approved) {
-      if (req.date > todayStr) continue
-      const endDate = req.endDate ?? req.date
-      if (endDate < todayStr) continue
-      if (req.startTime > nowTime) continue
-      if (endDate === todayStr && req.endTime <= nowTime) continue
-
-      const student = await db.students.get(req.studentId)
-      if (!student || student.currentStatus !== 'ON_CAMPUS') continue
-
-      await db.events.add({
-        id: uuidv4(),
-        studentId: req.studentId,
-        type: 'CHECK_OUT',
-        timestamp: now.toISOString(),
-        reason: req.reason,
-        expectedReturn: `${endDate}T${req.endTime}:00`,
-        gpsLat: null,
-        gpsLng: null,
-        gpsStatus: 'UNAVAILABLE',
-        distanceFromCampus: null,
-        note: null,
-        syncedAt: now.toISOString(),
-      })
-      await db.students.update(req.studentId, { currentStatus: 'OFF_CAMPUS', lastSeen: now.toISOString() })
-      count++
-    }
-    return count
-  }
-
-  async createCheckoutWithQuotaCheck(
-    studentId: string,
-    classId: string,
-    grade: string,
-    reason: string | null,
-    expectedReturn: string | null
-  ): Promise<QuotaCheckResult> {
-    // Check quota client-side in mock
-    const count = await this.getClassOutsideCount(classId)
-    const quota = grade === 'אברכים ובוגרצ' ? 6 : 3
-    if (count >= quota) {
-      return { success: false, error: 'quota_exceeded', current: count, quota }
-    }
-    // Create checkout event
-    const event = await this.createEvent({
-      studentId,
-      type: 'CHECK_OUT',
-      reason,
-      expectedReturn,
-      gpsLat: null,
-      gpsLng: null,
-      gpsStatus: 'PENDING',
-      distanceFromCampus: null,
-    })
-    return { success: true, eventId: event.id }
   }
 }

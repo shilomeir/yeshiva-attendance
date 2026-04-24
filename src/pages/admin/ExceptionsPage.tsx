@@ -10,7 +10,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
-import type { Student, AbsenceRequest, DailyPresenceData } from '@/types'
+import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import type { Student, CalendarDeparture, DailyPresenceData } from '@/types'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -590,84 +591,51 @@ export function ExceptionsPage() {
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const todayStr = new Date().toISOString().split('T')[0]
-
-      const [allStudents, approvedRequests, presenceRaw] = await Promise.all([
+      const [allStudents, activeDeps, presenceRaw] = await Promise.all([
         api.getStudents(),
-        api.getAbsenceRequests({ status: 'APPROVED' }) as Promise<AbsenceRequest[]>,
+        api.listDepartures({ status: 'ACTIVE' }) as Promise<CalendarDeparture[]>,
         api.getDailyPresence(14),
       ])
 
-      // ── Categorise students ──
-      const outsideStudents = allStudents.filter(
-        (s: Student) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE'
-      )
-      const validApproved = (approvedRequests as AbsenceRequest[]).filter(
-        (r) => r.date <= todayStr && (!r.endDate || r.endDate >= todayStr)
-      )
-      const approvedSet = new Set(validApproved.map(r => r.studentId))
-      const urgentSet   = new Set(validApproved.filter(r => r.isUrgent).map(r => r.studentId))
+      // Build map: student_id → active departure
+      const depMap = new Map<string, CalendarDeparture>()
+      for (const dep of activeDeps) depMap.set(dep.student_id, dep)
 
-      const noApproval  = outsideStudents.filter((s: Student) => !approvedSet.has(s.id))
-      const withUrgent  = outsideStudents.filter((s: Student) => urgentSet.has(s.id))
-      const withApproval = outsideStudents.filter(
-        (s: Student) => approvedSet.has(s.id) && !urgentSet.has(s.id)
+      // Off-campus students (union of currentStatus + active departures)
+      const activeIds = new Set(activeDeps.map(d => d.student_id))
+      const outsideStudents = allStudents.filter(
+        (s: Student) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE' || activeIds.has(s.id)
       )
+
+      const noApproval   = outsideStudents.filter((s: Student) => !depMap.has(s.id))
+      const withUrgent   = outsideStudents.filter((s: Student) => depMap.get(s.id)?.is_urgent === true)
+      const withApproval = outsideStudents.filter((s: Student) => depMap.has(s.id) && !depMap.get(s.id)?.is_urgent)
       setCategorised({ noApproval, withApproval, withUrgent })
 
-      // ── Fetch latest CHECK_OUT events for off-campus students ──
-      if (outsideStudents.length > 0) {
-        const outsideIds = outsideStudents.map((s: Student) => s.id)
-        const { data: evData } = await supabase
-          .from('events')
-          .select('studentId, type, timestamp, expectedReturn')
-          .in('studentId', outsideIds)
-          .eq('type', 'CHECK_OUT')
-          .order('timestamp', { ascending: false })
-
-        // Keep only the latest CHECK_OUT per student
-        const latestCheckout = new Map<string, { timestamp: string; expectedReturn: string | null }>()
-        for (const ev of (evData ?? []) as Array<{ studentId: string; type: string; timestamp: string; expectedReturn: string | null }>) {
-          if (!latestCheckout.has(ev.studentId)) {
-            latestCheckout.set(ev.studentId, { timestamp: ev.timestamp, expectedReturn: ev.expectedReturn })
-          }
+      // ── Build timeline from departure data (no events query needed) ──
+      const infos: DepartureInfo[] = outsideStudents.map((s: Student) => {
+        const dep = depMap.get(s.id)
+        return {
+          student:        s,
+          departedAt:     dep ? new Date(dep.start_at) : new Date(s.lastSeen ?? Date.now()),
+          expectedReturn: dep ? new Date(dep.end_at) : null,
+          variant:        dep ? (dep.is_urgent ? 'withUrgent' : 'withApproval') : 'noApproval',
         }
+      })
 
-        const variantOf = (s: Student): DepartureInfo['variant'] =>
-          urgentSet.has(s.id) ? 'withUrgent'
-          : approvedSet.has(s.id) ? 'withApproval'
-          : 'noApproval'
+      infos.sort((a, b) => {
+        const nowMs = Date.now()
+        const aMs = a.expectedReturn?.getTime() ?? Infinity
+        const bMs = b.expectedReturn?.getTime() ?? Infinity
+        const aOverdue = a.expectedReturn && aMs < nowMs
+        const bOverdue = b.expectedReturn && bMs < nowMs
+        if (aOverdue && !bOverdue) return -1
+        if (!aOverdue && bOverdue) return 1
+        return aMs - bMs
+      })
+      setDepartures(infos)
 
-        const infos: DepartureInfo[] = outsideStudents.map((s: Student) => {
-          const ev = latestCheckout.get(s.id)
-          return {
-            student:        s,
-            departedAt:     ev ? new Date(ev.timestamp) : new Date(s.lastSeen ?? Date.now()),
-            expectedReturn: ev?.expectedReturn ? new Date(ev.expectedReturn) : null,
-            variant:        variantOf(s),
-          }
-        })
-
-        // Sort: overdue first, then by time remaining ascending
-        infos.sort((a, b) => {
-          const nowMs = Date.now()
-          const aMs = a.expectedReturn?.getTime() ?? Infinity
-          const bMs = b.expectedReturn?.getTime() ?? Infinity
-          const aOverdue = a.expectedReturn && aMs < nowMs
-          const bOverdue = b.expectedReturn && bMs < nowMs
-          if (aOverdue && !bOverdue) return -1
-          if (!aOverdue && bOverdue) return 1
-          return aMs - bMs
-        })
-
-        setDepartures(infos)
-      } else {
-        setDepartures([])
-      }
-
-      // ── Weekly chart ──
       setWeeklyData(buildWeeklyPoints(presenceRaw))
-
     } catch (err) {
       console.error('Failed to load exceptions data', err)
     } finally {
@@ -684,16 +652,10 @@ export function ExceptionsPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData())
       .subscribe()
 
-    const requestsChannel = supabase
-      .channel('exceptions-requests')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'absence_requests' }, () => loadData())
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(studentsChannel)
-      supabase.removeChannel(requestsChannel)
-    }
+    return () => { supabase.removeChannel(studentsChannel) }
   }, [loadData])
+
+  useDeparturesRealtime({ onAnyChange: loadData })
 
   const totalOutside =
     categorised.noApproval.length +

@@ -10,7 +10,7 @@ import type { StudentStatus } from '@/types'
 interface StatusButtonsProps {
   currentStatus: StudentStatus
   onStatusChange: (newStatus: StudentStatus) => void
-  onCheckoutSuccess?: (eventId: string) => void
+  onCheckoutSuccess?: (departureId: string) => void
 }
 
 export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess }: StatusButtonsProps) {
@@ -26,32 +26,32 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
     setIsCheckingIn(true)
 
     try {
-      const today = new Date().toISOString().split('T')[0]
-      const approvedRequests = await api.getAbsenceRequests({
+      // Find any active departure for this student
+      const activeDeps = await api.listDepartures({
         studentId: currentUser.id,
-        status: 'APPROVED',
+        status: 'ACTIVE',
       })
 
-      const activeRequest = approvedRequests.find((req) => {
-        return req.date <= today && (req.endDate == null || req.endDate >= today)
-      })
-
-      if (activeRequest) {
-        const confirmed = window.confirm(
-          'יש לך בקשת היעדרות מאושרת. האם לבטל אותה ולחזור לישיבה?'
-        )
-        if (!confirmed) return
-        await api.cancelAbsenceRequest(activeRequest.id)
+      if (activeDeps.length > 0) {
+        const confirmed = window.confirm('יש לך יציאה פתוחה. האם לרשום חזרה ולסגור אותה?')
+        if (!confirmed) {
+          setIsCheckingIn(false)
+          return
+        }
+        // Return via the departure (closes it and creates CHECK_IN event)
+        await api.returnDeparture(activeDeps[0].id, currentUser.id)
+      } else {
+        // No active departure — just create a check-in event directly
+        await api.createEvent({
+          studentId: currentUser.id,
+          type: 'CHECK_IN',
+          gpsLat: null,
+          gpsLng: null,
+          gpsStatus: 'PENDING',
+          distanceFromCampus: null,
+        })
+        await api.updateStudentStatus(currentUser.id, 'ON_CAMPUS')
       }
-
-      await api.createEvent({
-        studentId: currentUser.id,
-        type: 'CHECK_IN',
-        gpsLat: null,
-        gpsLng: null,
-        gpsStatus: 'PENDING',
-        distanceFromCampus: null,
-      })
 
       onStatusChange('ON_CAMPUS')
       toast({ title: 'ברוך שובך!', description: 'החזרה לישיבה נרשמה בהצלחה' })
@@ -60,10 +60,6 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
     } finally {
       setIsCheckingIn(false)
     }
-  }
-
-  const handleCheckOut = () => {
-    setShowOffCampusSheet(true)
   }
 
   return (
@@ -90,7 +86,6 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
               : '0 1px 6px rgba(14,30,70,0.06)',
           }}
         >
-          {/* Icon circle */}
           <div
             className={cn(
               'flex h-20 w-20 items-center justify-center rounded-full transition-all',
@@ -125,7 +120,7 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
 
         {/* OFF CAMPUS button */}
         <button
-          onClick={isOffCampus ? undefined : handleCheckOut}
+          onClick={isOffCampus ? undefined : () => setShowOffCampusSheet(true)}
           disabled={isOffCampus}
           className={cn(
             'group relative flex w-full flex-col items-center gap-4 rounded-2xl border px-6 py-7 transition-all duration-200',
@@ -139,7 +134,6 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
               : '0 1px 6px rgba(14,30,70,0.06)',
           }}
         >
-          {/* Icon circle */}
           <div
             className={cn(
               'flex h-20 w-20 items-center justify-center rounded-full transition-all',
@@ -172,8 +166,10 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
       <OffCampusSheet
         open={showOffCampusSheet}
         onClose={() => setShowOffCampusSheet(false)}
-        onSuccess={() => onStatusChange('OFF_CAMPUS')}
-        onCheckoutSuccess={(eventId) => onCheckoutSuccess?.(eventId)}
+        onSuccess={(departureId) => {
+          onStatusChange('OFF_CAMPUS')
+          onCheckoutSuccess?.(departureId)
+        }}
       />
     </>
   )
