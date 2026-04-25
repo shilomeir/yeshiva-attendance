@@ -5,7 +5,6 @@ import {
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PresenceChart } from '@/components/analytics/PresenceChart'
@@ -73,6 +72,85 @@ const STAT_CARDS = [
 ]
 
 
+// ── 3D Pie Chart ────────────────────────────────────────────────────────────
+function Pie3DChart({ data }: { data: { name: string; value: number; color: string }[] }) {
+  const filtered = data.filter((d) => d.value > 0)
+  const total = filtered.reduce((s, d) => s + d.value, 0)
+  if (total === 0) return null
+
+  const W = 270, H = 210
+  const cx = W / 2
+  const topCy = 82
+  const rx = 114, ry = 48
+  const depth = 36
+  const clipId = 'p3d-front-clip'
+
+  const pt = (a: number, cy: number): [number, number] => [
+    cx + rx * Math.cos(a),
+    cy + ry * Math.sin(a),
+  ]
+  const f = (n: number) => n.toFixed(2)
+
+  // Single slice → complete 3D cylinder (everyone on campus)
+  if (filtered.length === 1) {
+    const { color } = filtered[0]
+    return (
+      <svg width={W} height={H} style={{ overflow: 'visible', filter: 'drop-shadow(0 10px 22px rgba(0,0,0,0.25))' }}>
+        <path
+          fill={color}
+          style={{ filter: 'brightness(0.52)' }}
+          d={`M ${cx - rx} ${topCy} A ${rx} ${ry} 0 0 1 ${cx + rx} ${topCy} L ${cx + rx} ${topCy + depth} A ${rx} ${ry} 0 0 0 ${cx - rx} ${topCy + depth} Z`}
+        />
+        <ellipse cx={cx} cy={topCy} rx={rx} ry={ry} fill={color} />
+      </svg>
+    )
+  }
+
+  const gapRad = (4.5 * Math.PI) / 180
+  let cum = -Math.PI / 2
+  const slices = filtered.map((d) => {
+    const span = (d.value / total) * 2 * Math.PI
+    const start = cum + gapRad / 2
+    const end = cum + span - gapRad / 2
+    cum += span
+    return { ...d, start, end, mid: (start + end) / 2 }
+  })
+
+  // Back-to-front sort for correct Z-ordering
+  const sorted = [...slices].sort((a, b) => Math.sin(a.mid) - Math.sin(b.mid))
+
+  return (
+    <svg width={W} height={H} style={{ overflow: 'visible', filter: 'drop-shadow(0 10px 22px rgba(0,0,0,0.25))' }}>
+      <defs>
+        {/* Clip side faces to front (lower) half only */}
+        <clipPath id={clipId}>
+          <rect x={cx - rx - 8} y={topCy} width={rx * 2 + 16} height={H + 20} />
+        </clipPath>
+      </defs>
+
+      {/* Phase 1: outer side faces, clipped to visible front half */}
+      {sorted.map(({ start, end, color }, i) => {
+        const large = end - start > Math.PI ? 1 : 0
+        const [tsx, tsy] = pt(start, topCy)
+        const [tex, tey] = pt(end, topCy)
+        const [bsx, bsy] = pt(start, topCy + depth)
+        const [bex, bey] = pt(end, topCy + depth)
+        const d = `M ${f(tsx)} ${f(tsy)} L ${f(bsx)} ${f(bsy)} A ${rx} ${ry} 0 ${large} 1 ${f(bex)} ${f(bey)} L ${f(tex)} ${f(tey)} A ${rx} ${ry} 0 ${large} 0 ${f(tsx)} ${f(tsy)} Z`
+        return <path key={`s${i}`} d={d} fill={color} clipPath={`url(#${clipId})`} style={{ filter: 'brightness(0.50)' }} />
+      })}
+
+      {/* Phase 2: top faces, back-to-front */}
+      {sorted.map(({ start, end, color }, i) => {
+        const large = end - start > Math.PI ? 1 : 0
+        const [sx, sy] = pt(start, topCy)
+        const [ex, ey] = pt(end, topCy)
+        const d = `M ${f(cx)} ${f(topCy)} L ${f(sx)} ${f(sy)} A ${rx} ${ry} 0 ${large} 1 ${f(ex)} ${f(ey)} Z`
+        return <path key={`t${i}`} d={d} fill={color} />
+      })}
+    </svg>
+  )
+}
+
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
@@ -83,7 +161,6 @@ export function DashboardPage() {
   const [, setTick] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [displayPct, setDisplayPct] = useState(0)
-  const [heroDone, setHeroDone] = useState(false)
   const animFrameRef = useRef<number | null>(null)
 
   // Broadcast notification state
@@ -181,13 +258,11 @@ export function DashboardPage() {
   useEffect(() => {
     if (isLoading) {
       setDisplayPct(0)
-      setHeroDone(false)
       return
     }
     const target = onCampusPct
     const duration = 2500
     const startTime = performance.now()
-    setHeroDone(false)
 
     const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
 
@@ -197,8 +272,6 @@ export function DashboardPage() {
       setDisplayPct(Math.round(easeOutCubic(progress) * target))
       if (progress < 1) {
         animFrameRef.current = requestAnimationFrame(tick)
-      } else {
-        setHeroDone(true)
       }
     }
 
@@ -254,40 +327,25 @@ export function DashboardPage() {
           boxShadow: 'var(--shadow-card)',
         }}
       >
-        <div className="p-5">
-          <div className="flex items-end gap-4">
-            {/* Number — pulses once when animation finishes */}
+        <div className="p-6">
+          <div className="flex flex-col items-center text-center gap-2">
             <span
-              key={heroDone ? 'done' : 'counting'}
-              className={`text-6xl font-extrabold leading-none tabular-nums${heroDone ? ' hero-pulse' : ''}`}
-              style={{
-                color: heroAccent,
-                '--pulse-color': heroAccent,
-                transition: 'color 0.4s ease',
-              } as React.CSSProperties}
+              className="text-7xl font-extrabold leading-none tabular-nums"
+              style={{ color: heroAccent, transition: 'color 0.4s ease' }}
             >
               {isLoading ? '—' : `${displayPct}%`}
             </span>
-            <div className="mb-1 flex flex-col gap-0.5">
-              <span className="text-base font-semibold text-[var(--text)]">מתוך התלמידים בישיבה כרגע</span>
-              {stats && (
-                <span className="text-sm text-[var(--text-muted)]">
-                  {stats.onCampus} מתוך {stats.total} תלמידים
-                </span>
-              )}
-            </div>
+            <span className="text-base font-semibold text-[var(--text)]">מתוך התלמידים בישיבה כרגע</span>
+            {stats && (
+              <span className="text-sm text-[var(--text-muted)]">
+                {stats.onCampus} מתוך {stats.total} תלמידים
+              </span>
+            )}
           </div>
-          {/* Bar — same live color, pulses once on finish */}
-          <div className="mt-4 h-2.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
+          <div className="mt-5 h-2.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
             <div
-              key={heroDone ? 'bar-done' : 'bar-counting'}
-              className={heroDone ? 'hero-pulse h-full rounded-full' : 'h-full rounded-full'}
-              style={{
-                width: `${displayPct}%`,
-                background: heroAccent,
-                '--pulse-color': heroAccent,
-                transition: 'background 0.4s ease',
-              } as React.CSSProperties}
+              className="h-full rounded-full"
+              style={{ width: `${displayPct}%`, background: heroAccent, transition: 'background 0.4s ease' }}
             />
           </div>
         </div>
@@ -328,47 +386,41 @@ export function DashboardPage() {
         </Card>
       )}
 
-      {/* Pie chart — 3 location categories */}
+      {/* Pie chart — 3D location distribution */}
       {!isLoading && pieData.length > 0 && (
         <div
-          className="overflow-hidden rounded-2xl p-5"
+          className="overflow-hidden rounded-2xl p-5 md:p-7"
           style={{
             background: 'var(--surface)',
             border: '1px solid var(--border)',
             boxShadow: 'var(--shadow-card)',
           }}
         >
-          {/* Section title */}
-          <div className="flex items-center gap-2 mb-5">
+          <div className="flex items-center gap-2 mb-6">
             <MapPin className="h-4 w-4 text-[var(--blue)]" />
             <span className="text-base font-semibold text-[var(--text)]">התפלגות מיקום תלמידים</span>
           </div>
 
-          {/* RTL row: legend on the right, pie on the left */}
-          <div className="flex flex-col-reverse sm:flex-row items-center gap-4" dir="rtl">
+          {/* Constrain width on wide screens + center */}
+          <div className="flex flex-col md:flex-row items-center justify-center gap-8 md:gap-14 max-w-2xl mx-auto" dir="rtl">
 
-            {/* ── Legend — right side in RTL ── */}
-            <div className="flex flex-col gap-6 flex-1 min-w-0 sm:pr-2">
+            {/* Legend */}
+            <div className="flex flex-col gap-5 min-w-[160px]">
               {pieData.map((entry) => (
-                <div key={entry.name} className="flex flex-col gap-1">
-                  <div className="flex items-center gap-2.5">
+                <div key={entry.name} className="flex flex-col gap-0.5">
+                  <div className="flex items-center gap-2">
                     <span
-                      className="inline-block h-3.5 w-3.5 rounded-full shrink-0"
+                      className="inline-block h-4 w-4 rounded shrink-0"
                       style={{ backgroundColor: entry.color }}
                     />
-                    <span className="text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-                      {entry.name}
-                    </span>
+                    <span className="text-sm font-semibold text-[var(--text-muted)]">{entry.name}</span>
                   </div>
-                  <div className="flex items-baseline gap-2.5 pr-6">
-                    <span
-                      className="text-5xl font-black tabular-nums leading-none"
-                      style={{ color: entry.color }}
-                    >
+                  <div className="flex items-baseline gap-2 pr-6">
+                    <span className="text-4xl font-black tabular-nums leading-none" style={{ color: entry.color }}>
                       {entry.value}
                     </span>
                     {stats && (
-                      <span className="text-xl font-bold text-[var(--text-muted)]">
+                      <span className="text-base font-bold text-[var(--text-muted)]">
                         {Math.round((entry.value / stats.total) * 100)}%
                       </span>
                     )}
@@ -377,34 +429,9 @@ export function DashboardPage() {
               ))}
             </div>
 
-            {/* ── Pie — left side in RTL ── */}
+            {/* 3D Pie */}
             <div className="shrink-0">
-              <PieChart width={270} height={270}>
-                <Pie
-                  data={pieData}
-                  cx={135}
-                  cy={130}
-                  innerRadius={68}
-                  outerRadius={118}
-                  paddingAngle={3}
-                  dataKey="value"
-                  startAngle={90}
-                  endAngle={-270}
-                >
-                  {pieData.map((entry, index) => (
-                    <Cell key={index} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{
-                    background: 'var(--surface)',
-                    border: '1px solid var(--border)',
-                    borderRadius: '8px',
-                    direction: 'rtl',
-                    fontFamily: 'Heebo, sans-serif',
-                  }}
-                />
-              </PieChart>
+              <Pie3DChart data={pieData} />
             </div>
           </div>
         </div>

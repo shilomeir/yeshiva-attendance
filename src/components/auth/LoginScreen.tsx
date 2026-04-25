@@ -60,24 +60,24 @@ export function LoginScreen() {
   }
 
   return (
-    <div
-      className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden"
-      style={{ background: 'var(--bg)' }}
-    >
-      {/* Subtle decorative circles */}
+    <div className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden">
+      {/* Building photo background */}
       <div
-        className="pointer-events-none absolute -top-32 -end-32 h-96 w-96 rounded-full opacity-40"
-        style={{ background: 'radial-gradient(circle, #BFDBFE 0%, transparent 70%)' }}
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: 'url(/yeshiva-building.jpg)' }}
       />
+      {/* Dark overlay for legibility */}
       <div
-        className="pointer-events-none absolute -bottom-40 -start-24 h-80 w-80 rounded-full opacity-30"
-        style={{ background: 'radial-gradient(circle, #C7D2FE 0%, transparent 70%)' }}
+        className="absolute inset-0"
+        style={{
+          background: 'linear-gradient(to bottom, rgba(8,18,52,0.72) 0%, rgba(8,18,52,0.52) 45%, rgba(8,18,52,0.78) 100%)',
+        }}
       />
 
       {/* Logo above card */}
       <div className="animate-slide-up relative z-10 mb-8 flex flex-col items-center gap-3">
-        <img src="/logo.png" alt="ישיבת שבי חברון" className="h-28 w-auto drop-shadow-md" draggable={false} />
-        <p className="text-sm font-medium text-[var(--text-muted)]">מערכת נוכחות</p>
+        <img src="/logo.png" alt="ישיבת שבי חברון" className="h-28 w-auto drop-shadow-xl" draggable={false} />
+        <p className="text-sm font-medium text-white/75 tracking-wide">מערכת נוכחות</p>
       </div>
 
       {/* Login card */}
@@ -86,7 +86,8 @@ export function LoginScreen() {
         style={{
           background: 'var(--surface)',
           border: '1px solid var(--border)',
-          boxShadow: '0 8px 32px rgba(14, 30, 70, 0.1), 0 2px 8px rgba(14, 30, 70, 0.06)',
+          boxShadow: '0 16px 48px rgba(0,0,0,0.4), 0 4px 12px rgba(0,0,0,0.2)',
+          backdropFilter: 'blur(8px)',
         }}
       >
         {/* Blue accent top strip */}
@@ -96,16 +97,13 @@ export function LoginScreen() {
         />
 
         <div className="px-7 py-8">
-          <div className="mb-6">
+          <div className="mb-6 text-center">
             <h1 className="text-xl font-bold text-[var(--text)]">כניסה למערכת</h1>
             <p className="mt-0.5 text-sm text-[var(--text-muted)]">הזן את מספר תעודת הזהות שלך</p>
           </div>
 
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="idNumber" className="text-sm font-medium text-[var(--text-muted)]">
-                מספר תעודת זהות
-              </label>
               <input
                 id="idNumber"
                 type="text"
