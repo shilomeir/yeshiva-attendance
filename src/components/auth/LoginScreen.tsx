@@ -60,17 +60,20 @@ export function LoginScreen() {
   }
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden">
-      {/* Building photo background */}
+    <div
+      className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden"
+      style={{ background: 'linear-gradient(155deg, #0f1f5c 0%, #1a3a8f 38%, #0e2d6e 65%, #0a1840 100%)' }}
+    >
+      {/* Building photo — shows automatically once yeshiva-building.jpg is in /public */}
       <div
         className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-        style={{ backgroundImage: 'url(/yeshiva-building.jpg)' }}
+        style={{ backgroundImage: 'url(/yeshiva-building.jpg)', opacity: 0.45 }}
       />
-      {/* Dark overlay for legibility */}
+      {/* Depth overlay */}
       <div
         className="absolute inset-0"
         style={{
-          background: 'linear-gradient(to bottom, rgba(8,18,52,0.72) 0%, rgba(8,18,52,0.52) 45%, rgba(8,18,52,0.78) 100%)',
+          background: 'linear-gradient(to bottom, rgba(6,14,42,0.55) 0%, rgba(6,14,42,0.25) 50%, rgba(6,14,42,0.62) 100%)',
         }}
       />
 
