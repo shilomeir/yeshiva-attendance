@@ -701,7 +701,7 @@ export class MockApiClient implements IApiClient {
         classId,
         total: cs.length,
         onCampus: cs.filter((s) => s.currentStatus === 'ON_CAMPUS').length,
-        offCampus: cs.filter((s) => s.currentStatus !== 'ON_CAMPUS').length,
+        offCampus: cs.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length,
       })
     }
     return stats.sort((a, b) => {

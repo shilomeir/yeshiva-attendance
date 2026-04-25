@@ -97,13 +97,12 @@ export function DashboardPage() {
     if (!isBackground) setIsLoading(true)
     api.tickDepartures().catch(() => {})
     try {
-      const [data, absent, clsStats, allStudents, pendingDeps, activeDeps] = await Promise.all([
+      // Core stats — all query the students table directly; must succeed together
+      const [data, absent, clsStats, allStudents] = await Promise.all([
         api.getDashboardStats(),
         api.getLongAbsentStudents(7),
         api.getClassStats(),
         api.getStudents(),
-        api.listDepartures({ status: 'PENDING' }),
-        api.listDepartures({ status: ['ACTIVE', 'APPROVED'] }),
       ])
       setStats(data)
       setLongAbsentStudents(absent)
@@ -114,7 +113,18 @@ export function DashboardPage() {
         breakdown[getLocationCategory(s)]++
       }
       setLocationBreakdown(breakdown)
+    } catch {
+      console.error('Failed to load dashboard stats')
+    } finally {
+      if (!isBackground) setIsLoading(false)
+    }
 
+    // Departure data — queries v_calendar_departures view; failure must not zero out student stats
+    try {
+      const [pendingDeps, activeDeps] = await Promise.all([
+        api.listDepartures({ status: 'PENDING' }),
+        api.listDepartures({ status: ['ACTIVE', 'APPROVED'] }),
+      ])
       setUrgentRequests(pendingDeps.filter((d) => d.is_urgent))
 
       const todayStr = new Date().toISOString().slice(0, 10)
@@ -125,9 +135,7 @@ export function DashboardPage() {
       todayDeps.sort((a, b) => a.start_at.localeCompare(b.start_at))
       setTodayDepartures(todayDeps)
     } catch {
-      console.error('Failed to load dashboard stats')
-    } finally {
-      if (!isBackground) setIsLoading(false)
+      console.error('Failed to load departure data')
     }
   }
 
