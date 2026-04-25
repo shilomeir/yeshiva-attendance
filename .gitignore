@@ -28,3 +28,6 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Supabase CLI cache
+supabase/.temp/
