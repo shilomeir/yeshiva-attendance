@@ -948,7 +948,7 @@ BEGIN
     PERFORM cron.schedule(
       'tick-departures',
       '*/1 * * * *',
-      $$SELECT tick_departures()$$
+      'SELECT tick_departures()'
     );
 
   END IF;
