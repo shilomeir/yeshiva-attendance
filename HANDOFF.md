@@ -12,9 +12,9 @@
 ## Session Goal
 Investigate and fix a bug where updating a student's status to **'off campus' fails for both Admin and Student roles**.
 
-## Status: ✅ COMPLETE
+## Status: ✅ SHIPPED
 
-All four bugs identified and fixed. Tests written and passing. Build clean.
+All four bugs identified, fixed, tested, committed (`ada46dc`), and pushed to `main`. Vercel deployment triggered automatically.
 
 ---
 
@@ -92,15 +92,24 @@ New file: `src/lib/api/__tests__/mockClient.offcampus.test.ts`
 
 ---
 
+## Deployment Record
+
+| Step | Result |
+|------|--------|
+| `supabase db push` | **Skipped** — no new migrations in this session; CLI not linked in working environment. Existing migrations (`20260423_unified_departures.sql` etc.) were already applied to production. |
+| `git commit` | `ada46dc` on `main` — "fix: accurate previousStatus audit + surface cancel/location errors to student UI" |
+| `git push origin main` | ✅ `d2c5e72..ada46dc → main` |
+| Vercel build | Triggered automatically. Check `https://shavey-hevron.vercel.app` to confirm. |
+
+---
+
 ## Next Steps (for a fresh session)
 
-The bug fix is complete and verified. Possible follow-up work:
+1. **Verify production**: Open `https://shavey-hevron.vercel.app`, log in as admin, and manually trigger an OFF_CAMPUS override for a test student — confirm no silent failure and that the audit `previousStatus` is correct.
 
-1. **Deploy**: Push to `main` → Vercel auto-deploys to `https://shavey-hevron.vercel.app`. Confirm the OFF_CAMPUS override works end-to-end in production.
+2. **Supabase integration test (optional)**: Bug 1's exact fix (the `cancelDeparture` result check) is only fully proven with a real Supabase DB. Consider a staging environment test where `cancel_departure` is forced to return `{ error }`.
 
-2. **Supabase integration test (optional)**: Bug 1's exact fix (the `cancelDeparture` result check) is only fully proven with a real Supabase DB. Consider a Supabase local dev test or a staging environment test where `cancel_departure` is forced to return `{ error }`.
-
-3. **`SyncStatusBar` offline error surfacing (optional follow-up to Bug 4)**: The sync engine now logs to console, but the `SyncStatusBar` component (`src/components/shared/SyncStatusBar.tsx`) could be extended to show a user-visible warning when `retryCount` exceeds a threshold (e.g., 3).
+3. **`SyncStatusBar` offline error surfacing (optional follow-up to Bug 4)**: The sync engine now logs to console, but `src/components/shared/SyncStatusBar.tsx` could be extended to show a user-visible warning when `retryCount` exceeds a threshold (e.g., 3).
 
 4. **Pre-existing lint errors**: Two pre-existing errors in `src/components/ui/input.tsx` (empty interface) and `src/main.tsx` (empty catch block) that were there before this session. Safe to fix in a separate PR.
 
