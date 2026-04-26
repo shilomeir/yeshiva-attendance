@@ -511,10 +511,13 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
     const students = (data ?? []) as Array<{ currentStatus: string; pendingApproval: boolean; lastSeen: string | null }>
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    const onCampus  = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
+    const offCampus = students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
     return {
-      total:     students.length,
-      onCampus:  students.filter(s => s.currentStatus === 'ON_CAMPUS').length,
-      offCampus: students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length,
+      // Exclude PENDING-status students from total so the on-campus % reflects active students only
+      total:     onCampus + offCampus,
+      onCampus,
+      offCampus,
       pending:   students.filter(s => s.pendingApproval).length,
       longAbsent: students.filter(s =>
         s.currentStatus !== 'ON_CAMPUS' && s.lastSeen && s.lastSeen < sevenDaysAgo

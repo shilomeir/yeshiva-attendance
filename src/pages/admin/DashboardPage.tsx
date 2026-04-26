@@ -174,35 +174,43 @@ export function DashboardPage() {
     if (!isBackground) setIsLoading(true)
     api.tickDepartures().catch(() => {})
     try {
-      const [data, absent, clsStats, allStudents, pendingDeps, activeDeps] = await Promise.all([
-        api.getDashboardStats(),
-        api.getLongAbsentStudents(7),
-        api.getClassStats(),
-        api.getStudents(),
-        api.listDepartures({ status: 'PENDING' }),
-        api.listDepartures({ status: ['ACTIVE', 'APPROVED'] }),
-      ])
-      setStats(data)
-      setLongAbsentStudents(absent)
-      setClassStats(clsStats)
+      const [statsRes, absentRes, clsStatsRes, allStudentsRes, pendingDepsRes, activeDepsRes] =
+        await Promise.allSettled([
+          api.getDashboardStats(),
+          api.getLongAbsentStudents(7),
+          api.getClassStats(),
+          api.getStudents(),
+          api.listDepartures({ status: 'PENDING' }),
+          api.listDepartures({ status: ['ACTIVE', 'APPROVED'] }),
+        ])
 
-      const breakdown = { inYeshiva: 0, inArea: 0, far: 0 }
-      for (const s of allStudents as Student[]) {
-        breakdown[getLocationCategory(s)]++
+      if (statsRes.status === 'fulfilled') setStats(statsRes.value)
+      else console.error('getDashboardStats failed', statsRes.reason)
+
+      if (absentRes.status === 'fulfilled') setLongAbsentStudents(absentRes.value)
+
+      if (clsStatsRes.status === 'fulfilled') setClassStats(clsStatsRes.value)
+
+      if (allStudentsRes.status === 'fulfilled') {
+        const breakdown = { inYeshiva: 0, inArea: 0, far: 0 }
+        for (const s of allStudentsRes.value as Student[]) {
+          breakdown[getLocationCategory(s)]++
+        }
+        setLocationBreakdown(breakdown)
       }
-      setLocationBreakdown(breakdown)
 
-      setUrgentRequests(pendingDeps.filter((d) => d.is_urgent))
+      if (pendingDepsRes.status === 'fulfilled')
+        setUrgentRequests(pendingDepsRes.value.filter((d) => d.is_urgent))
 
-      const todayStr = new Date().toISOString().slice(0, 10)
-      const todayDeps = activeDeps.filter((d) => {
-        const depDate = new Date(d.start_at).toISOString().slice(0, 10)
-        return depDate === todayStr && minsFromNow(d.end_at) > -60
-      })
-      todayDeps.sort((a, b) => a.start_at.localeCompare(b.start_at))
-      setTodayDepartures(todayDeps)
-    } catch {
-      console.error('Failed to load dashboard stats')
+      if (activeDepsRes.status === 'fulfilled') {
+        const todayStr = new Date().toISOString().slice(0, 10)
+        const todayDeps = activeDepsRes.value.filter((d) => {
+          const depDate = new Date(d.start_at).toISOString().slice(0, 10)
+          return depDate === todayStr && minsFromNow(d.end_at) > -60
+        })
+        todayDeps.sort((a, b) => a.start_at.localeCompare(b.start_at))
+        setTodayDepartures(todayDeps)
+      }
     } finally {
       if (!isBackground) setIsLoading(false)
     }
