@@ -100,7 +100,8 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       })
 
       if ('error' in result) {
-        toast({ title: 'שגיאה', description: (result as { error: string }).error, variant: 'destructive' })
+        const r = result as { error: string; message?: string }
+        toast({ title: 'שגיאה', description: r.message ?? r.error, variant: 'destructive' })
         setStage(forcePending ? 'full' : 'form')
         return
       }

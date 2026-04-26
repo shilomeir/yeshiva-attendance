@@ -61,8 +61,8 @@ export async function processQueue(): Promise<void> {
           const eventId = (item.payload as { id: string }).id
           await db.events.update(eventId, { syncedAt: new Date().toISOString() })
         }
-      } catch {
-        // Leave item in queue and increment retry counter
+      } catch (err) {
+        console.error('[syncEngine] Failed to sync item', item.id, item.operation, item.tableName, err)
         await db.syncQueue.update(item.id, { retryCount: item.retryCount + 1 })
       }
     }

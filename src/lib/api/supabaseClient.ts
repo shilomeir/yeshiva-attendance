@@ -445,18 +445,23 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async createAdminOverride(studentId: string, newStatus: StudentStatus, note?: string): Promise<AdminOverride> {
-    // Admin direct status override → creates an ADMIN_OVERRIDE departure when setting OFF_CAMPUS,
-    // or cancels the active departure when setting ON_CAMPUS.
+    // Capture previousStatus BEFORE any side effects so the audit record is accurate.
+    // (submitDeparture and cancelDeparture both mutate students.currentStatus server-side.)
+    const studentBefore = await this.getStudent(studentId)
+    const previousStatus = studentBefore?.currentStatus ?? 'ON_CAMPUS'
+
     if (newStatus === 'OFF_CAMPUS') {
       // Cancel any live departures first to avoid the GiST EXCLUDE overlap constraint.
-      // Without this, if the student has a PENDING/APPROVED/ACTIVE departure that overlaps
-      // the new ADMIN_OVERRIDE window, the INSERT would fail with a constraint violation.
       const liveDeps = await this.listDepartures({
         studentId,
         status: ['PENDING', 'APPROVED', 'ACTIVE'],
       })
       for (const dep of liveDeps) {
-        await this.cancelDeparture(dep.id, 'admin', 'ADMIN', 'בוטל עקב עקיפת סטטוס ידנית')
+        const cancelResult = await this.cancelDeparture(dep.id, 'admin', 'ADMIN', 'בוטל עקב עקיפת סטטוס ידנית')
+        if ('error' in cancelResult) {
+          const r = cancelResult as { error: string; message?: string }
+          throw new Error(r.message ?? r.error)
+        }
       }
 
       // Create a departure with ADMIN_OVERRIDE source (valid until end of day by default)
@@ -476,13 +481,18 @@ export class SupabaseApiClient implements IApiClient {
       })
 
       if ('error' in result) {
-        throw new Error((result as { error: string }).error)
+        const r = result as { error: string; message?: string }
+        throw new Error(r.message ?? r.error)
       }
     } else if (newStatus === 'ON_CAMPUS') {
       // Cancel any active departure for this student
       const activeDeps = await this.listDepartures({ studentId, status: 'ACTIVE' })
       for (const dep of activeDeps) {
-        await this.cancelDeparture(dep.id, 'admin', 'ADMIN', note)
+        const cancelResult = await this.cancelDeparture(dep.id, 'admin', 'ADMIN', note)
+        if ('error' in cancelResult) {
+          const r = cancelResult as { error: string; message?: string }
+          throw new Error(r.message ?? r.error)
+        }
       }
     } else {
       // Direct status update for other statuses (e.g. resetting PENDING)
@@ -490,13 +500,12 @@ export class SupabaseApiClient implements IApiClient {
     }
 
     // Write explicit audit record for direct admin override
-    const student = await this.getStudent(studentId)
     const override = {
       id: uuidv4(),
       studentId,
       adminId: 'admin',
       action: 'manual_override',
-      previousStatus: student?.currentStatus ?? 'ON_CAMPUS',
+      previousStatus,
       newStatus,
       timestamp: new Date().toISOString(),
       note: note ?? null,
