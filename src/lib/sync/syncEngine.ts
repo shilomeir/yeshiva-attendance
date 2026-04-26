@@ -2,7 +2,9 @@ import { db } from '@/lib/db/schema'
 
 let isSyncing = false
 
-export type SyncListener = (state: { isSyncing: boolean; queueLength: number }) => void
+const STUCK_RETRY_THRESHOLD = 3
+
+export type SyncListener = (state: { isSyncing: boolean; queueLength: number; failedCount: number }) => void
 const listeners: SyncListener[] = []
 
 export function addSyncListener(listener: SyncListener): () => void {
@@ -13,16 +15,21 @@ export function addSyncListener(listener: SyncListener): () => void {
   }
 }
 
-function notifyListeners(syncing: boolean, queueLength: number): void {
+async function getFailedCount(): Promise<number> {
+  return db.syncQueue.where('retryCount').aboveOrEqual(STUCK_RETRY_THRESHOLD).count()
+}
+
+async function notifyListeners(syncing: boolean, queueLength: number): Promise<void> {
+  const failedCount = await getFailedCount()
   for (const listener of listeners) {
-    listener({ isSyncing: syncing, queueLength })
+    listener({ isSyncing: syncing, queueLength, failedCount })
   }
 }
 
 /** Call after manually adding items to the sync queue to refresh the status bar. */
 export async function notifyQueueChanged(): Promise<void> {
   const len = await getQueueLength()
-  notifyListeners(isSyncing, len)
+  await notifyListeners(isSyncing, len)
 }
 
 export async function processQueue(): Promise<void> {
@@ -33,7 +40,7 @@ export async function processQueue(): Promise<void> {
   if (queueItems.length === 0) return
 
   isSyncing = true
-  notifyListeners(true, queueItems.length)
+  await notifyListeners(true, queueItems.length)
 
   try {
     // Dynamic import to avoid circular dependency
@@ -69,7 +76,7 @@ export async function processQueue(): Promise<void> {
   } finally {
     isSyncing = false
     const remaining = await db.syncQueue.count()
-    notifyListeners(false, remaining)
+    await notifyListeners(false, remaining)
   }
 }
 
