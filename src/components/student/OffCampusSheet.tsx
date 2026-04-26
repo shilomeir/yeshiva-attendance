@@ -21,6 +21,14 @@ function nowTimeStr(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function twoHoursLaterStr(): string {
+  const d = new Date()
+  d.setHours(d.getHours() + 2)
+  // If it rolled past midnight, cap at 23:59 (same-day; user can set returnDate for multi-day)
+  if (d.getDate() !== new Date().getDate()) d.setHours(23, 59, 0, 0)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 function toDateInput(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
@@ -47,7 +55,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
   const [stage, setStage] = useState<Stage>('form')
   const [reason, setReason] = useState('')
   const [startTime, setStartTime] = useState(nowTimeStr)
-  const [endTime, setEndTime] = useState('20:00')
+  const [endTime, setEndTime] = useState(twoHoursLaterStr)
   const [returnDate, setReturnDate] = useState('')
   const [quotaInfo, setQuotaInfo] = useState<QuotaFullResult | null>(null)
 
@@ -58,7 +66,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       setStage('form')
       setReason('')
       setStartTime(nowTimeStr())
-      setEndTime('20:00')
+      setEndTime(twoHoursLaterStr())
       setReturnDate('')
       setQuotaInfo(null)
     }
@@ -75,6 +83,12 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
     try {
       const startAt = new Date(`${todayStr}T${startTime}:00`).toISOString()
       const endAt = new Date(`${effectiveEndDate}T${endTime}:00`).toISOString()
+
+      if (new Date(endAt) <= new Date(startAt)) {
+        toast({ title: 'שגיאה', description: 'שעת החזרה חייבת להיות אחרי שעת היציאה', variant: 'destructive' })
+        setStage(forcePending ? 'full' : 'form')
+        return
+      }
 
       const result = await api.submitDeparture({
         studentId: currentUser.id,

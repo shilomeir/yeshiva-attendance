@@ -475,7 +475,7 @@ VAPID_SUBJECT            # mailto:... for VAPID
 - [ ] Time-restricted quota (currently 24/7).
 - [ ] Offline conflict resolution (currently last-write-wins; if server returns `QUOTA_FULL` for an offline-queued departure, a toast informs the student on reconnect).
 - [ ] Automated tests (unit / integration).
-- [ ] Apply `20260423_unified_departures.sql` migration in Supabase Dashboard SQL Editor (main schema migration for unified departures).
+- [x] Apply `20260423_unified_departures.sql` migration in Supabase Dashboard SQL Editor (main schema migration for unified departures). ✅ Applied 2026-04-26.
 
 ---
 

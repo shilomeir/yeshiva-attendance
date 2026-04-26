@@ -568,18 +568,31 @@ export class MockApiClient implements IApiClient {
     const now = new Date().toISOString()
 
     if (newStatus === 'OFF_CAMPUS') {
-      // Create an admin-override departure (24-hour window)
-      const endAt = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString()
-      await this.submitDeparture({
+      // Cancel existing live departures first to avoid overlap conflicts
+      const live = await db.departures
+        .where('student_id')
+        .equals(studentId)
+        .filter((d) => d.status === 'PENDING' || d.status === 'APPROVED' || d.status === 'ACTIVE')
+        .toArray()
+      for (const d of live) {
+        await db.departures.update(d.id, { status: 'CANCELLED', cancelled_at: now })
+      }
+
+      // Create an admin-override departure (valid until end of day by default)
+      const endDate = new Date()
+      endDate.setHours(23, 59, 0, 0)
+      if (endDate <= new Date()) endDate.setDate(endDate.getDate() + 1)
+      const result = await this.submitDeparture({
         studentId,
         startAt: now,
-        endAt,
+        endAt: endDate.toISOString(),
         reason: note ?? null,
         source: 'ADMIN_OVERRIDE',
         approvedBy: 'admin',
         actorId: 'admin',
         actorRole: 'ADMIN',
       })
+      if ('error' in result) throw new Error((result as { error: string }).error)
     } else if (newStatus === 'ON_CAMPUS') {
       // Cancel all active departures for this student
       const active = await db.departures

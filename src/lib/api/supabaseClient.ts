@@ -448,13 +448,24 @@ export class SupabaseApiClient implements IApiClient {
     // Admin direct status override → creates an ADMIN_OVERRIDE departure when setting OFF_CAMPUS,
     // or cancels the active departure when setting ON_CAMPUS.
     if (newStatus === 'OFF_CAMPUS') {
+      // Cancel any live departures first to avoid the GiST EXCLUDE overlap constraint.
+      // Without this, if the student has a PENDING/APPROVED/ACTIVE departure that overlaps
+      // the new ADMIN_OVERRIDE window, the INSERT would fail with a constraint violation.
+      const liveDeps = await this.listDepartures({
+        studentId,
+        status: ['PENDING', 'APPROVED', 'ACTIVE'],
+      })
+      for (const dep of liveDeps) {
+        await this.cancelDeparture(dep.id, 'admin', 'ADMIN', 'בוטל עקב עקיפת סטטוס ידנית')
+      }
+
       // Create a departure with ADMIN_OVERRIDE source (valid until end of day by default)
       const startAt = new Date()
       const endAt = new Date()
       endAt.setHours(23, 59, 0, 0)
       if (endAt <= startAt) endAt.setDate(endAt.getDate() + 1)
 
-      await this.submitDeparture({
+      const result = await this.submitDeparture({
         studentId,
         startAt,
         endAt,
@@ -463,6 +474,10 @@ export class SupabaseApiClient implements IApiClient {
         actorId: 'admin',
         actorRole: 'ADMIN',
       })
+
+      if ('error' in result) {
+        throw new Error((result as { error: string }).error)
+      }
     } else if (newStatus === 'ON_CAMPUS') {
       // Cancel any active departure for this student
       const activeDeps = await this.listDepartures({ studentId, status: 'ACTIVE' })
