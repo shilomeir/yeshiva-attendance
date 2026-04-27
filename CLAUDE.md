@@ -4,6 +4,125 @@
 
 ---
 
+## 0. 🏛️ GOLD STANDARD CHARTER — The Locked Core
+
+> **Status (2026-04-27):** The system is live, the connection to Supabase is rock-solid, and the concurrency model below is proven in production. This section is the **constitution** of the project. Treat the Backend (DB schema, RPCs, view, cron, triggers) as an **immutable API**. You may not modify it without the protocol in §0.6.
+
+### 0.1 The Engineering Philosophy
+
+The system used to suffer from front-end "spaghetti" where the client made multiple round-trips to compute quotas, statuses, and overlaps — opening the door to race conditions and inconsistent state across devices. We solved this by **pushing all integrity logic into the database**:
+
+- The DB is the **sole arbiter of truth** for departures, quotas, and status transitions.
+- The Edge Functions and the React client are **dumb couriers** of intent — they ask the DB to do something, the DB decides if it's allowed, and the result is broadcast back via Realtime.
+- The client never owns the truth, never enforces the quota alone, never advances the state machine, and never inserts into `departures` directly.
+
+### 0.2 The Four Pillars of the Gold Core
+
+> Each pillar below is a load-bearing wall. Removing or modifying it without explicit user approval will reintroduce the race conditions and inconsistencies we worked hard to eliminate.
+
+#### Pillar 1 — The RPC Layer (the only door into `departures`)
+
+Every write to the `departures` table goes through one of these `SECURITY DEFINER` PL/pgSQL functions, defined in `supabase/migrations/20260423_unified_departures.sql`:
+
+| RPC | Lines | Purpose | Allowed transitions |
+|-----|-------|---------|---------------------|
+| `submit_departure(p_student_id, p_start_at, p_end_at, p_reason, p_is_urgent, p_source, p_approved_by, p_force_pending, p_actor_id, p_actor_role)` | 258–433 | The single entry point for all new departures. Validates time window, denormalizes `class_id`, takes the advisory lock, computes the dynamic quota, decides initial status, inserts the row, and (if `start_at ≤ now`) flips it to `ACTIVE` and the student to `OFF_CAMPUS` in the same transaction. | `(none)` → `PENDING` / `APPROVED` / `ACTIVE`, or returns `QUOTA_FULL` with no insert |
+| `approve_departure(p_id, p_actor_id, p_actor_role, p_note)` | 440–503 | `SELECT … FOR UPDATE` then promote `PENDING` → `APPROVED`, or directly to `ACTIVE` if the start time has already passed. | `PENDING` → `APPROVED` / `ACTIVE` |
+| `reject_departure(p_id, p_actor_id, p_actor_role, p_note)` | 510–550 | `SELECT … FOR UPDATE` then `PENDING` → `REJECTED` (terminal). | `PENDING` → `REJECTED` |
+| `cancel_departure(p_id, p_actor_id, p_actor_role, p_note)` | 560–617 | `SELECT … FOR UPDATE` then any non-terminal → `CANCELLED`. If the cancelled row was `ACTIVE`, the student is returned `ON_CAMPUS` only when no other ACTIVE departure remains for them. | `PENDING` / `APPROVED` / `ACTIVE` → `CANCELLED` |
+| `return_departure(p_id, p_student_id, p_gps_lat, p_gps_lng)` | 624–697 | Student presses "חזרתי". `SELECT … FOR UPDATE`, flip `ACTIVE` → `COMPLETED`, append a linked `CHECK_IN` row to `events`, and clear `currentStatus` to `ON_CAMPUS` (gated on no-other-active). | `ACTIVE` → `COMPLETED` |
+| `tick_departures()` | 706–782 | The only code that advances the state machine based on wall-clock time. Activates due `APPROVED` rows, completes finished `ACTIVE` rows, refreshes `lastSeen` on overstays (24h+ past `end_at`), and purges terminal rows older than 30 days from `end_at`. | `APPROVED` → `ACTIVE`, `ACTIVE` → `COMPLETED`, hard-DELETE retention |
+
+**Contract:** No application code may `INSERT`/`UPDATE` `departures` outside these RPCs. The only direct queries on the table allowed in `src/lib/api/supabaseClient.ts` are read-only `SELECT`s (push-token lookup at L226–230, analytics aggregates at L578–583 and L597–601). Do not add others — query `v_calendar_departures` instead.
+
+#### Pillar 2 — The Concurrency Model (race conditions, by design, cannot occur)
+
+Three independent guards stack on top of each other:
+
+1. **Per-class advisory lock** — `submit_departure` calls `PERFORM pg_advisory_xact_lock(hashtext(v_class_id))` at line 312, *before* the quota count and *inside the same transaction* as the `INSERT`. Two students from the same class clicking "צא" at the same millisecond serialize through this lock; the second sees the first's row in its quota count. The lock is released on `COMMIT`.
+2. **GiST `EXCLUDE` constraint** — `departures_no_overlap` (migration L88–94) uses `btree_gist` to forbid two **live** departures (`status IN ('PENDING','APPROVED','ACTIVE')`) for the same `student_id` whose `tstzrange(start_at, end_at, '[)')` overlaps. This closes the "stack two departures to bypass quota" attack at the storage layer.
+3. **Partial unique index** — `departures_one_active_per_student` (L97–99) is a `UNIQUE INDEX … WHERE status = 'ACTIVE'`. Belt-and-suspenders: even if a future RPC bug produced two `ACTIVE` rows for the same student, the DB rejects the second.
+
+In addition, every state-changing RPC (`approve_*`, `reject_*`, `cancel_*`, `return_*`) uses `SELECT … FOR UPDATE` on the row before mutating it, so admins on different devices cannot race to approve and reject the same `PENDING` row.
+
+#### Pillar 3 — The Read Path (`v_calendar_departures` + Realtime)
+
+- **Single read view:** `v_calendar_departures` (migration L146–176) joins `departures` with `students` and exposes only the four "live" statuses (`PENDING / APPROVED / ACTIVE / COMPLETED`) plus an `is_overdue_alert` flag. `CANCELLED` and `REJECTED` rows are filtered out at the view level — admin and supervisor dashboards literally cannot see them by accident. The view is granted to `authenticated` and `anon`.
+- **Single client API:** `IApiClient.listDepartures(options)` in `src/lib/api/types.ts:106` is the only TypeScript surface that reads departures; its Supabase implementation (`supabaseClient.ts:299–324`) queries the view and nothing else.
+- **Single realtime channel:** `useDeparturesRealtime` (`src/hooks/useDeparturesRealtime.ts`) opens **one** Supabase Realtime channel named `departures-realtime` and forwards `INSERT/UPDATE/DELETE` to the page-level `onAnyChange` callback. Every dashboard subscribes through this hook — never opens its own channel.
+
+  Current consumers (do not duplicate, do not bypass):
+  - `src/components/admin/AbsenceCalendar.tsx:104`
+  - `src/pages/admin/DashboardPage.tsx:235`
+  - `src/pages/admin/PendingRequestsPage.tsx:50`
+  - `src/pages/admin/ExceptionsPage.tsx:658`
+  - `src/pages/class-supervisor/ClassSupervisorDashboard.tsx:491`
+  - `src/pages/student/HomePage.tsx:87`
+  - `src/pages/student/HistoryPage.tsx:69`
+  - `src/pages/student/AbsenceRequestPage.tsx:81`
+
+#### Pillar 4 — The Automatic Lifecycle (`pg_cron` + the audit trigger)
+
+- **`pg_cron` schedule:** `cron.schedule('tick-departures', '*/1 * * * *', $$SELECT tick_departures()$$)` (migration L948–952). Every 60 seconds, the DB advances time-driven transitions itself. There are **no client-side timers**, no `setInterval` over departures, no Edge Function ticker.
+- **Audit trigger:** `departures_audit_trigger_fn` + the `departures_audit_insert` / `departures_audit_update` triggers (migration L186–239) write one row to `admin_overrides` for every `INSERT` and every status change. Auditing is **structurally impossible to forget** — even a manual SQL `UPDATE` from the Supabase dashboard would be logged.
+- **Lifecycle timestamps:** Each transition stamps exactly one of `approved_at / activated_at / completed_at / cancelled_at / rejected_at`. The audit log + these timestamps make every departure's full history reconstructable.
+
+### 0.3 What "the Backend is an immutable API" means in practice
+
+You may freely:
+
+- ✅ Read `v_calendar_departures` from any new component.
+- ✅ Call any RPC listed in `IApiClient` from any new component.
+- ✅ Subscribe to realtime via `useDeparturesRealtime`.
+- ✅ Build entirely new screens, animations, layouts, and shadcn/ui components in Hebrew RTL.
+
+You may **not** without explicit user approval (see §0.6):
+
+- ❌ Modify or extend the signature/body of any RPC in §0.2 Pillar 1.
+- ❌ Add columns to `departures` or change its constraints (CHECK, EXCLUDE, indexes).
+- ❌ Change the `v_calendar_departures` view (added/removed columns, changed `WHERE`).
+- ❌ Edit the `tick_departures()` cron function or its `*/1 * * * *` schedule.
+- ❌ Edit the audit trigger or remove its `AFTER INSERT/UPDATE` bindings.
+- ❌ Add a new direct `INSERT`/`UPDATE` on `departures` from anywhere in `src/`.
+- ❌ Open a second Realtime channel on `departures` outside `useDeparturesRealtime`.
+- ❌ Edit `calcQuota()` in `src/lib/quota.ts` (it must mirror the RPC formula at migration L319).
+
+### 0.4 Mandatory Pre-flight Scan (run before *every* edit)
+
+Before you write a single line of code, do the following — even for "small" UI tweaks:
+
+1. **Identify the data path.** Which RPC, which view, which realtime hook is the screen you're touching wired into? Open them and read the contracts.
+2. **Grep for the RPC name** (`submit_departure`, `cancel_departure`, etc.) to see every call-site, so a UI rename doesn't break an unrelated screen.
+3. **Verify the realtime hook is mounted.** If the screen subscribes to `useDeparturesRealtime`, your change must not unmount it conditionally or strip its callback.
+4. **Confirm the IApiClient method exists** in both `supabaseClient.ts` *and* `mockClient.ts`. If you add a method, add it in both.
+5. **Re-read §0.3.** If your task seems to require crossing into the "may not" list, stop and follow §0.6 before coding.
+
+### 0.5 Creative Sandbox (the front end is yours)
+
+Inside the boundary set by Pillars 1–4, you have a wide brief:
+
+- Use the full **shadcn/ui** + **Tailwind** + **Lucide** vocabulary.
+- Hebrew RTL, dark-mode aware via the CSS variables in §17.
+- Push the visual language toward "cutting-edge product" — micro-interactions, motion, density, information hierarchy.
+- Refactor components, split files, introduce hooks, add stores — as long as the data still flows through the gold core.
+
+### 0.6 The "Intentional Change" Protocol — opening the locked core
+
+If, while planning a UI task, you discover that the backend genuinely needs to change (a new column, a new RPC, a relaxed constraint, a different cron interval), you are the **architect**, not just an executor. Follow this protocol:
+
+1. **Stop.** Do not write any migration, RPC, or `INSERT` code yet.
+2. **Diagnose.** Write a short note (in chat, not in a file) explaining:
+   - Which Pillar in §0.2 is inadequate for this task and *why*.
+   - What can break if we touch it (race conditions, audit gaps, lost rows).
+3. **Propose.** Describe your change and *prove* it preserves the invariants:
+   - Is the per-class lock still held during quota check? Is overlap still excluded? Is every status mutation still trigger-audited? Does the new path go through a `SECURITY DEFINER` RPC?
+4. **Wait for explicit approval.** The user must say "yes, change the core." A general "go ahead" on a UI task is **not** approval to touch the gold core.
+5. **Then implement.** Update the migration *and* `calcQuota()` *and* `IApiClient` *and* the mock client *and* this CLAUDE.md (move the new behavior into the relevant Pillar).
+
+This protocol exists because the cost of a quiet regression in the locked core is days of debugging concurrency bugs that only appear under load. The cost of a 60-second pause to ask is zero.
+
+---
+
 ## 1. Project Identity
 
 **Name:** Attendance Management System — Yeshivat Shavi Hevron (ישיבת שבי חברון)  
@@ -447,23 +566,31 @@ VAPID_SUBJECT            # mailto:... for VAPID
 
 ## 18. Development Rules
 
+> **Read §0 first.** §0 is the constitution; this section is the day-to-day enforcement of it. If a rule here ever disagrees with §0, §0 wins.
+
 ### Never do
+- ❌ Touch the locked core in §0.2 without approval via the §0.6 protocol.
+- ❌ Skip the §0.4 pre-flight scan, even for "tiny" UI changes.
 - ❌ Add any UI for creating/editing/importing students (Sheets only).
 - ❌ Create new OVERDUE status entries anywhere.
 - ❌ Use or restore `addStudent()` — intentionally removed from IApiClient.
 - ❌ INSERT into `departures` from any path except `submit_departure` RPC.
 - ❌ Call `autoCheckoutStudents()` or `autoReturnStudents()` — replaced by `tick_departures()` cron.
 - ❌ Change `calcQuota()` in `src/lib/quota.ts` without also updating the `submit_departure` RPC (and vice versa).
+- ❌ Open a second Supabase Realtime channel on `departures` outside `useDeparturesRealtime`.
 - ❌ Collect GPS during a regular student departure (RollCall only).
 - ❌ Compare grade/class strings without `normalizeHebrew()`.
 
 ### Always do
+- ✅ Run the §0.4 pre-flight scan before editing any file that touches departures, quotas, or status.
 - ✅ All departures go through `api.submitDeparture()` → `submit_departure` RPC.
 - ✅ Cancel departure = `api.cancelDeparture(id, note)` → `cancel_departure` RPC (sets CANCELLED, retains row).
 - ✅ Quota enforcement is server-side inside `submit_departure`. Client shows quota info but never enforces alone.
+- ✅ Read departures via `api.listDepartures()` → `v_calendar_departures` view (not the raw table).
 - ✅ Server-side date calculations = `Asia/Jerusalem` timezone.
 - ✅ Both `IApiClient` implementations (`supabaseClient` + `mockClient`) must stay in sync.
 - ✅ All dashboards subscribe via `useDeparturesRealtime` hook — one shared channel, not per-page subscriptions.
+- ✅ Treat the front end as the creative sandbox (§0.5); treat the backend as an immutable API (§0.3).
 
 ---
 
