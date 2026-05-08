@@ -4,6 +4,7 @@ import { Home, FileText, History, LogOut } from 'lucide-react'
 import { SyncStatusBar } from '@/components/shared/SyncStatusBar'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
+import { StudentHelpSheet } from '@/components/student/StudentHelpSheet'
 import { useAuthStore } from '@/store/authStore'
 import { api } from '@/lib/api'
 import { subscribeToPush } from '@/lib/pwa/webPush'
@@ -111,6 +112,7 @@ export function StudentLayout() {
 
           {/* Actions */}
           <div className="flex items-center gap-1">
+            <StudentHelpSheet />
             <ThemeToggle />
             <button
               onClick={handleLogout}
