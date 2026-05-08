@@ -59,14 +59,13 @@ describe('authStore admin PIN changes', () => {
       if (name === 'verify_admin_pin') return Promise.resolve({ data: true })
       return Promise.resolve({ data: null })
     })
-    supabaseMock.auth.updateUser.mockResolvedValue({ error: null })
     supabaseMock.auth.signOut.mockResolvedValue({ error: null })
     supabaseMock.auth.signInWithPassword.mockResolvedValue({ error: null })
 
     const changed = await useAuthStore.getState().changeAdminPin('1234', '5678')
 
     expect(changed).toEqual({ success: true })
-    expect(supabaseMock.auth.updateUser).toHaveBeenCalledWith({ password: '5678' })
+    expect(supabaseMock.auth.updateUser).not.toHaveBeenCalled()
     expect(supabaseMock.auth.signOut).toHaveBeenCalled()
     expect(supabaseMock.rpc).toHaveBeenCalledWith('verify_admin_pin', { p_pin: '5678' })
     expect(supabaseMock.auth.signInWithPassword).toHaveBeenCalledWith({
@@ -76,20 +75,16 @@ describe('authStore admin PIN changes', () => {
     expect(useAuthStore.getState().isAdmin).toBe(true)
   })
 
-  it('rolls the stored PIN back when Supabase Auth password update fails', async () => {
-    supabaseMock.rpc.mockResolvedValue({ data: true })
-    supabaseMock.auth.updateUser.mockResolvedValue({ error: new Error('auth failed') })
+  it('reports a system failure when the transactional PIN change RPC fails', async () => {
+    supabaseMock.rpc.mockResolvedValue({ data: null, error: new Error('rpc failed') })
 
     const changed = await useAuthStore.getState().changeAdminPin('1234', '5678')
 
-    expect(changed).toEqual({ success: false, error: 'auth-sync-failed' })
-    expect(supabaseMock.rpc).toHaveBeenNthCalledWith(1, 'change_admin_pin', {
+    expect(changed).toEqual({ success: false, error: 'change-failed' })
+    expect(supabaseMock.rpc).toHaveBeenCalledTimes(1)
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('change_admin_pin', {
       p_old_pin: '1234',
       p_new_pin: '5678',
-    })
-    expect(supabaseMock.rpc).toHaveBeenNthCalledWith(2, 'change_admin_pin', {
-      p_old_pin: '5678',
-      p_new_pin: '1234',
     })
     expect(supabaseMock.auth.signOut).not.toHaveBeenCalled()
     expect(supabaseMock.auth.signInWithPassword).not.toHaveBeenCalled()
