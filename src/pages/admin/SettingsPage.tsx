@@ -34,7 +34,7 @@ export function SettingsPage() {
     if (!result.success) {
       const messages = {
         'invalid-current-pin': 'הסיסמה הנוכחית שגויה',
-        'auth-sync-failed': 'הסיסמה לא שונתה כי עדכון התחברות המנהל נכשל. נסה שוב.',
+        'change-failed': 'הסיסמה לא שונתה בגלל שגיאת מערכת. נסה שוב.',
         'login-verification-failed': 'הסיסמה שונתה, אבל לא הצלחנו לאמת כניסה מחדש. יש להתנתק ולהיכנס שוב עם הסיסמה החדשה.',
       }
       setPinError(messages[result.error])
