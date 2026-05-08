@@ -30,9 +30,14 @@ export function SettingsPage() {
       return
     }
 
-    const success = await changeAdminPin(oldPin, newPin)
-    if (!success) {
-      setPinError('הסיסמה הנוכחית שגויה')
+    const result = await changeAdminPin(oldPin, newPin)
+    if (!result.success) {
+      const messages = {
+        'invalid-current-pin': 'הסיסמה הנוכחית שגויה',
+        'auth-sync-failed': 'הסיסמה לא שונתה כי עדכון התחברות המנהל נכשל. נסה שוב.',
+        'login-verification-failed': 'הסיסמה שונתה, אבל לא הצלחנו לאמת כניסה מחדש. יש להתנתק ולהיכנס שוב עם הסיסמה החדשה.',
+      }
+      setPinError(messages[result.error])
       return
     }
 

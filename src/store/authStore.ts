@@ -8,6 +8,12 @@ import { registerPushNotifications } from '@/lib/native/pushNotifications'
 import { unsubscribeFromPush } from '@/lib/pwa/webPush'
 import type { Student } from '@/types'
 
+const ADMIN_EMAIL = 'admin@yeshiva.local'
+
+type ChangeAdminPinResult =
+  | { success: true }
+  | { success: false; error: 'invalid-current-pin' | 'auth-sync-failed' | 'login-verification-failed' }
+
 interface AuthState {
   currentUser: Student | null
   isAdmin: boolean
@@ -19,7 +25,7 @@ interface AuthState {
   loginAdmin: (pin: string) => Promise<boolean>
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
   loginClassSupervisor: (pin: string) => Promise<boolean>
-  changeAdminPin: (oldPin: string, newPin: string) => Promise<boolean>
+  changeAdminPin: (oldPin: string, newPin: string) => Promise<ChangeAdminPinResult>
   logout: () => void
   clearError: () => void
 }
@@ -60,7 +66,7 @@ export const useAuthStore = create<AuthState>()(
         if (!valid) return false
         // Sign in as the admin Supabase Auth user so RLS policies allow full access
         const { error } = await supabase.auth.signInWithPassword({
-          email: 'admin@yeshiva.local',
+          email: ADMIN_EMAIL,
           password: pin,
         })
         if (error) return false
@@ -96,10 +102,23 @@ export const useAuthStore = create<AuthState>()(
           p_old_pin: oldPin,
           p_new_pin: newPin,
         })
-        if (!changed) return false
+        if (!changed) return { success: false, error: 'invalid-current-pin' }
         // Update the Supabase Auth user password to stay in sync
-        await supabase.auth.updateUser({ password: newPin })
-        return true
+        const { error: updateError } = await supabase.auth.updateUser({ password: newPin })
+        if (updateError) {
+          await supabase.rpc('change_admin_pin', {
+            p_old_pin: newPin,
+            p_new_pin: oldPin,
+          })
+          return { success: false, error: 'auth-sync-failed' }
+        }
+
+        await supabase.auth.signOut()
+        set({ isAdmin: false, classSupervisor: null, currentUser: null })
+
+        const loginVerified = await get().loginAdmin(newPin)
+        if (!loginVerified) return { success: false, error: 'login-verification-failed' }
+        return { success: true }
       },
 
       logout: () => {
