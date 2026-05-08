@@ -22,7 +22,7 @@ import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
-import type { Student, DashboardStats, ClassStat, CalendarDeparture } from '@/types'
+import type { Student, ClassStat, CalendarDeparture } from '@/types'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -435,7 +435,6 @@ function minsFromNow(isoStr: string): number {
 
 export function ClassSupervisorDashboard() {
   const { classSupervisor, logout } = useAuthStore()
-  const [globalStats, setGlobalStats] = useState<DashboardStats | null>(null)
   const [students, setStudents] = useState<Student[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -453,13 +452,11 @@ export function ClassSupervisorDashboard() {
     if (!classId) return
     api.tickDepartures().catch(() => {})
     try {
-      const [gs, sts, cs, activeDeps] = await Promise.all([
-        api.getDashboardStats(),
+      const [sts, cs, activeDeps] = await Promise.all([
         api.getStudents({ classId }),
         api.getClassStats(),
         api.listDepartures({ classId, status: ['ACTIVE', 'APPROVED'] }),
       ])
-      setGlobalStats(gs)
       setStudents(sts as Student[])
       setClassStats(cs)
 
@@ -532,15 +529,6 @@ export function ClassSupervisorDashboard() {
     .filter(cs => cs.grade === gradeName)
     .sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
 
-  // Yeshiva-wide %
-  const globalPct = globalStats && globalStats.total > 0
-    ? Math.round((globalStats.onCampus / globalStats.total) * 100)
-    : 0
-  const heroColor =
-    globalPct >= 80 ? { text: 'text-[var(--green)]', bar: 'bg-green-500', bg: 'bg-green-50 dark:bg-green-950/20', border: 'border-green-200 dark:border-green-800/40' }
-    : globalPct >= 60 ? { text: 'text-[var(--orange)]', bar: 'bg-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/20', border: 'border-orange-200 dark:border-orange-800/40' }
-    : { text: 'text-[var(--red)]', bar: 'bg-red-500', bg: 'bg-red-50 dark:bg-red-950/20', border: 'border-red-200 dark:border-red-800/40' }
-
   const classColor =
     classPct >= 80 ? { bar: 'bg-green-500', text: 'text-[var(--green)]', ring: 'ring-green-200 dark:ring-green-800' }
     : classPct >= 60 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
@@ -601,26 +589,6 @@ export function ClassSupervisorDashboard() {
             </button>
           </div>
         )}
-
-        {/* Global % hero */}
-        <Card className={`border ${heroColor.border} ${heroColor.bg}`}>
-          <CardContent className="p-4">
-            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">נוכחות כלל הישיבה</p>
-            <div className="flex items-end gap-3">
-              <span className={`text-5xl font-extrabold leading-none ${heroColor.text}`}>
-                {isLoading ? '—' : `${globalPct}%`}
-              </span>
-              {globalStats && (
-                <span className="mb-1 text-sm text-[var(--text-muted)]">
-                  {globalStats.onCampus} / {globalStats.total} תלמידים בישיבה
-                </span>
-              )}
-            </div>
-            <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
-              <div className={`h-full rounded-full transition-all duration-700 ${heroColor.bar}`} style={{ width: `${isLoading ? 0 : globalPct}%` }} />
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Class stats card */}
         <Card className={`ring-1 ${classColor.ring} bg-[var(--surface)]`}>
