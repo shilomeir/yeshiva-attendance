@@ -110,7 +110,11 @@ export function AbsenceRequestPage() {
       })
 
       if ('error' in result) {
-        toast({ title: 'שגיאה', description: (result as { error: string }).error, variant: 'destructive' })
+        const r = result as { error: string; message?: string }
+        const description = r.error === 'DUPLICATE_DEPARTURE'
+          ? 'יש לך בקשת יציאה פעילה לאותה תקופה'
+          : (r.message ?? r.error)
+        toast({ title: 'שגיאה', description, variant: 'destructive' })
         return
       }
 
