@@ -1,12 +1,10 @@
 import { v4 as uuidv4 } from 'uuid'
 import { db } from '@/lib/db/schema'
-import { parseSmsMessage } from '@/lib/sms/parser'
 import { DEFAULT_GRADE, DEFAULT_CLASS } from '@/lib/constants/grades'
 import { calcQuota } from '@/lib/quota'
 import type {
   Student,
   Event,
-  SmsEvent,
   AdminOverride,
   RecurringAbsence,
   StudentStatus,
@@ -507,48 +505,6 @@ export class MockApiClient implements IApiClient {
 
   async getRecentEvents(limit = 50): Promise<Event[]> {
     return db.events.orderBy('timestamp').reverse().limit(limit).toArray()
-  }
-
-  // ── SMS ────────────────────────────────────────────────────────────────────
-
-  async getSmsEvents(): Promise<SmsEvent[]> {
-    return db.smsEvents.orderBy('timestamp').reverse().toArray()
-  }
-
-  async createSmsEvent(raw: string, studentPhone?: string): Promise<SmsEvent> {
-    const now = new Date().toISOString()
-    const parsed = parseSmsMessage(raw)
-
-    let studentId: string | null = null
-    if (studentPhone) {
-      const student = await db.students.where('phone').equals(studentPhone).first()
-      studentId = student?.id ?? null
-    }
-
-    const smsEvent: SmsEvent = {
-      id: uuidv4(),
-      studentId,
-      rawMessage: raw,
-      parsedCorrectly: parsed !== null,
-      parsedType: parsed?.type ?? null,
-      parsedTime: parsed?.time ?? null,
-      parsedReason: parsed?.reason ?? null,
-      timestamp: now,
-      webhookError: null,
-    }
-
-    await db.smsEvents.add(smsEvent)
-
-    if (parsed && studentId) {
-      await this.createEvent({
-        studentId,
-        type: parsed.type,
-        reason: parsed.reason ?? null,
-        note: `מ-SMS: ${raw}`,
-      })
-    }
-
-    return smsEvent
   }
 
   // ── Audit log ──────────────────────────────────────────────────────────────

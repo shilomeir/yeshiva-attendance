@@ -11,7 +11,6 @@ import { DashboardPage } from '@/pages/admin/DashboardPage'
 import { StudentsPage } from '@/pages/admin/StudentsPage'
 import { CalendarPage } from '@/pages/admin/CalendarPage'
 import { AuditLogPage } from '@/pages/admin/AuditLogPage'
-import { SmsPage } from '@/pages/admin/SmsPage'
 import { SettingsPage } from '@/pages/admin/SettingsPage'
 import { RollCallPage } from '@/pages/admin/RollCallPage'
 import { PendingRequestsPage } from '@/pages/admin/PendingRequestsPage'
@@ -118,7 +117,6 @@ export default function App() {
           <Route path="students" element={<StudentsPage />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="audit" element={<AuditLogPage />} />
-          <Route path="sms" element={<SmsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="rollcall" element={<RollCallPage />} />
           <Route path="requests" element={<PendingRequestsPage />} />

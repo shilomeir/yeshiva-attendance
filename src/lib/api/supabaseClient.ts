@@ -3,7 +3,7 @@ import { supabase } from '@/lib/supabase'
 import { db } from '@/lib/db/schema'
 import { notifyQueueChanged } from '@/lib/sync/syncEngine'
 import type {
-  Student, Event, SmsEvent, AdminOverride, RecurringAbsence,
+  Student, Event, AdminOverride, RecurringAbsence,
   StudentStatus, DashboardStats, DailyPresenceData, ReasonData, HourlyData, ClassStat,
   CalendarDeparture, DepartureStatus, SubmitDepartureResult,
 } from '@/types'
@@ -409,28 +409,6 @@ export class SupabaseApiClient implements IApiClient {
       .limit(limit)
     if (error) throw error
     return (data as Event[]) ?? []
-  }
-
-  // ── SMS ────────────────────────────────────────────────────────────────────
-
-  async getSmsEvents(): Promise<import('@/types').SmsEvent[]> {
-    const { data, error } = await supabase
-      .from('sms_events')
-      .select('*')
-      .order('timestamp', { ascending: false })
-    if (error) throw error
-    return (data as import('@/types').SmsEvent[]) ?? []
-  }
-
-  async createSmsEvent(raw: string, _studentPhone?: string): Promise<import('@/types').SmsEvent> {
-    const smsEvent = {
-      id: uuidv4(), studentId: null, rawMessage: raw,
-      parsedCorrectly: false, parsedType: null, parsedTime: null,
-      parsedReason: null, timestamp: new Date().toISOString(), webhookError: null,
-    }
-    const { data, error } = await supabase.from('sms_events').insert(smsEvent).select().single()
-    if (error) throw error
-    return data as import('@/types').SmsEvent
   }
 
   // ── Audit log ──────────────────────────────────────────────────────────────
