@@ -193,7 +193,7 @@ export function AbsenceRequestPage() {
                     <div>
                       <p className="font-bold text-[var(--text)]">מכסת היציאות בכיתה מלאה</p>
                       <p className="mt-1 text-sm text-[var(--text-muted)]">
-                        כרגע אין מקום ליציאה רגילה. אפשר לשלוח בקשה לאישור מנהל.
+                        כרגע אין מקום ליציאה רגילה. ניתן להגיש בקשה חריגה (דחופה) בלבד.
                       </p>
                     </div>
                   </div>

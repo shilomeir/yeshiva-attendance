@@ -30,17 +30,23 @@ interface RegisterPayload {
   deviceId: string
 }
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+}
+
 function jsonErr(msg: string, status = 400): Response {
   return new Response(JSON.stringify({ error: msg }), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS_HEADERS },
   })
 }
 
 function jsonOk(data: unknown): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS_HEADERS },
   })
 }
 
@@ -54,12 +60,7 @@ async function sendPush(subscription: string, title: string, body: string): Prom
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    })
+    return new Response(null, { status: 200, headers: CORS_HEADERS })
   }
 
   if (req.method !== 'POST') return jsonErr('Method not allowed', 405)
