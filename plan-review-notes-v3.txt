@@ -1,0 +1,1151 @@
+================================================================================
+YESHIVA ATTENDANCE SYSTEM — COMPREHENSIVE TECHNICAL REVIEW v3
+================================================================================
+Reviewer:   Claude (architect/security reviewer — line-by-line code audit)
+Date:       2026-05-10
+Supersedes: plan-review-notes-v2.txt
+Scope:      Full codebase audit — 25+ files read in their entirety
+Purpose:    Sharpen Codex's optimization plan with verified findings, exact SQL,
+            precise phase directives, and a corrected implementation sequence.
+
+This is not a plan rewrite. It is a professional review for Codex to act on.
+Every finding is grounded in a specific file, a specific line, and a specific
+consequence. Vague findings have been excluded.
+
+================================================================================
+PART I — EXECUTIVE SUMMARY
+================================================================================
+
+The plan Codex produced is well-structured and architecturally sound in its
+direction. The layered refactor (Domain → Services → API → Supabase) is the
+right answer for this codebase. The phase sequence is logical in concept.
+
+However, the audit revealed findings that significantly change the plan's
+priorities, its phase ordering, and the scope of Phase 2. These are not minor
+adjustments — some are production-critical bugs that exist today, and several
+of the plan's assumptions about the codebase are factually incorrect.
+
+PRODUCTION STATUS (as of audit date):
+  - Admin login: STATUS UNKNOWN — depends on live Supabase having RPCs absent
+    from local migrations. If not, admin login is completely broken.
+  - Admin PIN change: BROKEN — change_admin_pin RPC exists in migrations but has
+    no GRANT EXECUTE statement. Calling it returns a permission error.
+  - RLS: COMPLETELY ABSENT — zero policies, zero ENABLE statements across all tables.
+  - Edge Function auth: THREE of four functions have zero authentication.
+  - Realtime filter contract: BROKEN — filters accepted by useDeparturesRealtime
+    are stored in refs and never applied. All clients receive all departure events.
+
+TOP 5 FINDINGS CODEX MUST ACT ON BEFORE ANY REFACTORING:
+
+  1. change_admin_pin RPC (20260508_transactional_admin_pin.sql) has no GRANT
+     EXECUTE — admin PIN changes silently fail with a permission error.
+
+  2. Admin PIN is stored plaintext in app_settings AND read by sync-from-sheets
+     to derive ALL supervisor PINs. One app_settings read = all credentials exposed.
+
+  3. submit_departure trusts the client-supplied p_actor_role string — any student
+     can bypass quota by sending p_actor_role='ADMIN' and source='ADMIN_OVERRIDE'.
+
+  4. The audit trigger (departures_audit_trigger_fn line 217) defaults approved_by
+     to 'system' when NULL — cron activations and manual admin approvals are
+     indistinguishable in the admin_overrides audit log.
+
+  5. OffCampusSheet constructs timestamps with local new Date() and no timezone
+     conversion. Students on devices with non-Jerusalem timezone will record
+     departures with wrong times.
+
+
+================================================================================
+PART II — WHAT CODEX GOT RIGHT (confirmed by code — no changes needed)
+================================================================================
+
+1. The quota formula is verified identical on client and server:
+   Client (src/lib/quota.ts:5): Math.max(1, Math.round((classSize * 3) / 25))
+   Server (20260423_unified_departures.sql:319):
+     GREATEST(1, ROUND((v_class_size * 3)::numeric / 25))
+   These are equivalent. No change needed. Never change one without the other.
+
+2. supabaseClient.ts correctly uses the IApiClient interface as an abstraction.
+   The data fetching boundary is mostly clean — pages call api.* methods.
+   The violations are narrower than the plan implies (see Part III, Assumption 3).
+
+3. The Dexie offline schema is well-designed with proper version migrations:
+   v1 → v2 → v3 with upgrade hooks. The schema includes a departures table
+   matching the Supabase schema. This is solid offline-first architecture.
+
+4. The departure lifecycle (submit → approve/reject → active → completed/cancelled)
+   is enforced through RPCs and a DB trigger (departures_audit_trigger_fn lines
+   186-227 in unified_departures.sql). The state machine is server-enforced.
+   Good. Do not move this to the client.
+
+5. pg_advisory_xact_lock(hashtext(v_class_id)) in submit_departure (line 312)
+   makes the quota check + insert atomic at the class level. This is a correct
+   and sophisticated pattern. Do not simplify it away.
+
+6. sync-from-sheets correctly uses a server-side secret (X-Sync-Secret header
+   validated at line 192 of the Edge Function against SHEETS_SYNC_SECRET env var,
+   which is fetched from Google Apps Script Properties at runtime — not hardcoded).
+   This is the security model the other three Edge Functions need to copy.
+
+7. The 5-minute undo window after checkout (HomePage.tsx line 190) is good UX.
+   The cancel_departure flow is correct — it sets status=CANCELLED and retains
+   the row for 30 days. Do not change this behavior.
+
+8. The Dexie schema version 3 added the departures table (lines 69-87 of schema.ts)
+   matching the unified departures migration. Good alignment. The absenceRequests
+   table remains in Dexie but no longer exists in Supabase — this is dead weight
+   in the offline schema (see Part IV, Item 8).
+
+
+================================================================================
+PART III — FACTUALLY INCORRECT ASSUMPTIONS IN CODEX'S PLAN
+================================================================================
+
+These must be corrected in the plan document before Codex acts on them.
+
+
+ASSUMPTION A: "RLS policies were not found in the local scan" (Finding 11)
+STATUS: Understatement. RLS does not exist at all.
+EVIDENCE: All 13 migration files were scanned. There is not a single
+  ALTER TABLE ... ENABLE ROW LEVEL SECURITY
+  nor any CREATE POLICY statement anywhere.
+CONSEQUENCE: With the anon key (bundled publicly in the PWA), any person can:
+  SELECT * FROM students — 381 rows with names, IDs, phones, GPS coordinates
+  SELECT * FROM departures — complete departure history for every student
+  SELECT * FROM admin_overrides — every admin action taken in the system
+  SELECT * FROM app_settings — including the plaintext admin PIN
+CORRECTION FOR CODEX:
+  "Finding 11 must say: 'RLS has never been enabled on any table. There are zero
+   ENABLE ROW LEVEL SECURITY statements and zero CREATE POLICY statements in the
+   entire codebase. This is not a partial gap — it is a complete absence.
+   Phase 2 must build RLS from scratch, not tighten existing policies.
+   Enabling RLS without simultaneously creating at least one SELECT policy
+   creates a deny-all state that will break the entire system. Every table
+   that gets RLS enabled must receive its policies in the same migration,
+   applied atomically.'"
+
+
+ASSUMPTION B: "Many select('*') calls" throughout the codebase
+STATUS: Overstated. The real performance problem is different.
+EVIDENCE: supabaseClient.ts has approximately 8 select('*') calls. Most are
+  intentional — student records have ~15 fields and most are needed. The actual
+  worst-case performance problem is not a select pattern:
+  DashboardPage.tsx line 181 calls api.getStudents() to load ALL 381 students.
+  Lines 194-199 then compute 3 integer counts (ON_CAMPUS, OFF_CAMPUS, OVERDUE).
+  This transfers approximately 150KB of JSON to compute 3 numbers. A single
+  SQL COUNT(CASE WHEN "currentStatus"='ON_CAMPUS' THEN 1 END) returns 3 numbers
+  in under 1ms with zero network overhead.
+CORRECTION FOR CODEX:
+  "The select('*') finding is largely accurate but misses the far more costly
+   pattern: full table loads for client-side aggregation. The most impactful
+   single fix in the codebase is adding a get_location_breakdown() RPC
+   (DashboardPage line 181). Prioritize aggregation RPCs over projection
+   changes in select(*) calls. Student list selects are not the bottleneck."
+
+
+ASSUMPTION C: "Supabase is imported directly from stores, pages, and components"
+STATUS: Misleading. The data boundary is mostly correct.
+EVIDENCE: 12 files import supabase directly, but only for two purposes:
+  1. Realtime channel subscriptions — which IApiClient intentionally doesn't abstract.
+     This is a gray area, not a violation. The hook useDeparturesRealtime.ts IS
+     the abstraction layer for departures realtime.
+  2. Auth operations in authStore — supabase.auth.signIn/signOut must be called
+     directly since auth isn't part of IApiClient.
+  Data reads go through api.* correctly in almost every case.
+CORRECTION FOR CODEX:
+  "The actual violations of the API boundary are:
+   - authStore.ts: auth.signIn, auth.signOut, and PIN verification RPCs (by design,
+     but should eventually move to an AuthService wrapper).
+   - App.tsx line 77: fire-and-forget lastSeen stamping directly (move to a service).
+   - DashboardPage.tsx line 222: direct channel subscription for students realtime
+     (creates a double subscription — see Part IV, Item 3).
+   Pages do NOT make business data calls directly. The boundary is cleaner
+   than the plan implies. Focus Phase 4 on the two genuine violations above,
+   not on a broad 'all pages bypass the API' characterization."
+
+
+ASSUMPTION D: "useDeparturesRealtime should actually use the options it receives"
+STATUS: The plan understates the severity. This is a broken contract, not a gap.
+EVIDENCE: src/hooks/useDeparturesRealtime.ts lines 7-14 define an interface with
+  studentId, classId, grade, status, from, to, limit as filter options.
+  Lines 28-31 store them in useRef. They are never read in the subscription setup
+  (line 42) or in any event callback (lines 43-66). The channel has no filter config.
+  Every subscriber — student screens, supervisor screens, admin screens — receives
+  every INSERT/UPDATE/DELETE event from the entire departures table.
+  This means a student's device receives realtime messages containing student_id,
+  class_id, start_at, end_at, reason for every other student's departure.
+CORRECTION FOR CODEX:
+  "Phase 8 must fix useDeparturesRealtime as a high-priority item, not an
+   improvement. The filter API is completely non-functional. The interim fix
+   (before auth model makes server-side Postgres Changes filters possible) is
+   to apply client-side filtering in each callback before calling the user's
+   onInsert/onUpdate/onDelete. This closes the information disclosure without
+   requiring auth decisions. Implementation:
+     const shouldPassThrough = (row: DeparturePayload) => {
+       if (opts.studentId && row.student_id !== opts.studentId) return false
+       if (opts.classId && row.class_id !== opts.classId) return false
+       return true
+     }
+   This must happen in Phase 2A, not Phase 8, because it is a privacy violation."
+
+
+================================================================================
+PART IV — CRITICAL BUGS AND SECURITY VULNERABILITIES (new findings)
+================================================================================
+
+These are in addition to the findings in v2. All are confirmed by code.
+
+
+BUG 1: change_admin_pin RPC has no GRANT EXECUTE [CRITICAL — currently broken]
+
+File: supabase/migrations/20260508_transactional_admin_pin.sql
+Evidence: The entire file (34 lines) was read. There is no GRANT EXECUTE statement.
+The RPC is defined but never granted to any role.
+
+What happens when a user changes their PIN:
+  SettingsPage.tsx line 33 → authStore.changeAdminPin() → supabase.rpc('change_admin_pin')
+  Supabase returns: { data: null, error: "permission denied for function change_admin_pin" }
+  The UI shows: "הסיסמה לא שנתה בגלל שגיאת מערכת" (system error, line 42)
+
+This is a silent production bug. Every admin who has ever tried to change their PIN
+has received an error and the change did not happen.
+
+Also found in this migration: the function updates BOTH app_settings (plaintext) AND
+auth.users (bcrypt via extensions.crypt). This is intentional dual-storage but
+the bcrypt update at line 23 uses extensions.crypt which requires the pg_crypto
+extension to be enabled. If pg_crypto is not enabled in the live project, the
+function will fail on every call regardless of the GRANT issue.
+
+FIX REQUIRED (add to a new migration or append to the existing one):
+  GRANT EXECUTE ON FUNCTION public.change_admin_pin(text, text) TO authenticated;
+  GRANT EXECUTE ON FUNCTION public.change_admin_pin(text, text) TO anon;
+  -- Verify pg_crypto extension:
+  CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+
+BUG 2: Admin PIN is the root secret for all supervisor credentials [CRITICAL — design]
+
+File: supabase/functions/sync-from-sheets/index.ts, lines 149-175
+
+The sync function reads the admin PIN in plaintext:
+  const { data: pinRow } = await supabase.from('app_settings').select('value')
+    .eq('key', 'admin_pin').single()
+  const adminPin: string = pinRow?.value ?? '????'
+
+Then constructs every supervisor PIN as:
+  supervisorPin: adminPin + code
+
+This means:
+  1. The admin PIN is stored in plaintext in app_settings (readable by anyone
+     with anon key since RLS is absent).
+  2. Supervisor PINs = admin PIN concatenated with a 3-digit code.
+  3. Anyone who reads app_settings reads the admin PIN AND can reconstruct
+     every supervisor PIN for every class.
+  4. When an admin changes their PIN, ALL supervisor PINs change simultaneously.
+     CLAUDE.md documents this (section 7): "If Admin PIN changes — all supervisors
+     need new PINs. No automatic notification — manual process."
+
+This is not just a security issue — it is an architectural time bomb. Supervisor PINs
+are not independent credentials. They are computationally derivable from the admin PIN.
+
+CORRECT DESIGN (for Phase 7 consideration):
+  Option A (minimal change): Store supervisor PINs as independent hashed values in
+    app_settings.class_pin_{classId} using bcrypt. Admin PIN change no longer
+    affects them. Sync generates random codes, stores hashed, sends plaintext once.
+  Option B (recommended for Phase 7): Move to Supabase Auth per admin/supervisor.
+    Each supervisor has their own Auth account. classId comes from a JWT claim, not
+    a PIN suffix. Admin PIN change affects only the admin account.
+
+
+BUG 3: Audit log cannot distinguish admin from cron actions [HIGH — audit integrity]
+
+File: supabase/migrations/20260423_unified_departures.sql, line 217
+
+The departures_audit_trigger_fn function (lines 186-227) records every departure
+status transition into admin_overrides. The approved_by field is set as:
+  NEW.approved_by IS DISTINCT FROM OLD.approved_by: uses NEW.approved_by
+  But when tick_departures (the pg_cron job) advances APPROVED → ACTIVE,
+  it does not set approved_by. The trigger records NULL, which is then stored
+  as 'system' via the COALESCE at line 217.
+
+Result: In the audit log, it is impossible to distinguish between:
+  - A departure that was manually approved by Admin Moshe
+  - A departure that was automatically activated by the cron ticker
+
+Both show approved_by = 'system' or approved_by = NULL in admin_overrides.
+
+FIX: Add a trigger-level actor_source field to admin_overrides:
+  actor_source TEXT DEFAULT 'USER' — values: 'USER', 'CRON', 'SYSTEM'
+  When approved_by IS NULL and source is the tick function, set actor_source = 'CRON'.
+  This requires a new column and migration but does not break existing queries.
+
+
+BUG 4: OffCampusSheet creates timestamps in local timezone [MEDIUM — data integrity]
+
+File: src/components/student/OffCampusSheet.tsx, lines 82-88
+
+The form constructs timestamps as:
+  const startISO = new Date(`${startDate}T${startTime}:00`).toISOString()
+  const endISO   = new Date(`${returnDate}T${endTime}:00`).toISOString()
+
+new Date('2026-05-10T09:00:00') interprets the string in the LOCAL timezone
+of the device. .toISOString() then converts to UTC.
+
+For a student whose device is set to UTC (a common misconfiguration), a 9:00 AM
+departure is stored as 09:00 UTC = 11:00 AM Jerusalem time (UTC+2 in summer).
+The departure would be recorded as two hours later than intended.
+
+CLAUDE.md section on Iron Rules states all dates must be Asia/Jerusalem.
+This is violated here.
+
+FIX: Use a timezone-aware construction:
+  import { zonedTimeToUtc } from 'date-fns-tz'
+  const startISO = zonedTimeToUtc(
+    new Date(`${startDate}T${startTime}:00`),
+    'Asia/Jerusalem'
+  ).toISOString()
+
+Or pass a simple local string and parse it server-side as Jerusalem time in the RPC.
+
+
+BUG 5: Dexie schema retains absenceRequests table after Supabase table removed [LOW]
+
+File: src/lib/db/schema.ts, line 30 (v1 schema), line 41 (v1 stores)
+
+The IndexedDB schema still includes an absenceRequests table. The corresponding
+Supabase table was removed in the unified_departures.sql migration. The Dexie table
+is never written to (no code inserts into it), but it occupies space in IndexedDB
+and creates confusion for future developers.
+
+FIX: Add schema v4 that deletes the absenceRequests store:
+  this.version(4).stores({ absenceRequests: null }).upgrade(...)
+  The null value in Dexie means "delete this store."
+
+
+BUG 6: syncEngine DELETE operation is typed but unimplemented [LOW — type safety]
+
+File: src/lib/sync/syncEngine.ts + src/types/index.ts line 162
+
+SyncQueueItem.operation is typed as: 'INSERT' | 'UPDATE' | 'DELETE' | 'RPC'
+The sync engine handles INSERT (line 55), UPDATE (line 59), and RPC (line 52)
+but has no case for DELETE. Any sync queue item with operation='DELETE' is
+silently dropped on the floor — no execution, no error, no retry.
+
+This is not actively used (no code creates DELETE sync queue items), but the type
+definition creates an expectation that is not met.
+
+FIX OPTIONS:
+  Option A: Remove 'DELETE' from the operation union type. Make it explicit.
+  Option B: Add a handler: supabase.from(item.tableName).delete().eq('id', id)
+  Recommendation: Option A — deletes should not be in the offline queue because
+  they bypass the business logic that soft-deletes via cancel_departure RPC.
+
+
+BUG 7: normalizeHebrew not applied to search input in studentsStore [LOW — UX]
+
+File: src/store/studentsStore.ts, lines 65-73
+
+The applyFilter function normalizes grade (line 57) and classId (line 61) through
+normalizeHebrew() before comparison. But the search filter (lines 65-73) operates
+on raw input without normalization:
+  s.fullName.toLowerCase().includes(filter.search.toLowerCase())
+
+If a user types a student name using a different apostrophe variant (e.g., typing
+with the geresh character ׳ instead of the ASCII apostrophe), names containing
+apostrophes will not match. Hebrew names with yud-apostrophe combinations (like
+"אברי׳") are especially affected.
+
+FIX: Apply normalizeHebrew to both sides of the search comparison:
+  normalizeHebrew(s.fullName).toLowerCase()
+    .includes(normalizeHebrew(filter.search).toLowerCase())
+
+
+================================================================================
+PART V — SECURITY THREAT MODEL (complete, with exact attack steps)
+================================================================================
+
+This section provides the complete threat model that Phase 2 must address.
+Each threat has: severity, exact attack path, root cause, and precise fix.
+Threats are ordered by exploitability × impact.
+
+
+THREAT T1: Read entire student database with zero authentication
+Severity: CRITICAL — CVSS 9.1 (Network, Low Complexity, No Privileges Required)
+Exploitability: Trivial — anon key is bundled in the PWA JavaScript bundle
+Attack:
+  1. Open the production URL https://shavey-hevron.vercel.app
+  2. Open DevTools → Sources → find the JS bundle → search for SUPABASE_URL and ANON_KEY
+  3. Execute in browser console:
+       const { createClient } = require('@supabase/supabase-js')
+       const client = createClient(SUPABASE_URL, ANON_KEY)
+       const { data } = await client.from('students').select('*')
+       // Returns: all 381 students with full names, Israeli ID numbers, phones, GPS
+  4. Also extract: departures (all history), admin_overrides (all admin actions),
+     app_settings (admin PIN in plaintext), events (all attendance events)
+Root cause: RLS is completely absent. No policy blocks anon reads on any table.
+Fix for Phase 2B:
+  ALTER TABLE students ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY "students_select_own" ON students
+    FOR SELECT USING (auth.uid() = id OR auth.role() = 'service_role');
+  -- Note: requires Phase 7 auth model decision for students without Auth accounts
+
+
+THREAT T2: Read admin PIN and derive all supervisor PINs
+Severity: CRITICAL
+Exploitability: Trivial — same anon key exploit as T1
+Attack:
+  const { data } = await client.from('app_settings')
+    .select('key,value')
+    .like('key', 'admin_pin%')
+  // Returns: { key: 'admin_pin', value: '12345' }
+  // Supervisor PIN for class X is: '12345' + class_code_X (also in app_settings)
+Root cause: app_settings has no RLS and stores admin PIN plaintext.
+Fix for Phase 2A (does not require auth model decision):
+  ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY "app_settings_service_only" ON app_settings
+    FOR ALL USING (auth.role() = 'service_role');
+  -- This immediately blocks anon reads of the admin PIN
+  -- Note: migrate PIN storage from plaintext to bcrypt in Phase 7
+
+
+THREAT T3: Bypass quota — create unlimited approved departures for any student
+Severity: CRITICAL
+Exploitability: Low complexity — requires authenticated Supabase session (any student)
+Attack:
+  // Step 1: Log in as any student (ID number is public from T1)
+  // Step 2: Call submit_departure with fabricated admin role:
+  await client.rpc('submit_departure', {
+    p_student_id: '<any student UUID from T1>',
+    p_start_at: new Date().toISOString(),
+    p_end_at: new Date(Date.now() + 8*3600000).toISOString(),
+    p_source: 'ADMIN_OVERRIDE',
+    p_actor_role: 'ADMIN',   // Client lies; server trusts it
+    p_force_pending: false
+  })
+  // Result: { status: 'APPROVED', ... }  — departure instantly approved, no quota check
+Root cause: submit_departure line 287 checks the client-supplied p_actor_role parameter.
+  There is no server-side session verification of who is actually calling.
+Fix for Phase 2A (interim, does not require auth model):
+  Create a new admin_override_departure RPC GRANTED only to service_role.
+  Remove the ADMIN_OVERRIDE path from the public submit_departure RPC entirely.
+  Admin overrides go through: Admin UI → Secured Edge Function → service_role RPC.
+  The public submit_departure should never accept source='ADMIN_OVERRIDE'.
+  SQL:
+    CREATE OR REPLACE FUNCTION public.submit_departure(...)
+    AS $$ BEGIN
+      -- Remove this block entirely:
+      -- IF p_source = 'ADMIN_OVERRIDE' AND p_actor_role NOT IN ...
+      -- Instead: reject ADMIN_OVERRIDE unconditionally in the public RPC
+      IF p_source = 'ADMIN_OVERRIDE' THEN
+        RETURN jsonb_build_object('error', 'unauthorized',
+          'message', 'Use admin-specific endpoint for overrides');
+      END IF;
+      ...
+
+
+THREAT T4: Register as admin — receive all admin push notifications
+Severity: CRITICAL — information exfiltration
+Exploitability: Trivial — no authentication required
+Attack:
+  await fetch('https://{project}.supabase.co/functions/v1/notify-admin-quota-full', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'register',
+      pushToken: '<attacker-controlled-push-endpoint>',
+      deviceId: 'attacker-device-001'
+    })
+  })
+  // Attacker's device is now registered as an admin device
+  // From this point: every quota-full alert, every departure request notification,
+  // every admin notification includes student names, departure details, IDs
+Root cause: notify-admin-quota-full has no authentication on the 'register' action.
+Fix for Phase 2A:
+  Add to supabase/functions/notify-admin-quota-full/index.ts:
+  const ADMIN_SECRET = Deno.env.get('ADMIN_NOTIFY_SECRET')
+  const providedSecret = req.headers.get('X-Admin-Secret')
+  if (!ADMIN_SECRET || providedSecret !== ADMIN_SECRET) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })
+  }
+  Store ADMIN_NOTIFY_SECRET in Supabase Edge Function Secrets.
+  Pass the secret from the admin frontend (stored as env var, not hardcoded).
+
+
+THREAT T5: Trigger GPS collection from all students without admin access
+Severity: HIGH — privacy violation affecting all students with the Android APK
+Exploitability: Trivial — no authentication required
+Attack:
+  await fetch('https://{project}.supabase.co/functions/v1/broadcast-location-request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  })
+  // All Android APK users receive silent FCM push notification
+  // Their devices wake up and upload GPS coordinates to the server
+Root cause: broadcast-location-request has no authentication.
+Fix for Phase 2A: identical pattern to T4 — add X-Admin-Secret header check.
+  Also: log every invocation of this function to admin_overrides with actor=SYSTEM.
+
+
+THREAT T6: Inject malicious operations into offline sync queue
+Severity: HIGH — requires physical device access or XSS
+Exploitability: Medium — requires DevTools access or XSS vulnerability
+Attack:
+  // In browser DevTools → Application → IndexedDB → yeshiva-db → syncQueue → Add item:
+  {
+    id: 'injected-1',
+    tableName: 'admin_overrides',
+    operation: 'INSERT',
+    payload: { studentId: 'X', adminId: 'attacker', action: 'OVERRIDE', ... },
+    clientTimestamp: '2026-05-10T00:00:00Z',
+    retryCount: 0
+  }
+  // When app goes online: syncEngine line 55 executes
+  //   supabase.from('admin_overrides').insert(payload)
+  // With RLS absent: insert succeeds, forging audit history
+Root cause: syncEngine.ts lines 49-61 execute any tableName/operation from IndexedDB.
+  No whitelist, no schema validation, no business rule check.
+Fix for Phase 2A (independent of auth model):
+  const ALLOWED_RPC_NAMES = new Set([
+    'submit_departure', 'return_departure', 'cancel_departure', 'register_push'
+  ] as const)
+  const ALLOWED_TABLE_NAMES = new Set<string>() // EMPTY — no direct table writes allowed offline
+  // In processQueue():
+  if (item.operation === 'RPC' && !ALLOWED_RPC_NAMES.has(item.tableName)) {
+    console.error(`Blocked unauthorized sync op: ${item.tableName}`)
+    await db.syncQueue.delete(item.id)
+    continue
+  }
+  if (item.operation !== 'RPC') {
+    console.error(`Blocked direct table write from offline queue: ${item.tableName}`)
+    await db.syncQueue.delete(item.id)
+    continue
+  }
+
+
+THREAT T7: Student receives other students' departure events via Realtime
+Severity: MEDIUM — information disclosure over WebSocket
+Exploitability: Automatic — happens for every connected student
+Evidence: useDeparturesRealtime.ts line 42 subscribes to the entire departures table.
+  Every INSERT/UPDATE/DELETE event is broadcast to all connected clients.
+  The event payload includes: student_id, class_id, start_at, end_at, reason.
+  A student's device receives the departure details of every other student.
+Fix for Phase 2A (client-side filter, no auth dependency):
+  In useDeparturesRealtime.ts, add filter in each callback:
+  case 'INSERT': {
+    const row = payload.new as DeparturePayload
+    if (opts.studentId && row.student_id !== opts.studentId) break
+    if (opts.classId && row.class_id !== opts.classId) break
+    optsRef.current.onInsert?.(row)
+    optsRef.current.onAnyChange?.()
+    break
+  }
+  Apply same filter to UPDATE and DELETE handlers.
+
+
+================================================================================
+PART VI — ARCHITECTURAL GAPS NOT IN CODEX'S PLAN
+================================================================================
+
+
+GAP 1: The plan has Phase 5 (Services) before Phase 6 (Domain) — wrong order
+This is the most consequential ordering mistake. Services IMPORT domain rules:
+  - DepartureService.checkoutStudent() calls departureTransitions.canCheckout()
+  - DepartureService.approveDeparture() calls quota.calculateQuota()
+  - DepartureService.submitDeparture() calls israelDate.toJerusalemTimestamp()
+None of these domain functions exist yet if Domain is Phase 6.
+Writing services before domain produces either:
+  a) Domain logic duplicated inline in services (violates DRY, wrong layer)
+  b) Service stubs that must be rewritten in Phase 6 (wasted work)
+DIRECTIVE: Swap Phase 5 and Phase 6. No exceptions.
+
+
+GAP 2: The plan positions Phase 7 (Auth Model) after Phase 2 (RLS) — circular dependency
+Phase 2 instructs: "RLS should use auth.uid() or secured claims."
+Phase 7 instructs: "Decide how a student is identified."
+auth.uid() only exists if students have Supabase Auth accounts. Students currently
+have no Auth accounts — they log in with an ID number only. Writing RLS policies
+that use auth.uid() for student rows before deciding whether students get Auth
+accounts produces policies that will immediately block all student reads.
+DIRECTIVE: Move Phase 7 (as a decision document, not implementation) to before Phase 2B.
+Phase 2A (fixes that don't need the identity model) can proceed immediately.
+Phase 2B (student/departure RLS) waits until Phase 7 resolves the identity question.
+
+
+GAP 3: mockClient.ts is not mentioned once in the plan
+CLAUDE.md rule (line 472): "Both IApiClient implementations must stay in sync."
+mockClient.ts is 726 lines implementing all 28 IApiClient methods. It is used in:
+  - Development without a network connection
+  - Tests that use the mock (preventing real Supabase calls)
+Every new API method in Phase 4, every signature change, every new RPC must
+be mirrored in mockClient.ts or it will fail TypeScript compilation.
+Known divergence: mockClient.createEvent() does not update student status after
+a CHECK_IN event, but supabaseClient.createEvent() does (lines 391-394).
+This makes offline checkout behavior differ from online behavior.
+DIRECTIVE: Add to Phase 4: "Every change to supabaseClient.ts must be mirrored
+in mockClient.ts in the same commit. Fix the known divergence in createEvent().
+Add a contract test that runs both implementations and asserts identical outputs."
+
+
+GAP 4: The plan's PR 2 "Supabase security emergency" is dangerously large
+PR 2 as written covers: RLS on 7 tables + anon grant removal + role-specific views +
+4 Edge Function auth fixes + error code standardization.
+This is 15-20 separate database migrations and 4 Edge Function deployments.
+If ANY one migration has a bug and creates deny-all RLS, the entire system
+stops working until it's rolled back. One PR cannot contain all of this.
+DIRECTIVE: Split PR 2 into a minimum of 5 PRs:
+  PR 2.1: Anon REVOKE on RPCs (approve, reject, cancel, tick) — no behavior change
+           for authenticated users. 1 migration, 0 risk.
+  PR 2.2: Edge Function auth (add X-Admin-Secret to 3 functions) — 3 deploys,
+           requires 1 new Supabase Secret to be set first.
+  PR 2.3: syncEngine whitelist + useDeparturesRealtime client-side filter.
+           TypeScript only. Zero DB changes. Zero risk.
+  PR 2.4: RLS on admin-only tables (admin_overrides, app_settings, sms_events).
+           These don't need auth model decisions — only service_role reads them.
+           Test: anon cannot read app_settings (closes the admin PIN read).
+  PR 2.5: RLS on students and departures (after Phase 7 auth model decision).
+           This is the high-risk PR. Requires staging Supabase project.
+           Test: student can read own row, cannot read other students.
+
+
+GAP 5: No rollback strategy for any migration
+If PR 2.4 enables RLS on app_settings but there's a policy bug, the sync-from-sheets
+function can no longer read the admin PIN → supervisor PIN generation breaks → next
+sync fails → all supervisor accounts stop working.
+This can happen in under 60 seconds after deployment with zero warning.
+DIRECTIVE: For every Phase 2 migration, write a paired rollback migration:
+  File: supabase/migrations/rollback/20260XYZ_rollback_app_settings_rls.sql
+  Content: ALTER TABLE app_settings DISABLE ROW LEVEL SECURITY;
+  These rollback files are committed but never applied unless needed.
+  Apply them immediately if any production error spikes after a migration.
+
+
+GAP 6: No staging Supabase project is mentioned
+All Phase 2 migrations will run against the live production database.
+A bad RLS migration is a production incident that affects all users immediately.
+DIRECTIVE: Add to Phase 0:
+  "Create a Supabase staging project (free tier) as a parallel environment.
+   Every migration in Phase 2, 3, and 4 must run and be verified on staging first.
+   Staging should have a representative sample of student data (not real PII).
+   The Vercel preview environment should point to staging Supabase, not production."
+
+
+GAP 7: The plan does not address the DashboardPage double subscription
+DashboardPage.tsx creates two overlapping realtime subscriptions:
+  Line 222: supabase.channel('dashboard-students-realtime') → calls loadData()
+  Line 235: useDeparturesRealtime hook → calls loadData()
+Every departure change triggers TWO full reloads of all 7 API calls.
+During a busy period (many students leaving/returning), this creates a
+"realtime thundering herd" where the dashboard is constantly reloading.
+DIRECTIVE: Add to Phase 8 (or Phase 10):
+  "Remove DashboardPage's direct supabase.channel() subscription (line 222).
+   Route all realtime through the hook. Split the reload so a student update
+   only refreshes student data, a departure update only refreshes departure data.
+   loadData() should accept a scope parameter rather than reloading everything."
+
+
+GAP 8: The plan doesn't specify how to test migration safety
+DIRECTIVE: Add to Phase 0 completion criteria:
+  "A pgTAP or pg_prove test suite exists with at least one test per RLS policy.
+   Format:
+     SELECT throws_ok(
+       $$ SELECT * FROM app_settings $$,
+       'new row violates row-level security policy for table "app_settings"',
+       'anon cannot read app_settings'
+     );
+   These SQL tests run in the staging database before any production migration.
+   They form the RLS acceptance test suite referenced in Phase 2 criteria."
+
+
+================================================================================
+PART VII — PERFORMANCE ANALYSIS (precise measurements from code)
+================================================================================
+
+Current DashboardPage load (7 API calls in sequence, from code audit):
+  1. api.tickDepartures()        — fire-and-forget, no data returned
+  2. api.getDashboardStats()     — currentStatus, pendingApproval, lastSeen (3 fields)
+  3. api.getLongAbsentStudents() — select('*') on students filtered by lastSeen
+  4. api.getClassStats()         — grade, classId, currentStatus (3 fields per student)
+  5. api.getStudents()           — ALL 381 students, ALL fields, for a 3-number pie chart
+  6. api.listDepartures(PENDING) — from v_calendar_departures view
+  7. api.listDepartures(ACTIVE)  — from v_calendar_departures view
+
+Call 5 is the most expensive. Estimated payload: 381 students × ~15 fields × ~40 bytes
+average per field = approximately 228KB transferred to show 3 integers on a pie chart.
+
+Proposed replacement sequence (after Phase 4):
+  1. api.getAdminDashboardSnapshot() — single RPC returning all aggregated data
+     Returns: { total_students, on_campus, off_campus, pending_count, quota_used,
+                location_breakdown: {on, off, overdue},
+                class_stats: [...], long_absent: [...] }
+  2. api.listPendingDeparturesForAdmin() — focused projection from departures
+  3. api.listActiveDeparturesForAdmin()  — focused projection from departures
+  Target: 3 API calls, estimated payload reduction from ~500KB to ~15KB.
+
+Other measured performance issues:
+  - DashboardPage chart data recomputed on every render (lines 301-320):
+    pieData and gradeChartData are created inline without useMemo.
+    The 60-second tick (line 227: setTick()) triggers re-render every minute,
+    causing Recharts to receive new array references and re-render all charts.
+  - RollCallPage fetches all students twice within 15 seconds (lines 183, 191)
+    using setTimeout polling instead of the realtime subscription already
+    established at line 204. One fetch per connection/reconnect is sufficient.
+  - App.tsx imports all 11 pages statically (lines 1-20). Student users download
+    the entire admin bundle (Recharts, exception timeline, audit log, roll call UI).
+    Estimated unnecessary download for student users: ~150KB JS.
+
+DIRECTIVE for Phase 10:
+  "Add React.lazy() to every route in App.tsx before splitting any page files.
+   This is independent of the Phase 9 UI restructure — it requires only wrapping
+   existing imports in lazy() and adding Suspense boundaries.
+   Expected benefit: student initial JS payload reduced by approximately 37%."
+
+
+================================================================================
+PART VIII — PRECISE PHASE DIRECTIVES FOR CODEX
+================================================================================
+
+These are exact instructions for updating yeshiva-system-improvement-plan-en.txt.
+
+
+DIRECTIVE D1: Add Emergency Phase -1 before Phase 0
+
+Insert a new phase titled "Phase -1 — Production Incident Verification":
+
+  GOAL: Verify whether admin login and PIN change are currently working in production.
+  These may be broken silently without any user-visible error other than "wrong PIN."
+
+  ACTIONS:
+  1. Authenticate to the live Supabase project (ref: tybpsilcgpwlmqsewreu).
+  2. In the SQL Editor, run:
+       SELECT routine_name, routine_type
+       FROM information_schema.routines
+       WHERE routine_name IN (
+         'verify_admin_pin', 'verify_supervisor_pin',
+         'get_admin_pin_length', 'change_admin_pin'
+       );
+     If any of these return 0 rows: admin functionality is broken in production.
+  3. Run: SELECT grantee, privilege_type FROM information_schema.routine_privileges
+     WHERE routine_name = 'change_admin_pin';
+     If this returns 0 rows: admin PIN change has never worked.
+  4. If functions are missing: create them from the SQL below and apply immediately.
+  5. If change_admin_pin exists but has no GRANT: run immediately:
+       GRANT EXECUTE ON FUNCTION public.change_admin_pin(text, text) TO authenticated;
+       GRANT EXECUTE ON FUNCTION public.change_admin_pin(text, text) TO anon;
+  6. Verify pg_crypto extension is enabled (required by change_admin_pin):
+       SELECT * FROM pg_extension WHERE extname = 'pgcrypto';
+     If not present: CREATE EXTENSION IF NOT EXISTS pgcrypto;
+  7. Test admin login via the production site.
+
+  COMPLETION CRITERIA: Admin can log in, admin can change PIN, PIN change persists.
+  TIMELINE: This phase takes 1-2 hours. It unblocks everything else.
+
+
+DIRECTIVE D2: Expand Phase 0 baseline metrics
+
+Add to Phase 0 "Run the baseline" section:
+
+  "QUANTITATIVE BASELINE (record before any changes):
+   a. Browser network audit: Load DashboardPage → count /rest/v1/* and /rpc/* requests.
+      Record: number of requests, total payload bytes, largest single response.
+   b. npm run build → record dist/ total JS size and largest chunk name/size.
+   c. npm run lint → record exact error count (not just pass/fail).
+   d. npx vitest run → record test count and pass rate.
+   e. Run Lighthouse on student HomePage (mobile, simulated throttling).
+      Record: Performance score, TTI, LCP.
+   These numbers are the 'before' state. Every phase completion criterion must
+   reference at least one metric. Phase 12 must show improvement on all five."
+
+
+DIRECTIVE D3: Split Phase 2 into 2A (immediate) and 2B (after Phase 7)
+
+Replace Phase 2 with two sub-phases:
+
+  PHASE 2A — Security Quick Wins (no auth model required):
+  These fixes are independent of the student identity decision. Do them first.
+
+  Action 1: Fix syncEngine whitelist (src/lib/sync/syncEngine.ts lines 49-61)
+    Whitelist: ['submit_departure', 'return_departure', 'cancel_departure', 'register_push']
+    Reject all other tableName values with a logged error.
+    Remove all non-RPC operations (INSERT, UPDATE, DELETE) from the handler.
+    All offline operations must be named RPCs, not direct table writes.
+
+  Action 2: Remove ADMIN_OVERRIDE from public submit_departure
+    submit_departure is a public RPC called by students.
+    Admin overrides require a server-verified identity — impossible without auth.
+    Interim: reject p_source='ADMIN_OVERRIDE' in the public RPC unconditionally.
+    Create admin_direct_departure RPC GRANTED to service_role only.
+    Admin UI calls a secured Edge Function → Edge Function calls service_role RPC.
+
+  Action 3: Add X-Admin-Secret to three Edge Functions
+    notify-admin-quota-full: add secret check before ANY action (register or notify)
+    broadcast-location-request: add secret check
+    send-push: add secret check (internal-only, not called from browser)
+    Store ADMIN_NOTIFY_SECRET in Supabase Edge Function Secrets.
+    Test: call each function without the header → verify 401 response.
+
+  Action 4: Add GRANT EXECUTE to change_admin_pin
+    GRANT EXECUTE ON FUNCTION public.change_admin_pin(text, text) TO authenticated;
+    Test: admin can successfully change PIN and it persists.
+
+  Action 5: REVOKE anon from sensitive RPCs
+    REVOKE EXECUTE ON FUNCTION public.approve_departure FROM anon;
+    REVOKE EXECUTE ON FUNCTION public.reject_departure FROM anon;
+    REVOKE EXECUTE ON FUNCTION public.cancel_departure FROM anon;
+    REVOKE EXECUTE ON FUNCTION public.tick_departures FROM anon;
+    (Keep authenticated — students call some of these.)
+
+  Action 6: Enable RLS on admin-only tables (no auth model required)
+    These tables should only be readable by service_role:
+    ALTER TABLE admin_overrides ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY "admin_overrides_service_only" ON admin_overrides
+      FOR ALL USING (auth.role() = 'service_role');
+    ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY "app_settings_service_only" ON app_settings
+      FOR ALL USING (auth.role() = 'service_role');
+    -- This closes the admin PIN read vulnerability immediately.
+
+  Action 7: Fix useDeparturesRealtime client-side filtering (privacy fix)
+    Apply clientId/classId/status filters in each event callback before
+    calling the user's onInsert/onUpdate/onDelete handlers.
+    This closes T7 (student sees other students' events).
+
+  PHASE 2A COMPLETION CRITERIA:
+  - syncEngine: inject a synthetic invalid RPC name into IndexedDB → it is rejected
+  - notify-admin-quota-full: POST without secret → returns 401
+  - broadcast-location-request: POST without secret → returns 401
+  - send-push: POST without secret → returns 401
+  - change_admin_pin: admin can change PIN successfully
+  - app_settings: SELECT * FROM app_settings returns 0 rows for anon caller
+  - Student receiving a departure event for another student: their callback is NOT called
+
+  PHASE 2B — RLS on student/departure data (requires Phase 7 auth model):
+  Placeholder — implement after Phase 7 decides identity model.
+  Actions will depend on whether students get Supabase Auth accounts.
+
+
+DIRECTIVE D4: Add to Phase 3 — audit cascade and PIN architecture
+
+Add to Phase 3 actions:
+  "8. Change admin_overrides ON DELETE CASCADE to ON DELETE SET NULL.
+      Currently, deleting a student from Google Sheets permanently destroys all
+      admin action history for that student. This violates audit integrity.
+      New migration:
+        ALTER TABLE admin_overrides
+          DROP CONSTRAINT admin_overrides_studentId_fkey,
+          ADD CONSTRAINT admin_overrides_studentId_fkey
+            FOREIGN KEY ('studentId') REFERENCES students(id) ON DELETE SET NULL;
+      Add a deleted_at TIMESTAMPTZ column to admin_overrides.
+      When a student is deleted: SET deleted_student_name = fullName BEFORE delete.
+
+   9. Document the supervisor PIN architectural debt.
+      Supervisor PINs are computationally derived from the admin PIN in sync-from-sheets.
+      This is a known architectural weakness: one exposed admin PIN exposes all supervisor
+      PINs. Phase 7 must choose between:
+        Option A: Independent hashed supervisor PINs in app_settings (minimal change)
+        Option B: Supabase Auth accounts for supervisors (recommended, larger change)
+      Do not change the derivation logic before Phase 7 decides. Changing it without
+      a coordinated rollout will invalidate all existing supervisor access."
+
+
+DIRECTIVE D5: Add to Phase 4 — specific migration targets
+
+Add to Phase 4 actions:
+  "8. Create get_location_breakdown() RPC — the single most impactful performance fix.
+      This replaces api.getStudents() in DashboardPage line 181.
+      SQL:
+        CREATE OR REPLACE FUNCTION public.get_location_breakdown()
+        RETURNS JSONB
+        LANGUAGE sql
+        SECURITY DEFINER
+        STABLE
+        AS $$
+          SELECT jsonb_build_object(
+            'on_campus',  COUNT(*) FILTER (WHERE \"currentStatus\" = 'ON_CAMPUS'),
+            'off_campus', COUNT(*) FILTER (WHERE \"currentStatus\" IN ('OFF_CAMPUS', 'OVERDUE')),
+            'pending',    COUNT(*) FILTER (WHERE \"pendingApproval\" = true)
+          )
+          FROM students;
+        $$;
+        GRANT EXECUTE ON FUNCTION public.get_location_breakdown() TO authenticated;
+
+   9. Fix createEvent() in supabaseClient.ts lines 391-394.
+      The student status update after a CHECK_IN event has no error handling.
+      Wrap in try/catch and surface the error to the caller.
+      Also mirror this fix in mockClient.createEvent() which does not update
+      student status at all — making offline behavior differ from online.
+
+   10. Fix OffCampusSheet timezone handling (lines 82-88).
+       Use explicit Asia/Jerusalem timezone when constructing timestamps:
+         const startISO = new Date(
+           `${startDate}T${startTime}:00`
+         ).toLocaleString('en-CA', { timeZone: 'Asia/Jerusalem' })
+       Or add date-fns-tz as a dependency and use zonedTimeToUtc().
+
+   11. Add Dexie schema v4 removing the deprecated absenceRequests store.
+       Migration: this.version(4).stores({ absenceRequests: null })"
+
+
+DIRECTIVE D6: Swap Phase 5 and Phase 6
+
+Without exception: Domain first, Services second.
+The plan's own text for Phase 6 says "Pure rules are the foundation."
+This is correct. Foundations are built before the structure they support.
+
+New Phase 5: Domain Layer (was Phase 6)
+New Phase 6: Services Layer (was Phase 5)
+
+Add to new Phase 5 (Domain):
+  "Note: calcQuota() already exists in src/lib/quota.ts as a pure function.
+   This is the pattern to follow for ALL domain functions. Add tests that verify
+   calcQuota() matches the server-side SQL formula in submit_departure line 319.
+   If they diverge by even one integer for any class size, that is a quota bug."
+
+
+DIRECTIVE D7: Move Phase 7 (Auth Model) before Phase 2B
+
+Phase 7 is a decision document, not a code implementation phase.
+It should be completed in parallel with Phase 2A (while 2A is being implemented).
+Its decisions unlock Phase 2B.
+
+Add to Phase 7 at the top:
+  "This phase produces a decision document, not code. The decisions made here
+   must be written down and agreed upon before Phase 2B begins. Implementation
+   of the chosen auth model is part of Phase 7's actions, but the decisions
+   can and should be made during Phase 2A's implementation window.
+
+   DECISION CHECKLIST (must resolve before Phase 2B):
+   □ Will students get Supabase Auth accounts? (OTP, personal PIN, or device approval)
+   □ How does the admin PIN relate to Supabase Auth? (unified or separate)
+   □ Will supervisor access use Auth accounts or a separate PINs table?
+   □ What goes in the JWT claim for role verification?
+   □ Is the temporary supervisor PIN derivation from admin PIN acceptable for
+     the transition period, or must it change immediately?
+
+   Add to Phase 7 actions:
+   Investigate change_admin_pin migration (20260508_transactional_admin_pin.sql):
+   This function stores the PIN in plaintext in app_settings AND as bcrypt in
+   auth.users. Both must be in sync. Verify the live database has both.
+   If app_settings.admin_pin and auth.users.encrypted_password are out of sync,
+   admin login (which uses Supabase Auth) will reject a correct PIN."
+
+
+DIRECTIVE D8: Add to Phase 8 — specific Realtime/Offline fixes
+
+Add to Phase 8 Realtime section:
+  "useDeparturesRealtime receives filter options that are completely ignored.
+   The interim fix (client-side filtering) is in Phase 2A.
+   Phase 8 adds server-side Postgres Changes filters using Supabase's filter option:
+     channel.on('postgres_changes', {
+       event: '*', schema: 'public', table: 'departures',
+       filter: `student_id=eq.${studentId}`  // Server-side row filter
+     }, callback)
+   This requires studentId to be in the authenticated session context.
+   After Phase 7 establishes Auth for students, add server-side filters here."
+
+Add to Phase 8 Offline section:
+  "After Phase 2A adds the whitelist to syncEngine, Phase 8 adds typed constructors:
+     export const OfflineOps = {
+       submitDeparture: (payload: SubmitDeparturePayload): SyncQueueItem => ({
+         id: crypto.randomUUID(), tableName: 'submit_departure',
+         operation: 'RPC', payload, clientTimestamp: new Date().toISOString(), retryCount: 0
+       }),
+       returnDeparture: (id: string, studentId: string): SyncQueueItem => ({ ... }),
+       cancelDeparture: (id: string): SyncQueueItem => ({ ... }),
+     }
+   Services (Phase 6) MUST use these constructors. No raw SyncQueueItem creation
+   outside of OfflineOps. Add eslint rule to enforce this.
+   Also: add exponential backoff to syncEngine retry logic. Current behavior
+   (30-second polling, linear retry) hammers the server when items consistently fail.
+   Recommended: 30s → 60s → 120s → 240s, then stop and alert the user."
+
+
+DIRECTIVE D9: Add to Phase 9 — specific UI fixes
+
+Add to Phase 9 actions:
+  "5. Fix ClassSupervisorDashboard.tsx line 477.
+      if (!classId) return appears before useEffect calls.
+      React's Rules of Hooks prohibit early returns before hooks.
+      Move the guard inside each useEffect:
+        useEffect(() => { if (!classId) return; ... subscribe(); }, [classId])
+      This is a latent bug — it works today because classId is set before component
+      mounts, but it will cause issues if React's reconciler behavior changes.
+
+   6. Add useMemo to DashboardPage chart computations (lines 301-320).
+      const pieData = useMemo(() => buildPieData(locationBreakdown), [locationBreakdown])
+      const gradeChartData = useMemo(() => buildGradeChart(classStats), [classStats])
+      The 60-second animation tick (setTick) triggers re-renders that currently
+      cause Recharts to receive new array references every minute, forcing chart
+      remounts even when underlying data is unchanged."
+
+
+DIRECTIVE D10: Add to Phase 10 — specific bundle fixes
+
+Add to Phase 10 actions:
+  "1. [PRIORITY] Add React.lazy() to all routes in App.tsx.
+      This requires only changing import statements. No component refactoring needed.
+      Before: import DashboardPage from './pages/admin/DashboardPage'
+      After:  const DashboardPage = lazy(() => import('./pages/admin/DashboardPage'))
+      Wrap each Route's element with <Suspense fallback={<SplashScreen />}>.
+      Student users will no longer download Recharts, roll call, or exceptions UI.
+      Expected: ~150KB reduction in initial student JS bundle.
+
+   2. Fix RollCallPage timing-based polling (lines 183, 191).
+      The page fetches all students at line 183 immediately after broadcasting,
+      then again at line 191 via setTimeout. The realtime subscription at line 204
+      already handles updates. Remove the setTimeout refetch entirely.
+      The initial fetch at line 183 is fine — it loads the baseline for comparison.
+
+   3. Remove DashboardPage's direct supabase.channel() subscription (line 222).
+      It subscribes to students realtime and calls loadData() on any change.
+      The useDeparturesRealtime hook at line 235 also calls loadData() on changes.
+      Result: every DB event triggers two full reloads simultaneously.
+      Remove line 222-225. Route all realtime through the hook abstraction."
+
+
+================================================================================
+PART IX — CORRECTED PHASE ORDER (final)
+================================================================================
+
+Current Codex plan:
+  0 → 1 → 2 → 3 → 4 → 5(Services) → 6(Domain) → 7(Auth) → 8 → 9 → 10 → 11 → 12
+
+Three ordering bugs:
+  A) Phase 6 (Domain) after Phase 5 (Services): services depend on domain
+  B) Phase 7 (Auth) after Phase 2 (RLS): RLS depends on identity decisions
+  C) Phase 11 (Tests) as a late-phase: testing must be continuous
+
+Corrected order:
+
+  Phase -1: Production Incident Verification (1-2 days)
+    → Verify/fix missing auth RPCs and change_admin_pin GRANT in LIVE project.
+
+  Phase 0: Baseline Lock + Quantitative Metrics (2-3 days)
+    → Branch, document flows, record exact numbers for 5 baseline metrics.
+
+  Phase 1: Full Audit + Dependency Map (3-5 days)
+    → Map every Supabase call, classify, identify mockClient divergences.
+
+  Phase 2A: Security Quick Wins (1 week, no auth model required)
+    → syncEngine whitelist, Edge Function auth, change_admin_pin GRANT,
+       anon REVOKE from RPCs, RLS on admin-only tables, realtime privacy filter.
+
+  [Phase 7 decisions made in parallel with Phase 2A implementation]
+  Phase 7: Auth Model Decision (decision document, not code — 1 week)
+    → Agree on student identity, admin PIN architecture, supervisor model.
+    → This is a meeting/document, not implementation.
+
+  Phase 2B: RLS on student/departure tables (1 week, requires Phase 7 decisions)
+    → Enable RLS on students, departures, events using chosen identity model.
+    → Test in staging Supabase project first.
+
+  Phase 3: Data Model and DB Contract (1 week)
+    → Sources of truth, identifier standardization, DTOs, retention policy,
+       change admin_overrides cascade to SET NULL, document supervisor PIN debt.
+
+  Phase 4: API Split + Projection Optimization + AppResult (2 weeks)
+    → Split supabaseClient.ts, add aggregation RPCs, fix mockClient divergence,
+       fix createEvent error handling, fix OffCampusSheet timezone, clean Dexie.
+
+  Phase 5 (new): Domain Layer (1 week)
+    → calcQuota, departureTransitions, israelDate, roles, SMS parser.
+    → 100% unit test coverage on all domain functions.
+
+  Phase 6 (new): Services Layer (2 weeks)
+    → checkoutStudent, approveDeparture, rejectDeparture, returnDeparture, etc.
+    → Each service calls Domain + API. No direct Supabase imports in services.
+
+  Phase 8: Realtime + Offline + Push (1 week)
+    → Server-side Postgres Changes filters (after Phase 7 auth),
+       typed OfflineOps constructors, exponential backoff.
+
+  Phase 9: UI Feature Split (2 weeks)
+    → Split large pages, fix hook violation, add useMemo to charts.
+
+  Phase 10: Performance + Bundle + CI (1 week)
+    → React.lazy() on all routes, remove double subscription,
+       fix RollCallPage polling, CI gates for lint/test/build.
+
+  Phase 11: Legacy Cleanup + Documentation (1 week)
+    → eslint boundaries, dead code removal, CLAUDE.md/HANDOFF.md updates.
+
+  [CI gate (lint + test + build) must pass at end of every phase before merging]
+  [Tests added in each phase, not accumulated in a single late phase]
+
+Estimated total timeline: 14-18 weeks of focused development.
+
+
+================================================================================
+PART X — DECISIONS THAT MUST BE RESOLVED BEFORE IMPLEMENTATION
+================================================================================
+
+These are blocking decisions. Some phases cannot start until they are answered.
+
+D1 (blocks Phase 2B): Student identity model
+  "Will students get Supabase Auth accounts?
+   Options: OTP, personal PIN, or device approval via QR code at enrollment.
+   If NO: student RLS must use a device token or ID-number claim mechanism.
+   If YES: student RLS uses auth.uid() = students.id (standard pattern).
+   This decision cannot be deferred past Phase 2A."
+
+D2 (blocks Phase 7): Admin PIN architecture
+  "Will the admin PIN remain dual-stored (app_settings plaintext + auth.users bcrypt)?
+   This is messy but functional. The alternative is to migrate to auth-only storage,
+   which requires removing the plaintext from app_settings and updating
+   sync-from-sheets to use a different mechanism for supervisor PIN derivation.
+   The dual-storage approach should be explicitly documented as a TEMPORARY state
+   with a migration path defined in Phase 7."
+
+D3 (blocks Phase 7): Supervisor credential model
+  "Will supervisors get independent credentials (not derived from admin PIN)?
+   Currently: supervisorPin = adminPin + classCode.
+   Risk: changing admin PIN requires manual notification and re-enrollment of
+   all supervisors. Not scalable.
+   Recommended: supervisors get independent Supabase Auth accounts with classId
+   stored as a user metadata claim. This is Phase 7 work but the decision
+   must be made before Phase 2B RLS is written."
+
+D4 (blocks Phase 3): Audit trail retention after student deletion
+  "Should admin_overrides history be preserved when a student is removed from
+   Google Sheets? Currently: ON DELETE CASCADE destroys all history.
+   Recommended: ON DELETE SET NULL with student name cached in a separate column.
+   This requires a schema migration in Phase 3. Must be decided before Phase 3."
+
+D5 (blocks Phase 4): Analytics storage strategy
+  "Should dashboard aggregations be:
+   A) Regular RPCs (flexible, easy to secure, no maintenance overhead)
+   B) Materialized views (fastest reads, requires scheduled refresh)
+   C) Edge Function cached responses (complex, flexible caching)
+   Recommendation: A (RPCs) for Phase 4. Revisit B if query times are slow
+   under real load. Decision affects Phase 3 schema design."
+
+D6 (should be decided before any phase): Staging Supabase project
+  "Create a free-tier Supabase project as staging before Phase 2A begins.
+   This is not optional — Phase 2B RLS migrations must be tested before
+   production. A staging project costs nothing and prevents production incidents."
+
+
+================================================================================
+END OF TECHNICAL REVIEW v3
+================================================================================
+
+This document is for Codex. The next step is for Codex to update
+yeshiva-system-improvement-plan-en.txt incorporating these directives.
+
+Priority order for Codex's next update:
+  1. Add Phase -1 (production incident verification)
+  2. Expand Phase 0 with quantitative baseline
+  3. Split Phase 2 into 2A and 2B with the specific action items above
+  4. Move Phase 7 to before Phase 2B
+  5. Swap Phase 5 and Phase 6
+  6. Add all gap items to their respective phases
+
+After the plan is updated, the next review round should focus on:
+  - Verifying Phase 2A action items are precise enough to implement
+  - Reviewing the auth model decision (D1-D3 above)
+  - Confirming the staging environment strategy
+  - Writing the first pgTAP test templates for RLS verification
+
+The system has a solid foundation. The refactor direction is correct.
+The main risk is not the architecture — it is the execution order and the
+security gaps that must be closed before any other work begins.
