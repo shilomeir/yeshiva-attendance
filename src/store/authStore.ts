@@ -4,7 +4,6 @@ import { getDeviceToken } from '@/lib/auth/deviceToken'
 import { parseClassSupervisorSuffix, type ClassSupervisorInfo } from '@/lib/auth/supervisorAuth'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
-import { registerPushNotifications } from '@/lib/native/pushNotifications'
 import { unsubscribeFromPush } from '@/lib/pwa/webPush'
 import type { Student } from '@/types'
 
@@ -52,7 +51,6 @@ export const useAuthStore = create<AuthState>()(
           const now = new Date().toISOString()
           supabase.from('students').update({ lastSeen: now }).eq('id', student.id).then(() => {})
           set({ currentUser: { ...student, lastSeen: now }, isAdmin: false, classSupervisor: null, isLoading: false })
-          registerPushNotifications(student.id)
           return true
         } catch {
           set({ error: 'שגיאה בהתחברות. נסה שוב.', isLoading: false })
