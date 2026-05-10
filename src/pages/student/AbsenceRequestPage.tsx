@@ -222,11 +222,8 @@ export function AbsenceRequestPage() {
 
                 {/* Approval actions */}
                 <div className="flex flex-col gap-2">
-                  <Button onClick={() => doSubmit(false, true)} disabled={isSubmitting} className="w-full">
-                    שלח בקשה לאישור מנהל
-                  </Button>
-                  <Button onClick={() => doSubmit(true, false)} disabled={isSubmitting} variant="outline"
-                    className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400">
+                  <Button onClick={() => doSubmit(true, false)} disabled={isSubmitting}
+                    className="w-full bg-[var(--orange)] hover:bg-orange-600 text-white">
                     <AlertOctagon className="h-4 w-4" />
                     בקשה חריגה (דחופה)
                   </Button>

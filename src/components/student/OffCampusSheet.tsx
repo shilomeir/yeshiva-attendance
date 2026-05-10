@@ -184,19 +184,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
               </p>
             </div>
 
-            <p className="text-sm text-center text-[var(--text-muted)]">
-              האם בכל זאת אתה רוצה לבקש אישור?
-            </p>
-
             <div className="flex flex-col gap-2">
-              <Button
-                onClick={() => doSubmit(false, true)}
-                disabled={isSubmitting}
-                variant="outline"
-                className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400"
-              >
-                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'כן, בקש אישור'}
-              </Button>
               <Button
                 onClick={() => doSubmit(true, false)}
                 disabled={isSubmitting}
@@ -210,7 +198,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
                 disabled={isSubmitting}
                 className="w-full text-[var(--text-muted)]"
               >
-                לא, ביטול
+                ביטול
               </Button>
             </div>
           </div>
