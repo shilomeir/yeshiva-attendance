@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from '@/lib/db/schema'
 import { MockApiClient } from '@/lib/api/mockClient'
-import type { Student, Departure } from '@/types'
+import type { Student, Departure, AdminOverride } from '@/types'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,20 @@ function makeDeparture(studentId: string, overrides: Partial<Departure> = {}): D
     rejected_at: null,
     gps_lat: null,
     gps_lng: null,
+    ...overrides,
+  }
+}
+
+function makeAdminOverride(studentId: string, overrides: Partial<AdminOverride> = {}): AdminOverride {
+  return {
+    id: uuidv4(),
+    studentId,
+    adminId: 'admin',
+    action: 'manual_override',
+    previousStatus: 'ON_CAMPUS',
+    newStatus: 'OFF_CAMPUS',
+    timestamp: new Date().toISOString(),
+    note: null,
     ...overrides,
   }
 }
@@ -253,5 +267,26 @@ describe('Student self-submit OFF_CAMPUS (submitDeparture)', () => {
     // Student status should NOT have changed
     const unchanged = await db.students.get(studentIds[3])
     expect(unchanged?.currentStatus).toBe('ON_CAMPUS')
+  })
+})
+
+describe('Audit log retention', () => {
+  it('hard-deletes admin audit rows older than 48 hours before returning the log', async () => {
+    const student = makeStudent()
+    await db.students.add(student)
+
+    const now = new Date()
+    const oldTimestamp = new Date(now.getTime() - 49 * 60 * 60 * 1000).toISOString()
+    const freshTimestamp = new Date(now.getTime() - 47 * 60 * 60 * 1000).toISOString()
+
+    const oldOverride = makeAdminOverride(student.id, { timestamp: oldTimestamp, note: 'old row' })
+    const freshOverride = makeAdminOverride(student.id, { timestamp: freshTimestamp, note: 'fresh row' })
+    await db.adminOverrides.bulkAdd([oldOverride, freshOverride])
+
+    const visible = await api.getAdminOverrides()
+
+    expect(visible.map((override) => override.id)).toEqual([freshOverride.id])
+    expect(await db.adminOverrides.get(oldOverride.id)).toBeUndefined()
+    expect(await db.adminOverrides.count()).toBe(1)
   })
 })

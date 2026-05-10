@@ -32,6 +32,8 @@ function toIso(d: Date | string): string {
   return d instanceof Date ? d.toISOString() : d
 }
 
+const AUDIT_LOG_RETENTION_MS = 48 * 60 * 60 * 1000
+
 function overlaps(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
   return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart)
 }
@@ -510,6 +512,8 @@ export class MockApiClient implements IApiClient {
   // ── Audit log ──────────────────────────────────────────────────────────────
 
   async getAdminOverrides(): Promise<AdminOverride[]> {
+    const cutoff = new Date(Date.now() - AUDIT_LOG_RETENTION_MS).toISOString()
+    await db.adminOverrides.where('timestamp').below(cutoff).delete()
     return db.adminOverrides.orderBy('timestamp').reverse().toArray()
   }
 
