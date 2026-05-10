@@ -86,7 +86,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
 
       if (new Date(endAt) <= new Date(startAt)) {
         toast({ title: 'שגיאה', description: 'שעת החזרה חייבת להיות אחרי שעת היציאה', variant: 'destructive' })
-        setStage(forcePending ? 'full' : 'form')
+        setStage(quotaInfo ? 'full' : 'form')
         return
       }
 
@@ -102,7 +102,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       if ('error' in result) {
         const r = result as { error: string; message?: string }
         toast({ title: 'שגיאה', description: r.message ?? r.error, variant: 'destructive' })
-        setStage(forcePending ? 'full' : 'form')
+        setStage(quotaInfo ? 'full' : 'form')
         return
       }
 
@@ -144,7 +144,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
         <SheetHeader className="mb-4">
           <SheetTitle>בקשת יציאה מהישיבה</SheetTitle>
           <SheetDescription>
-            {stage === 'full' ? 'הכיתה מלאה — בחר כיצד להגיש את הבקשה' : 'מלא את פרטי היציאה'}
+            {stage === 'full' ? 'הכיתה מלאה — ניתן להגיש בקשה חריגה בלבד' : 'מלא את פרטי היציאה'}
           </SheetDescription>
         </SheetHeader>
 
