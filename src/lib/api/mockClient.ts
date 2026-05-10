@@ -26,6 +26,7 @@ import type {
   SubmitDeparturePayload,
   ListDeparturesOptions,
   CreateEventPayload,
+  PushNotificationTarget,
 } from './types'
 
 function toIso(d: Date | string): string {
@@ -103,8 +104,30 @@ export class MockApiClient implements IApiClient {
     await db.students.update(id, { push_token: token })
   }
 
-  async sendPushToAll(_title: string, _body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
-    return { sent: 0, failed: 0 }
+  async sendPushNotification(
+    _title: string,
+    _body: string,
+    target: PushNotificationTarget = {},
+  ): Promise<{ sent: number; failed: number; lastError?: string }> {
+    if (target.studentIds && target.studentIds.length === 0) {
+      return { sent: 0, failed: 0 }
+    }
+
+    let students = await db.students.toArray()
+    if (target.studentIds) {
+      const ids = new Set(target.studentIds)
+      students = students.filter((s) => ids.has(s.id))
+    } else if (target.classId) {
+      students = students.filter((s) => s.classId === target.classId)
+    } else if (target.grade) {
+      students = students.filter((s) => s.grade === target.grade)
+    }
+
+    return { sent: students.filter((s) => Boolean(s.push_token)).length, failed: 0 }
+  }
+
+  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
+    return this.sendPushNotification(title, body)
   }
 
   async deleteStudent(id: string): Promise<void> {

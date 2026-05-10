@@ -5,6 +5,7 @@ import { parseClassSupervisorSuffix, type ClassSupervisorInfo } from '@/lib/auth
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { unsubscribeFromPush } from '@/lib/pwa/webPush'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student } from '@/types'
 
 const ADMIN_EMAIL = 'admin@yeshiva.local'
@@ -52,8 +53,8 @@ export const useAuthStore = create<AuthState>()(
           supabase.from('students').update({ lastSeen: now }).eq('id', student.id).then(() => {})
           set({ currentUser: { ...student, lastSeen: now }, isAdmin: false, classSupervisor: null, isLoading: false })
           return true
-        } catch {
-          set({ error: 'שגיאה בהתחברות. נסה שוב.', isLoading: false })
+        } catch (err) {
+          set({ error: getErrorMessage(err, 'ההתחברות נכשלה'), isLoading: false })
           return false
         }
       },

@@ -9,6 +9,7 @@ import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student, CalendarDeparture } from '@/types'
 
 function getTimeStr(isoStr: string): string {
@@ -99,8 +100,8 @@ export function HomePage() {
       setUndoCheckout(null)
       setActiveDeparture(null)
       toast({ title: 'היציאה בוטלה', description: 'הסטטוס חזר ל"בישיבה"' })
-    } catch {
-      toast({ title: 'שגיאה בביטול', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה בביטול', description: getErrorMessage(err, 'ביטול היציאה נכשל'), variant: 'destructive' })
     }
   }
 

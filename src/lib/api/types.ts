@@ -65,6 +65,12 @@ export interface CreateEventPayload {
   departureId?: string | null
 }
 
+export interface PushNotificationTarget {
+  grade?: string
+  classId?: string
+  studentIds?: string[]
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IApiClient — single interface for Supabase + Mock implementations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +86,7 @@ export interface IApiClient {
   updateStudentLocation(id: string, lat: number, lng: number): Promise<void>
   updateStudentFcmToken(id: string, token: string): Promise<void>
   updatePushToken(id: string, token: string | null): Promise<void>
+  sendPushNotification(title: string, body: string, target?: PushNotificationTarget): Promise<{ sent: number; failed: number; lastError?: string }>
   sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }>
   deleteStudent(id: string): Promise<void>
   getClassSize(classId: string): Promise<number>

@@ -9,7 +9,7 @@ import type {
 } from '@/types'
 import type {
   IApiClient, GetStudentsOptions, SubmitDeparturePayload,
-  ListDeparturesOptions, CreateEventPayload,
+  ListDeparturesOptions, CreateEventPayload, PushNotificationTarget,
 } from './types'
 
 function toIso(d: Date | string): string {
@@ -90,11 +90,25 @@ export class SupabaseApiClient implements IApiClient {
     if (error) throw error
   }
 
-  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
-    const { data, error } = await supabase
+  async sendPushNotification(
+    title: string,
+    body: string,
+    target: PushNotificationTarget = {},
+  ): Promise<{ sent: number; failed: number; lastError?: string }> {
+    if (target.studentIds && target.studentIds.length === 0) {
+      return { sent: 0, failed: 0 }
+    }
+
+    let query = supabase
       .from('students')
-      .select('id, push_token')
+      .select('id, push_token, grade, classId')
       .not('push_token', 'is', null)
+
+    if (target.studentIds) query = query.in('id', target.studentIds)
+    else if (target.classId) query = query.eq('classId', target.classId)
+    else if (target.grade) query = query.eq('grade', target.grade)
+
+    const { data, error } = await query
     if (error) throw error
 
     const students = (data ?? []).filter((s: { id: string; push_token: string }) => s.push_token)
@@ -124,6 +138,10 @@ export class SupabaseApiClient implements IApiClient {
       })
     )
     return { sent, failed, lastError }
+  }
+
+  async sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }> {
+    return this.sendPushNotification(title, body)
   }
 
   async deleteStudent(id: string): Promise<void> {
@@ -261,7 +279,42 @@ export class SupabaseApiClient implements IApiClient {
       p_note:       note ?? null,
     })
     if (error) throw error
-    return data as { status: 'REJECTED' } | { error: string }
+    const res = data as { status?: 'REJECTED'; error?: string }
+
+    if (res.status === 'REJECTED') {
+      await this._sendRejectionPush(id, note)
+    }
+
+    return res as { status: 'REJECTED' } | { error: string }
+  }
+
+  private async _sendRejectionPush(departureId: string, adminNote?: string): Promise<void> {
+    try {
+      const { data: dep } = await supabase
+        .from('departures')
+        .select('student_id')
+        .eq('id', departureId)
+        .single()
+      if (!dep) return
+
+      const { data: student } = await supabase
+        .from('students')
+        .select('push_token')
+        .eq('id', dep.student_id)
+        .single()
+
+      if (student?.push_token) {
+        await supabase.functions.invoke('send-push', {
+          body: {
+            subscription: student.push_token,
+            title: 'בקשת היציאה החריגה נדחתה',
+            body: adminNote || 'הבקשה שלך נדחתה על ידי הנהלת הישיבה',
+          },
+        })
+      }
+    } catch {
+      // Non-fatal
+    }
   }
 
   async cancelDeparture(

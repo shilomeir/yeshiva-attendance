@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student, CalendarDeparture, DailyPresenceData } from '@/types'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -547,6 +548,7 @@ export function ExceptionsPage() {
   const [weeklyData,   setWeeklyData]   = useState<WeeklyPoint[]>([])
   const [now,          setNow]          = useState<Date>(new Date())
   const [isLoading,    setIsLoading]    = useState(true)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Tick every 30 s to keep "now" line and countdowns fresh
@@ -590,6 +592,7 @@ export function ExceptionsPage() {
   // ── Load all data ──────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     setIsLoading(true)
+    setErrorMessage(null)
     try {
       const [allStudents, activeDeps, presenceRaw] = await Promise.all([
         api.getStudents(),
@@ -638,6 +641,7 @@ export function ExceptionsPage() {
       setWeeklyData(buildWeeklyPoints(presenceRaw))
     } catch (err) {
       console.error('Failed to load exceptions data', err)
+      setErrorMessage(getErrorMessage(err, 'טעינת נתוני החריגות נכשלה'))
     } finally {
       setIsLoading(false)
     }
@@ -679,6 +683,20 @@ export function ExceptionsPage() {
               style={{ background: 'var(--bg-2)', animationDelay: `${i * 100}ms` }}
             />
           ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (errorMessage) {
+    return (
+      <div className="flex flex-col gap-6 p-4 lg:p-6" dir="rtl">
+        <div>
+          <h2 className="text-2xl font-bold text-[var(--text)]">חריגות עכשיו</h2>
+          <p className="text-sm text-[var(--text-muted)]">מעקב בזמן אמת אחר תלמידים מחוץ לישיבה</p>
+        </div>
+        <div className="rounded-2xl border border-red-200 bg-red-50/70 p-4 text-sm text-red-700 dark:border-red-800/40 dark:bg-red-950/20 dark:text-red-300">
+          {errorMessage}
         </div>
       </div>
     )

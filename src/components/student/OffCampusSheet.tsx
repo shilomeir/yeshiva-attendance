@@ -14,6 +14,7 @@ import { api } from '@/lib/api'
 import { scheduleReturn } from '@/lib/notifications/scheduleReturn'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { QuotaFullResult, DepartureSubmitResult } from '@/types'
 
 function nowTimeStr(): string {
@@ -100,11 +101,7 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       })
 
       if ('error' in result) {
-        const r = result as { error: string; message?: string }
-        const description = r.error === 'DUPLICATE_DEPARTURE'
-          ? 'יש לך בקשת יציאה פעילה לאותה תקופה'
-          : (r.message ?? r.error)
-        toast({ title: 'שגיאה', description, variant: 'destructive' })
+        toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'שליחת בקשת היציאה נכשלה'), variant: 'destructive' })
         setStage(quotaInfo ? 'full' : 'form')
         return
       }
@@ -129,8 +126,8 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
       }
       onSuccess(dep.id)
       onClose()
-    } catch {
-      toast({ title: 'שגיאה בשליחת הבקשה', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה בשליחת הבקשה', description: getErrorMessage(err, 'שליחת בקשת היציאה נכשלה'), variant: 'destructive' })
       setStage(forcePending ? 'full' : 'form')
     }
   }

@@ -3,6 +3,8 @@ import { X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student } from '@/types'
 
 interface ClassEditModalProps {
@@ -29,8 +31,8 @@ export function ClassEditModal({ student, onClose, onSaved }: ClassEditModalProp
       await api.updateStudentGrade(student.id, selectedGrade, selectedClass)
       onSaved()
       onClose()
-    } catch {
-      // ignore
+    } catch (err) {
+      toast({ title: 'שגיאה בשמירת הכיתה', description: getErrorMessage(err, 'שמירת הכיתה של התלמיד נכשלה'), variant: 'destructive' })
     } finally {
       setSaving(false)
     }
