@@ -316,7 +316,7 @@ BEGIN
   FROM students
   WHERE "classId" = v_class_id;
 
-  v_quota := GREATEST(1, ROUND((v_class_size * 3)::numeric / 25));
+  v_quota := GREATEST(1, FLOOR(v_class_size * 0.135));
 
   -- ── 5. Decide initial status ───────────────────────────────────────────────
   IF p_source = 'ADMIN_OVERRIDE' THEN
