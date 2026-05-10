@@ -101,7 +101,10 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
 
       if ('error' in result) {
         const r = result as { error: string; message?: string }
-        toast({ title: 'שגיאה', description: r.message ?? r.error, variant: 'destructive' })
+        const description = r.error === 'DUPLICATE_DEPARTURE'
+          ? 'יש לך בקשת יציאה פעילה לאותה תקופה'
+          : (r.message ?? r.error)
+        toast({ title: 'שגיאה', description, variant: 'destructive' })
         setStage(quotaInfo ? 'full' : 'form')
         return
       }
