@@ -186,46 +186,54 @@ export function AbsenceRequestPage() {
             {/* ── Quota-full banner ── */}
             {quotaStage === 'full' && quotaInfo && (
               <div className="flex flex-col gap-4 mb-2">
-                <div className="flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20">
+                {/* Main notice */}
+                <div className="flex flex-col gap-3 rounded-xl border border-orange-300 bg-orange-50 p-4 dark:border-orange-800 dark:bg-orange-950/20">
                   <div className="flex items-start gap-2">
-                    <AlertOctagon className="mt-0.5 h-5 w-5 shrink-0 text-[var(--red)]" />
+                    <AlertOctagon className="mt-0.5 h-5 w-5 shrink-0 text-[var(--orange)]" />
                     <div>
-                      <p className="font-bold text-[var(--red)]">המקום נגמר!</p>
-                      <p className="mt-0.5 text-sm text-[var(--red)]">
-                        {`התלמידים שרשומים ביציאה מהכיתה שלך:`}
+                      <p className="font-bold text-[var(--text)]">מכסת היציאות בכיתה מלאה</p>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">
+                        כרגע אין מקום ליציאה רגילה. אפשר לשלוח בקשה לאישור מנהל.
                       </p>
                     </div>
                   </div>
+
+                  {/* Overlapping students — visually secondary */}
                   {quotaInfo.overlapping.length > 0 && (
-                    <div className="flex flex-col gap-1.5 rounded-lg bg-red-100/60 px-3 py-2 dark:bg-red-900/20">
-                      {quotaInfo.overlapping.map((s) => (
-                        <div key={s.studentId} className="flex items-center justify-between gap-2 text-sm text-[var(--red)]">
-                          <div className="flex items-center gap-2">
-                            <User className="h-3.5 w-3.5 shrink-0" />
-                            <span>{s.studentName}</span>
+                    <div>
+                      <p className="text-xs text-[var(--text-muted)] mb-1.5">תלמידים שיצאו כרגע:</p>
+                      <div className="flex flex-col gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2">
+                        {quotaInfo.overlapping.map((s) => (
+                          <div key={s.studentId} className="flex items-center justify-between gap-2 text-sm text-[var(--text-muted)]">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <User className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{s.studentName}</span>
+                            </div>
+                            <span className="flex items-center gap-1 text-xs shrink-0">
+                              <Clock className="h-3 w-3" />
+                              {getTimeStr(s.endAt)}
+                            </span>
                           </div>
-                          <span className="flex items-center gap-1 text-xs opacity-75">
-                            <Clock className="h-3 w-3" />
-                            {getTimeStr(s.endAt)}
-                          </span>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
                   )}
-                  <p className="text-sm text-[var(--red)]">
-                    אתה יכול לפנות אליהם כדי לבקש שיבטלו את ההרשמה שלהם.
-                  </p>
                 </div>
-                <p className="text-sm text-center text-[var(--text-muted)]">האם בכל זאת אתה רוצה לבקש אישור?</p>
+
+                {/* Approval actions */}
                 <div className="flex flex-col gap-2">
-                  <Button onClick={() => doSubmit(false, true)} disabled={isSubmitting} variant="outline"
-                    className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400">
-                    כן, שלח לאישור מנהל
+                  <Button onClick={() => doSubmit(false, true)} disabled={isSubmitting} className="w-full">
+                    שלח בקשה לאישור מנהל
                   </Button>
-                  <Button onClick={() => doSubmit(true, false)} disabled={isSubmitting}
-                    className="w-full bg-[var(--orange)] hover:bg-orange-600 text-white">
+                  <Button onClick={() => doSubmit(true, false)} disabled={isSubmitting} variant="outline"
+                    className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400">
+                    <AlertOctagon className="h-4 w-4" />
                     בקשה חריגה (דחופה)
                   </Button>
+                </div>
+
+                {/* Back to form — separated */}
+                <div className="border-t border-[var(--border)] pt-2">
                   <Button variant="ghost" onClick={() => { setQuotaStage('form'); setQuotaInfo(null) }}
                     disabled={isSubmitting} className="w-full text-[var(--text-muted)]">
                     חזור לטופס
