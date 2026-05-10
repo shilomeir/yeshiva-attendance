@@ -4,7 +4,6 @@ import {
   Users,
   Calendar,
   FileText,
-  MessageSquare,
   Settings,
   LogOut,
   Menu,
@@ -27,7 +26,6 @@ const NAV_ITEMS = [
   { to: '/admin/exceptions', icon: AlertOctagon, label: 'חריגות עכשיו' },
   { to: '/admin/requests', icon: ClipboardList, label: 'בקשות ממתינות' },
   { to: '/admin/audit', icon: FileText, label: 'לוג ביקורת' },
-  { to: '/admin/sms', icon: MessageSquare, label: 'SMS' },
   { to: '/admin/settings', icon: Settings, label: 'הגדרות' },
 ]
 

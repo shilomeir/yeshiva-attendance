@@ -2,7 +2,6 @@ import Dexie, { Table } from 'dexie'
 import type {
   Student,
   Event,
-  SmsEvent,
   AdminOverride,
   SyncQueueItem,
   RecurringAbsence,
@@ -14,7 +13,6 @@ import { DEFAULT_GRADE, DEFAULT_CLASS } from '@/lib/constants/grades'
 export class YeshivaDB extends Dexie {
   students!: Table<Student, string>
   events!: Table<Event, string>
-  smsEvents!: Table<SmsEvent, string>
   adminOverrides!: Table<AdminOverride, string>
   syncQueue!: Table<SyncQueueItem, string>
   recurringAbsences!: Table<RecurringAbsence, string>
@@ -74,6 +72,25 @@ export class YeshivaDB extends Dexie {
         '&id, studentId, type, timestamp, reason, expectedReturn, gpsStatus, syncedAt, departure_id',
       smsEvents:
         '&id, studentId, parsedType, timestamp, parsedCorrectly',
+      adminOverrides:
+        '&id, studentId, adminId, action, timestamp',
+      syncQueue:
+        '&id, tableName, operation, clientTimestamp, retryCount',
+      recurringAbsences:
+        '&id, studentId, dayOfWeek, isActive',
+      absenceRequests:
+        '&id, studentId, date, status, createdAt',
+      departures:
+        '&id, student_id, class_id, status, start_at, end_at',
+    })
+
+    // v4 — removes smsEvents object store (SMS system removed)
+    this.version(4).stores({
+      students:
+        '&id, fullName, idNumber, phone, deviceToken, currentStatus, lastSeen, pendingApproval, createdAt, grade, classId',
+      events:
+        '&id, studentId, type, timestamp, reason, expectedReturn, gpsStatus, syncedAt, departure_id',
+      smsEvents: null,
       adminOverrides:
         '&id, studentId, adminId, action, timestamp',
       syncQueue:

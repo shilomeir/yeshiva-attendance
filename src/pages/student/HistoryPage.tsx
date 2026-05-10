@@ -68,11 +68,9 @@ export function HistoryPage() {
   // Departures realtime
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Only show events that aren't simply the CHECK_OUT/CHECK_IN linked to a departure
-  // (those are represented by the departure card itself). Show OVERRIDE and SMS events.
-  const auditEvents = events.filter(
-    (e) => e.type === 'OVERRIDE' || e.type === 'SMS_IN' || e.type === 'SMS_OUT'
-  )
+  // Only show OVERRIDE events — CHECK_OUT/CHECK_IN linked to a departure
+  // are represented by the departure card itself.
+  const auditEvents = events.filter((e) => e.type === 'OVERRIDE')
 
   const eventItems: TimelineItem[] = auditEvents.map((e) => ({
     kind: 'event' as const,
@@ -119,7 +117,7 @@ export function HistoryPage() {
   )
 }
 
-// ─── Event item (OVERRIDE / SMS only) ────────────────────────────────────────
+// ─── Event item (OVERRIDE only) ──────────────────────────────────────────────
 
 function EventItem({ event }: { event: Event }) {
   let iconBg: string
@@ -140,7 +138,7 @@ function EventItem({ event }: { event: Event }) {
   } else {
     iconBg = 'bg-gray-100 dark:bg-gray-800/40'
     iconColor = 'text-[var(--text-muted)]'
-    label = event.type === 'OVERRIDE' ? 'עדכון ידני' : event.type === 'SMS_IN' ? 'SMS — כניסה' : 'SMS — יציאה'
+    label = 'עדכון ידני'
     IconComponent = Activity
   }
 

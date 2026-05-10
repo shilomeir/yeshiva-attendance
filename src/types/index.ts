@@ -46,7 +46,6 @@ export type DepartureSource =
   | 'SELF'           // Student submitted via the app
   | 'ADMIN_OVERRIDE' // Admin direct override (bypasses quota)
   | 'SUPERVISOR'     // Class supervisor action
-  | 'SMS'            // Parsed from incoming SMS
   | 'SHEETS'         // Injected by Sheets sync
 
 export interface Departure {
@@ -108,10 +107,10 @@ export type SubmitDepartureResult =
   | { error: string; message?: string }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Events (immutable audit log — CHECK_IN / CHECK_OUT / OVERRIDE / SMS)
+// Events (immutable audit log — CHECK_IN / CHECK_OUT / OVERRIDE)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type EventType = 'CHECK_IN' | 'CHECK_OUT' | 'OVERRIDE' | 'SMS_IN' | 'SMS_OUT'
+export type EventType = 'CHECK_IN' | 'CHECK_OUT' | 'OVERRIDE'
 
 export interface Event {
   id: string
@@ -132,18 +131,6 @@ export interface Event {
 // ─────────────────────────────────────────────────────────────────────────────
 // Other domain types
 // ─────────────────────────────────────────────────────────────────────────────
-
-export interface SmsEvent {
-  id: string
-  studentId: string | null
-  rawMessage: string
-  parsedCorrectly: boolean
-  parsedType: EventType | null
-  parsedTime: string | null
-  parsedReason: string | null
-  timestamp: string
-  webhookError: string | null
-}
 
 export interface AdminOverride {
   id: string

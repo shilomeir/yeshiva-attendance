@@ -1,7 +1,6 @@
 import type {
   Student,
   Event,
-  SmsEvent,
   AdminOverride,
   RecurringAbsence,
   StudentStatus,
@@ -110,14 +109,10 @@ export interface IApiClient {
 
   // ── Events (append-only audit log) ────────────────────────────────────────
   getEvents(studentId: string): Promise<Event[]>
-  /** Only used for OVERRIDE / SMS events. Check-outs go through submitDeparture. */
+  /** Only used for OVERRIDE events. Check-outs go through submitDeparture. */
   createEvent(payload: CreateEventPayload): Promise<Event>
   deleteEvent(id: string): Promise<void>
   getRecentEvents(limit?: number): Promise<Event[]>
-
-  // ── SMS ────────────────────────────────────────────────────────────────────
-  getSmsEvents(): Promise<SmsEvent[]>
-  createSmsEvent(raw: string, studentPhone?: string): Promise<SmsEvent>
 
   // ── Audit log ──────────────────────────────────────────────────────────────
   getAdminOverrides(): Promise<AdminOverride[]>
