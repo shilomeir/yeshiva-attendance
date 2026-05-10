@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
-import { toast } from 'sonner'
+import { toast } from '@/hooks/use-toast'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, GRADE_CLASS_MAP } from '@/lib/constants/grades'
@@ -14,7 +14,7 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
   const [fullName, setFullName] = useState('')
   const [idNumber, setIdNumber] = useState('')
   const [phone, setPhone] = useState('')
-  const [grade, setGrade] = useState(GRADE_LEVELS[0].name)
+  const [grade, setGrade] = useState<string>(GRADE_LEVELS[0].name)
   const [classId, setClassId] = useState(GRADE_CLASS_MAP[GRADE_LEVELS[0].name][0])
   const [saving, setSaving] = useState(false)
 
@@ -27,17 +27,17 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
 
   const handleSave = async () => {
     if (!fullName.trim() || !idNumber.trim() || !classId) {
-      toast.error('יש למלא את כל השדות')
+      toast({ title: 'יש למלא את כל השדות', variant: 'destructive' })
       return
     }
     setSaving(true)
     try {
       const result = await api.addStudent({ idNumber: idNumber.trim(), fullName: fullName.trim(), phone: phone.trim(), grade, classId })
       if (result.error) {
-        toast.error(result.error.message)
+        toast({ title: result.error.message, variant: 'destructive' })
         return
       }
-      toast.success(`תלמיד ${fullName} נוסף בהצלחה`)
+      toast({ title: `תלמיד ${fullName} נוסף בהצלחה` })
       onSaved()
       onClose()
     } finally {

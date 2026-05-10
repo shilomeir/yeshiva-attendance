@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
-import { toast } from 'sonner'
+import { toast } from '@/hooks/use-toast'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, GRADE_CLASS_MAP } from '@/lib/constants/grades'
@@ -28,7 +28,7 @@ export function EditStudentModal({ student, onClose, onSaved }: EditStudentModal
 
   const handleSave = async () => {
     if (!fullName.trim()) {
-      toast.error('יש למלא שם מלא')
+      toast({ title: 'יש למלא שם מלא', variant: 'destructive' })
       return
     }
     setSaving(true)
@@ -40,10 +40,10 @@ export function EditStudentModal({ student, onClose, onSaved }: EditStudentModal
         classId,
       })
       if (result.error) {
-        toast.error(result.error.message)
+        toast({ title: result.error.message, variant: 'destructive' })
         return
       }
-      toast.success('פרטי התלמיד עודכנו')
+      toast({ title: 'פרטי התלמיד עודכנו' })
       onSaved()
       onClose()
     } finally {

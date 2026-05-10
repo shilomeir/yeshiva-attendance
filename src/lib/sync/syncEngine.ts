@@ -1,5 +1,5 @@
 import { db } from '@/lib/db/schema'
-import { toast } from 'sonner'
+import { toast } from '@/hooks/use-toast'
 
 let isSyncing = false
 
@@ -53,7 +53,7 @@ export async function processQueue(): Promise<void> {
       if (item.retryCount >= MAX_RETRIES) {
         await db.syncQueue.delete(item.id)
         console.error('[SyncEngine] Dead-letter item removed:', item)
-        toast.error(`פעולה נכשלה לצמיתות: ${item.operation}/${item.tableName}`)
+        toast({ title: `פעולה נכשלה לצמיתות: ${item.operation}/${item.tableName}`, variant: 'destructive' })
         continue
       }
 
