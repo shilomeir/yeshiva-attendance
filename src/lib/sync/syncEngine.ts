@@ -1,8 +1,10 @@
 import { db } from '@/lib/db/schema'
+import { toast } from 'sonner'
 
 let isSyncing = false
 
-const STUCK_RETRY_THRESHOLD = 3
+const MAX_RETRIES = 10
+const BACKOFF_BASE_MS = 30_000  // 30 s initial; doubles each retry
 
 export type SyncListener = (state: { isSyncing: boolean; queueLength: number; failedCount: number }) => void
 const listeners: SyncListener[] = []
@@ -16,7 +18,7 @@ export function addSyncListener(listener: SyncListener): () => void {
 }
 
 async function getFailedCount(): Promise<number> {
-  return db.syncQueue.where('retryCount').aboveOrEqual(STUCK_RETRY_THRESHOLD).count()
+  return db.syncQueue.where('retryCount').aboveOrEqual(MAX_RETRIES).count()
 }
 
 async function notifyListeners(syncing: boolean, queueLength: number): Promise<void> {
@@ -47,12 +49,30 @@ export async function processQueue(): Promise<void> {
     const { supabase } = await import('@/lib/supabase')
 
     for (const item of queueItems) {
+      // Dead-letter: permanently remove items that have exhausted retries
+      if (item.retryCount >= MAX_RETRIES) {
+        await db.syncQueue.delete(item.id)
+        console.error('[SyncEngine] Dead-letter item removed:', item)
+        toast.error(`פעולה נכשלה לצמיתות: ${item.operation}/${item.tableName}`)
+        continue
+      }
+
+      // Exponential backoff: skip items not yet ready for retry
+      const lastAttempt = item.lastAttemptAt ?? 0
+      const nextRetryAt = lastAttempt + BACKOFF_BASE_MS * Math.pow(2, item.retryCount)
+      if (lastAttempt > 0 && Date.now() < nextRetryAt) continue
+
+      // Mark attempt timestamp BEFORE the network call
+      await db.syncQueue.update(item.id, { lastAttemptAt: Date.now() })
+
       try {
         if (item.operation === 'RPC') {
           const { error } = await supabase.rpc(item.tableName, item.payload)
           if (error) throw error
         } else if (item.operation === 'INSERT') {
-          const { error } = await supabase.from(item.tableName).insert(item.payload)
+          const { error } = await supabase
+            .from(item.tableName)
+            .upsert(item.payload, { onConflict: 'id', ignoreDuplicates: true })
           if (error) throw error
         } else if (item.operation === 'UPDATE') {
           const { id, ...rest } = item.payload as { id: string } & Record<string, unknown>
@@ -60,13 +80,15 @@ export async function processQueue(): Promise<void> {
           if (error) throw error
         }
 
-        // Remove processed item from queue
+        // Success: remove from queue
         await db.syncQueue.delete(item.id)
 
         // Mark local event as synced when the event row was pushed
         if (item.tableName === 'events' && item.operation === 'INSERT') {
           const eventId = (item.payload as { id: string }).id
-          await db.events.update(eventId, { syncedAt: new Date().toISOString() })
+          if (eventId) {
+            await db.events.update(eventId, { syncedAt: new Date().toISOString() })
+          }
         }
       } catch (err) {
         console.error('[syncEngine] Failed to sync item', item.id, item.operation, item.tableName, err)

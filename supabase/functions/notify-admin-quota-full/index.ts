@@ -74,6 +74,18 @@ Deno.serve(async (req) => {
 
   // ── Register admin push token ─────────────────────────────────────────────
   if (body.action === 'register') {
+    // Require a shared secret known only to the admin app
+    const provided = req.headers.get('X-Admin-Registration-Secret') ?? ''
+    const expected = Deno.env.get('ADMIN_REGISTRATION_SECRET') ?? ''
+
+    if (!expected) {
+      // Secret not configured — reject all registrations until it is set
+      return new Response(JSON.stringify({ error: 'registration_disabled' }), { status: 503 })
+    }
+    if (provided !== expected) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })
+    }
+
     const { pushToken, deviceId } = body as RegisterPayload
     if (!pushToken || !deviceId) return jsonErr('pushToken and deviceId required', 400)
 

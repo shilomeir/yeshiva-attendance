@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getDeviceToken } from '@/lib/auth/deviceToken'
-import { parseClassSupervisorSuffix, type ClassSupervisorInfo } from '@/lib/auth/supervisorAuth'
+import type { ClassSupervisorInfo } from '@/lib/auth/supervisorAuth'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { unsubscribeFromPush } from '@/lib/pwa/webPush'
@@ -21,6 +21,8 @@ interface AuthState {
   deviceToken: string
   isLoading: boolean
   error: string | null
+  /** Admin PIN held in-memory (session only, never persisted) for ADMIN_OVERRIDE PIN verification */
+  _adminPinSession: string | null
   login: (idNumber: string) => Promise<boolean>
   loginAdmin: (pin: string) => Promise<boolean>
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
@@ -28,6 +30,7 @@ interface AuthState {
   changeAdminPin: (oldPin: string, newPin: string) => Promise<ChangeAdminPinResult>
   logout: () => void
   clearError: () => void
+  getAdminPin: () => string | null
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -39,6 +42,7 @@ export const useAuthStore = create<AuthState>()(
       deviceToken: getDeviceToken(),
       isLoading: false,
       error: null,
+      _adminPinSession: null,
 
       login: async (idNumber: string) => {
         set({ isLoading: true, error: null })
@@ -69,14 +73,15 @@ export const useAuthStore = create<AuthState>()(
           password: pin,
         })
         if (error) return false
-        set({ isAdmin: true, classSupervisor: null, currentUser: null })
+        // Store PIN in-memory only (not persisted) for ADMIN_OVERRIDE server-side verification
+        set({ isAdmin: true, classSupervisor: null, currentUser: null, _adminPinSession: pin })
         return true
       },
 
       loginClassSupervisor: async (pin: string) => {
         // Verify via SECURITY DEFINER RPC (reads app_settings internally, never exposes values)
         const { data: result } = await supabase.rpc('verify_supervisor_pin', { p_pin: pin })
-        if (result) {
+        if (result && !result.error) {
           set({
             classSupervisor: { classId: result.classId, gradeName: result.gradeName },
             isAdmin: false,
@@ -84,16 +89,7 @@ export const useAuthStore = create<AuthState>()(
           })
           return true
         }
-
-        // Legacy format fallback: adminPin + letter+digit (e.g. "1234a3")
-        // Get PIN length without exposing the actual value
-        const { data: pinLen } = await supabase.rpc('get_admin_pin_length')
-        if (!pinLen || pin.length <= pinLen) return false
-        const suffix = pin.slice(pinLen)
-        const classInfo = parseClassSupervisorSuffix(suffix)
-        if (!classInfo) return false
-        set({ classSupervisor: classInfo, isAdmin: false, currentUser: null })
-        return true
+        return false
       },
 
       changeAdminPin: async (oldPin: string, newPin: string) => {
@@ -123,10 +119,12 @@ export const useAuthStore = create<AuthState>()(
           supabase.auth.signOut().catch(() => {})
         }
         localStorage.removeItem('yeshiva_remembered_id')
-        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null })
+        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null })
       },
 
       clearError: () => set({ error: null }),
+
+      getAdminPin: () => get()._adminPinSession,
     }),
     {
       name: 'yeshiva-auth',

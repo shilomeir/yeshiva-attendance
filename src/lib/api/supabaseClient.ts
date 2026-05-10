@@ -4,12 +4,13 @@ import { db } from '@/lib/db/schema'
 import { notifyQueueChanged } from '@/lib/sync/syncEngine'
 import type {
   Student, Event, AdminOverride, RecurringAbsence,
-  StudentStatus, DashboardStats, DailyPresenceData, ReasonData, HourlyData, ClassStat,
+  StudentStatus, DashboardStats, CampusStatusCounts, DailyPresenceData, ReasonData, HourlyData, ClassStat,
   CalendarDeparture, DepartureStatus, SubmitDepartureResult,
 } from '@/types'
 import type {
   IApiClient, GetStudentsOptions, SubmitDeparturePayload,
   ListDeparturesOptions, CreateEventPayload, PushNotificationTarget,
+  AddStudentPayload, UpdateStudentPayload, AppResult,
 } from './types'
 
 function toIso(d: Date | string): string {
@@ -144,7 +145,56 @@ export class SupabaseApiClient implements IApiClient {
     return this.sendPushNotification(title, body)
   }
 
+  async addStudent(student: AddStudentPayload): Promise<AppResult<Student>> {
+    if (!/^\d{9}$/.test(student.idNumber)) {
+      return { error: { message: 'מספר זהות חייב להיות 9 ספרות' } }
+    }
+    const { data, error } = await supabase
+      .from('students')
+      .insert({
+        idNumber:      student.idNumber,
+        fullName:      student.fullName,
+        phone:         student.phone,
+        grade:         student.grade,
+        classId:       student.classId,
+        currentStatus: 'ON_CAMPUS',
+      })
+      .select()
+      .single()
+    if (error) return { error: { message: error.message } }
+    return { data: data as Student }
+  }
+
+  async updateStudent(id: string, updates: UpdateStudentPayload): Promise<AppResult<Student>> {
+    const dbUpdates: Record<string, unknown> = {}
+    if (updates.fullName !== undefined) dbUpdates['fullName'] = updates.fullName
+    if (updates.phone    !== undefined) dbUpdates['phone']    = updates.phone
+    if (updates.grade    !== undefined) dbUpdates['grade']    = updates.grade
+    if (updates.classId  !== undefined) {
+      dbUpdates['classId']              = updates.classId
+      dbUpdates['manual_class_override'] = true
+    }
+    const { data, error } = await supabase
+      .from('students')
+      .update(dbUpdates)
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) return { error: { message: error.message } }
+    return { data: data as Student }
+  }
+
   async deleteStudent(id: string): Promise<void> {
+    // Guard: refuse to delete a student with an ACTIVE or PENDING departure
+    const { data: activeDeps } = await supabase
+      .from('departures')
+      .select('id, status')
+      .eq('student_id', id)
+      .in('status', ['ACTIVE', 'PENDING', 'APPROVED'])
+      .limit(1)
+    if (activeDeps && activeDeps.length > 0) {
+      throw new Error('לא ניתן למחוק תלמיד עם יציאה פעילה. בטל את היציאה תחילה.')
+    }
     const { error } = await supabase.from('students').delete().eq('id', id)
     if (error) throw error
   }
@@ -183,6 +233,7 @@ export class SupabaseApiClient implements IApiClient {
       p_force_pending: payload.forcePending ?? false,
       p_actor_id:      payload.actorId ?? null,
       p_actor_role:    payload.actorRole ?? 'STUDENT',
+      p_actor_pin:     payload.actorPin ?? null,
     })
     if (error) throw error
     const result = data as SubmitDepartureResult
@@ -504,6 +555,11 @@ export class SupabaseApiClient implements IApiClient {
       endAt.setHours(23, 59, 0, 0)
       if (endAt <= startAt) endAt.setDate(endAt.getDate() + 1)
 
+      // Retrieve the admin PIN from authStore (in-memory only, never persisted)
+      // for server-side PIN verification on ADMIN_OVERRIDE operations
+      const { useAuthStore } = await import('@/store/authStore')
+      const adminPin = useAuthStore.getState().getAdminPin()
+
       const result = await this.submitDeparture({
         studentId,
         startAt,
@@ -512,6 +568,7 @@ export class SupabaseApiClient implements IApiClient {
         source: 'ADMIN_OVERRIDE',
         actorId: 'admin',
         actorRole: 'ADMIN',
+        actorPin: adminPin,
       })
 
       if ('error' in result) {
@@ -561,6 +618,12 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   // ── Analytics ─────────────────────────────────────────────────────────────
+
+  async getCampusStatusCounts(): Promise<CampusStatusCounts> {
+    const { data, error } = await supabase.rpc('get_campus_status_counts')
+    if (error) throw error
+    return data as CampusStatusCounts
+  }
 
   async getDashboardStats(): Promise<DashboardStats> {
     const { data, error } = await supabase

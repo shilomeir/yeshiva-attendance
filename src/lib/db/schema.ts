@@ -102,6 +102,24 @@ export class YeshivaDB extends Dexie {
       departures:
         '&id, student_id, class_id, status, start_at, end_at',
     })
+
+    // v5 — adds lastAttemptAt index to syncQueue for backoff; removes absenceRequests
+    //       (table no longer exists in DB schema — replaced by departures)
+    this.version(5).stores({
+      students:
+        '&id, fullName, idNumber, phone, deviceToken, currentStatus, lastSeen, pendingApproval, createdAt, grade, classId',
+      events:
+        '&id, studentId, type, timestamp, reason, expectedReturn, gpsStatus, syncedAt, departure_id',
+      adminOverrides:
+        '&id, studentId, adminId, action, timestamp',
+      syncQueue:
+        '&id, tableName, operation, clientTimestamp, retryCount, lastAttemptAt',
+      recurringAbsences:
+        '&id, studentId, dayOfWeek, isActive',
+      absenceRequests: null,
+      departures:
+        '&id, student_id, class_id, status, start_at, end_at',
+    })
   }
 }
 

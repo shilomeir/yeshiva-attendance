@@ -6,15 +6,17 @@ const supabase = createClient(
 )
 const SYNC_SECRET = Deno.env.get('SHEETS_SYNC_SECRET')!
 
+const BATCH_SIZE = 50
+
 interface StudentRow {
   idNumber: string
   fullName: string
   classId: string
+  phone?: string
 }
 
 interface GradeStats {
   upserted: number
-  deleted: number
 }
 
 function jsonErr(msg: string, status = 400): Response {
@@ -63,87 +65,47 @@ async function ensureClassCodes(classIds: string[]): Promise<{ classId: string; 
     .sort((a, b) => a.code.localeCompare(b.code))
 }
 
-// ── Atomic sync — batched UPSERT → DELETE → class codes ───────────────────────
-//
-// Supabase JS client does not support multi-statement SQL transactions.
-// We achieve near-atomicity by:
-//   1. Validating and collecting all incoming data first (no DB writes yet).
-//   2. Batching all UPSERTs across all grades in one call.
-//   3. Batching all DELETEs in one call.
-//   4. Running class-code assignment only after both steps succeed.
-//   5. On any failure, returning an error — subsequent sync from Sheets is the recovery path.
+// ── Sync students via RPC (safe: never overwrites currentStatus/tokens) ────────
+
+async function syncStudentsToDb(
+  grade: string,
+  students: StudentRow[],
+): Promise<void> {
+  // Process in chunks of BATCH_SIZE to avoid timeout
+  for (let i = 0; i < students.length; i += BATCH_SIZE) {
+    const batch = students.slice(i, i + BATCH_SIZE)
+    await Promise.all(
+      batch.map((student) =>
+        supabase.rpc('sync_student_from_sheet', {
+          p_id_number: student.idNumber,
+          p_full_name: student.fullName,
+          p_phone:     student.phone ?? '',
+          p_grade:     grade,
+          p_class_id:  student.classId,
+        })
+      ),
+    )
+  }
+}
+
+// ── Main sync orchestration ────────────────────────────────────────────────────
 
 async function runSync(
   payload: Record<string, StudentRow[]>,
 ): Promise<{ grades: Record<string, GradeStats>; classCodes: { classId: string; code: string; supervisorPin: string }[] }> {
-  // ── Phase A: build batch lists ─────────────────────────────────────────────
-  const allUpsertRows: Array<{
-    fullName: string; idNumber: string; phone: string
-    grade: string; classId: string; currentStatus: 'ON_CAMPUS'; pendingApproval: boolean; createdAt: string
-  }> = []
-  const gradeIncomingIds = new Map<string, Set<string>>() // grade → Set<idNumber>
   const allClassIds = new Set<string>()
-  const now = new Date().toISOString()
+  const gradeStats: Record<string, GradeStats> = {}
 
+  // Sync each grade's students via the safe RPC (no currentStatus overwrite)
   for (const [grade, students] of Object.entries(payload)) {
-    gradeIncomingIds.set(grade, new Set(students.map((s) => s.idNumber)))
     for (const s of students) {
       allClassIds.add(s.classId)
-      allUpsertRows.push({
-        fullName: s.fullName,
-        idNumber: s.idNumber,
-        phone: '',
-        grade,
-        classId: s.classId,
-        currentStatus: 'ON_CAMPUS',
-        pendingApproval: false,
-        createdAt: now,
-      })
     }
+    await syncStudentsToDb(grade, students)
+    gradeStats[grade] = { upserted: students.length }
   }
 
-  // ── Phase B: UPSERT all students across all grades in one batch ────────────
-  if (allUpsertRows.length > 0) {
-    const { error: upErr } = await supabase
-      .from('students')
-      .upsert(allUpsertRows, {
-        onConflict: 'idNumber',
-        // Only update name, class, grade — never overwrite status with ON_CAMPUS
-        // for students who are currently off-campus.
-        ignoreDuplicates: false,
-      })
-    if (upErr) throw new Error(`UPSERT all grades: ${upErr.message}`)
-  }
-
-  // ── Phase C: DELETE students who were removed from Sheets ─────────────────
-  // Fetch current DB state for all synced grades in one query.
-  const grades = Object.keys(payload)
-  const { data: existingStudents, error: selErr } = await supabase
-    .from('students')
-    .select('id, idNumber, grade')
-    .in('grade', grades)
-  if (selErr) throw new Error(`SELECT existing students: ${selErr.message}`)
-
-  const toDeleteIds: string[] = []
-  for (const s of existingStudents ?? []) {
-    const incoming = gradeIncomingIds.get(s.grade)
-    if (incoming && !incoming.has(s.idNumber)) {
-      toDeleteIds.push(s.id)
-    }
-  }
-
-  let totalDeleted = 0
-  if (toDeleteIds.length > 0) {
-    // Batch delete in chunks of 100 to stay within URL limits
-    for (let i = 0; i < toDeleteIds.length; i += 100) {
-      const chunk = toDeleteIds.slice(i, i + 100)
-      const { error: delErr } = await supabase.from('students').delete().in('id', chunk)
-      if (delErr) throw new Error(`DELETE students chunk ${i}: ${delErr.message}`)
-    }
-    totalDeleted = toDeleteIds.length
-  }
-
-  // ── Phase D: Class codes ───────────────────────────────────────────────────
+  // Assign class codes for any new classes
   const classCodes = await ensureClassCodes([...allClassIds])
 
   const { data: pinRow } = await supabase
@@ -152,20 +114,6 @@ async function runSync(
     .eq('key', 'admin_pin')
     .single()
   const adminPin: string = pinRow?.value ?? '????'
-
-  // ── Build per-grade stats for response ────────────────────────────────────
-  const gradeStats: Record<string, GradeStats> = {}
-  let deletedAccounted = 0
-  for (const [grade, students] of Object.entries(payload)) {
-    const deletedForGrade = (existingStudents ?? []).filter(
-      (s) => s.grade === grade && !gradeIncomingIds.get(grade)!.has(s.idNumber),
-    ).length
-    gradeStats[grade] = {
-      upserted: students.length,
-      deleted: deletedForGrade,
-    }
-    deletedAccounted += deletedForGrade
-  }
 
   return {
     grades: gradeStats,

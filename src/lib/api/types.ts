@@ -5,6 +5,7 @@ import type {
   RecurringAbsence,
   StudentStatus,
   DashboardStats,
+  CampusStatusCounts,
   DailyPresenceData,
   ReasonData,
   HourlyData,
@@ -40,6 +41,7 @@ export interface SubmitDeparturePayload {
   forcePending?: boolean   // true = create PENDING even when quota is full
   actorId?: string | null
   actorRole?: 'STUDENT' | 'ADMIN' | 'SUPERVISOR'
+  actorPin?: string | null // Required for source=ADMIN_OVERRIDE with actorRole=ADMIN
 }
 
 export interface ListDeparturesOptions {
@@ -72,6 +74,28 @@ export interface PushNotificationTarget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Generic result type — avoids throw/catch in callers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type AppResult<T> =
+  | { data: T; error?: never }
+  | { data?: never; error: { message: string } }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Student mutation payloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AddStudentPayload {
+  idNumber: string   // Must be exactly 9 digits; uniqueness enforced by DB
+  fullName: string
+  phone: string
+  grade: string      // Must be a value from GRADE_LEVELS
+  classId: string    // Must be a value from GRADE_CLASS_MAP[grade]
+}
+
+export type UpdateStudentPayload = Partial<Pick<Student, 'fullName' | 'phone' | 'grade' | 'classId'>>
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IApiClient — single interface for Supabase + Mock implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -88,6 +112,11 @@ export interface IApiClient {
   updatePushToken(id: string, token: string | null): Promise<void>
   sendPushNotification(title: string, body: string, target?: PushNotificationTarget): Promise<{ sent: number; failed: number; lastError?: string }>
   sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }>
+  /** Admin-only: add a new student from the dashboard. */
+  addStudent(student: AddStudentPayload): Promise<AppResult<Student>>
+  /** Admin-only: update mutable student fields. */
+  updateStudent(id: string, updates: UpdateStudentPayload): Promise<AppResult<Student>>
+  /** Admin-only: hard-delete student (CASCADE on departures/events). Guards against active departures. */
   deleteStudent(id: string): Promise<void>
   getClassSize(classId: string): Promise<number>
   getLongAbsentStudents(days?: number): Promise<Student[]>
@@ -131,6 +160,8 @@ export interface IApiClient {
 
   // ── Analytics ─────────────────────────────────────────────────────────────
   getDashboardStats(): Promise<DashboardStats>
+  /** Lightweight aggregation — single DB round-trip, no full student fetch. */
+  getCampusStatusCounts(): Promise<CampusStatusCounts>
   getDailyPresence(days?: number): Promise<DailyPresenceData[]>
   getReasonBreakdown(): Promise<ReasonData[]>
   getHourlyDepartures(): Promise<HourlyData[]>

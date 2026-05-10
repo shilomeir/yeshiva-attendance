@@ -11,6 +11,7 @@ interface StudentRowProps {
   student: Student
   onUpdate: () => void
   onEditClass: (student: Student) => void
+  onEditStudent: (student: Student) => void
 }
 
 function getInitials(name: string): string {
@@ -34,7 +35,7 @@ function getAvatarColor(id: string): string {
   return colors[Math.abs(hash) % colors.length]
 }
 
-export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) {
+export function StudentRow({ student, onUpdate, onEditClass, onEditStudent }: StudentRowProps) {
   const [showOverride, setShowOverride] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const { deleteStudent } = useStudentsStore()
@@ -84,13 +85,13 @@ export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) 
         {/* Status badge */}
         <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
 
-        {/* Edit class — modal rendered at page level to avoid virtualizer clipping */}
+        {/* Edit student (full details) */}
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => onEditClass(student)}
+          onClick={() => onEditStudent(student)}
           className="shrink-0 h-8 w-8 text-[var(--text-muted)]"
-          title="עריכת כיתה"
+          title="עריכת פרטי תלמיד"
         >
           <GraduationCap className="h-4 w-4" />
         </Button>
