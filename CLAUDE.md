@@ -7,7 +7,7 @@
 ## 1. Project Identity
 
 **Name:** Attendance Management System — Yeshivat Shavi Hevron (ישיבת שבי חברון)  
-**Type:** PWA (Progressive Web App) + Android APK (Capacitor)  
+**Type:** PWA (Progressive Web App)  
 **Stack:** React 18 + Vite + TypeScript + Supabase + Tailwind CSS + shadcn/ui  
 **Language:** Hebrew only. RTL. No i18n support.  
 **Deployment:** Vercel (frontend) + Supabase (backend / DB / Edge Functions)  
@@ -22,11 +22,11 @@
 │  Google Sheets ──GAS──► sync-from-sheets (Edge Function)    │
 │                              │ UPSERT / DELETE students      │
 │                              ▼                               │
-│  React PWA / Android APK ◄──► Supabase PostgreSQL DB        │
+│  React PWA ◄──────────────► Supabase PostgreSQL DB          │
 │  (Vite + Zustand + Dexie)    │ Realtime subscriptions       │
 │                              │ RPC functions                 │
 │                              ▼                               │
-│  Edge Functions: send-push, broadcast-location-request       │
+│  Edge Functions: send-push                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -309,11 +309,7 @@ Every admin/supervisor lifecycle action is recorded here automatically (DB trigg
 - Sent via Edge Function `send-push` (VAPID + AES-128-GCM / RFC 8291).
 - **Use case:** Absence request approval notification.
 
-### Firebase Cloud Messaging (Android APK only)
-- Token stored in `students.fcm_token`.
-- Sent via Edge Function `broadcast-location-request`.
-- **Use case:** Internal audit (ביקורת פנימית) — silently wakes APK in background to report GPS.
-- iPhone/PWA users have no FCM — they do not respond to audit broadcasts.
+> **Note:** FCM / Firebase Cloud Messaging was removed along with the Capacitor Android APK. The `fcm_token` column remains in the DB schema for backward compatibility with existing rows but is no longer written or read by the app. The `broadcast-location-request` Edge Function has been deleted.
 
 ---
 
@@ -407,8 +403,7 @@ supabase/
 └── functions/
     ├── sync-from-sheets/           # GAS → Supabase sync (transactional)
     ├── send-push/                  # Web Push (RFC 8291)
-    ├── notify-admin-quota-full/    # Push to admins when PENDING created due to quota-full
-    └── broadcast-location-request/ # FCM broadcast
+    └── notify-admin-quota-full/    # Push to admins when PENDING created due to quota-full
 GoogleAppsScript.gs             # GAS code for sheet sync
 ```
 
@@ -426,7 +421,6 @@ VITE_VAPID_PUBLIC_KEY=
 ### Supabase Edge Function Secrets
 ```
 SHEETS_SYNC_SECRET       # Shared secret with GAS
-FCM_SERVER_KEY           # Firebase (RollCall audit)
 VAPID_PUBLIC_KEY         # Web Push
 VAPID_PRIVATE_KEY        # Web Push
 VAPID_SUBJECT            # mailto:... for VAPID

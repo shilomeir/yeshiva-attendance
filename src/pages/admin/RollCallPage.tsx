@@ -173,12 +173,6 @@ export function RollCallPage() {
       })
       supabase.removeChannel(channel)
 
-      // 1b. Also send via FCM (Edge Function) → wakes apps that are KILLED on Android
-      supabase.functions.invoke('broadcast-location-request').catch((err) => {
-        // Non-blocking — FCM is a best-effort fallback for killed apps
-        console.warn('[RollCall] FCM broadcast failed (non-critical):', err)
-      })
-
       // 2. Load current data immediately (some may already have lastLocation)
       const initial = await api.getStudents()
       enrichAndSet(initial)
