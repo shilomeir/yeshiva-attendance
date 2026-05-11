@@ -57,19 +57,19 @@ function getDistance(student: Student): number | null {
 }
 
 const CLASS_CONFIG: Record<LocationClass, { color: string; bg: string; icon: React.ReactNode; order: number }> = {
-  'בישיבה': { color: 'text-green-700', bg: 'bg-green-50 border-green-200', icon: <CheckCircle2 className="h-4 w-4 text-green-600" />, order: 0 },
-  'קרוב':   { color: 'text-yellow-700', bg: 'bg-yellow-50 border-yellow-200', icon: <Navigation className="h-4 w-4 text-yellow-600" />, order: 1 },
-  'רחוק':   { color: 'text-red-700', bg: 'bg-red-50 border-red-200', icon: <AlertCircle className="h-4 w-4 text-red-600" />, order: 2 },
-  'לא ידוע': { color: 'text-gray-500', bg: 'bg-gray-50 border-gray-200', icon: <HelpCircle className="h-4 w-4 text-gray-400" />, order: 3 },
+  'בישיבה': { color: 'text-green-700 dark:text-green-400', bg: 'bg-green-50 border-green-200 dark:bg-green-950/20 dark:border-green-800', icon: <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />, order: 0 },
+  'קרוב':   { color: 'text-yellow-700 dark:text-yellow-400', bg: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-950/20 dark:border-yellow-800', icon: <Navigation className="h-4 w-4 text-yellow-600 dark:text-yellow-400" />, order: 1 },
+  'רחוק':   { color: 'text-red-700 dark:text-red-400', bg: 'bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800', icon: <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />, order: 2 },
+  'לא ידוע': { color: 'text-gray-500 dark:text-gray-400', bg: 'bg-gray-50 border-gray-200 dark:bg-gray-900/20 dark:border-gray-700', icon: <HelpCircle className="h-4 w-4 text-gray-400 dark:text-gray-500" />, order: 3 },
 }
 
 function LocationBadge({ cls }: { cls: LocationClass }) {
   const cfg = CLASS_CONFIG[cls]
   const colors: Record<LocationClass, string> = {
-    'בישיבה': 'bg-green-100 text-green-800 border-green-300',
-    'קרוב': 'bg-yellow-100 text-yellow-800 border-yellow-300',
-    'רחוק': 'bg-red-100 text-red-800 border-red-300',
-    'לא ידוע': 'bg-gray-100 text-gray-600 border-gray-300',
+    'בישיבה': 'bg-green-100 text-green-800 border-green-300 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700',
+    'קרוב': 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700',
+    'רחוק': 'bg-red-100 text-red-800 border-red-300 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700',
+    'לא ידוע': 'bg-gray-100 text-gray-600 border-gray-300 dark:bg-gray-800/40 dark:text-gray-400 dark:border-gray-600',
   }
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${colors[cls]}`}>
@@ -309,10 +309,10 @@ export function RollCallPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {(
           [
-            { label: 'בישיבה', cls: 'בישיבה' as LocationClass, icon: <CheckCircle2 className="h-5 w-5 text-green-600" />, bg: 'bg-green-50', num: counts['בישיבה'] },
-            { label: 'קרוב לישיבה', cls: 'קרוב' as LocationClass, icon: <Navigation className="h-5 w-5 text-yellow-600" />, bg: 'bg-yellow-50', num: counts['קרוב'] },
-            { label: 'רחוק', cls: 'רחוק' as LocationClass, icon: <AlertCircle className="h-5 w-5 text-red-500" />, bg: 'bg-red-50', num: counts['רחוק'] },
-            { label: 'לא ידוע', cls: 'לא ידוע' as LocationClass, icon: <HelpCircle className="h-5 w-5 text-gray-400" />, bg: 'bg-gray-50', num: counts['לא ידוע'] },
+            { label: 'בישיבה', cls: 'בישיבה' as LocationClass, icon: <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />, bg: 'bg-green-50 dark:bg-green-950/20', num: counts['בישיבה'] },
+            { label: 'קרוב לישיבה', cls: 'קרוב' as LocationClass, icon: <Navigation className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />, bg: 'bg-yellow-50 dark:bg-yellow-950/20', num: counts['קרוב'] },
+            { label: 'רחוק', cls: 'רחוק' as LocationClass, icon: <AlertCircle className="h-5 w-5 text-red-500 dark:text-red-400" />, bg: 'bg-red-50 dark:bg-red-950/20', num: counts['רחוק'] },
+            { label: 'לא ידוע', cls: 'לא ידוע' as LocationClass, icon: <HelpCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />, bg: 'bg-gray-50 dark:bg-gray-900/20', num: counts['לא ידוע'] },
           ] as const
         ).map(({ label, cls, icon, bg, num }) => (
           <button
@@ -336,11 +336,11 @@ export function RollCallPage() {
           <span>מיקום מבוסס על נתוני GPS אחרונים שנשמרו</span>
         </div>
         <span>·</span>
-        <span className="text-green-700">בישיבה ≤ {ON_CAMPUS_METERS}מ׳</span>
+        <span className="text-green-700 dark:text-green-400">בישיבה ≤ {ON_CAMPUS_METERS}מ׳</span>
         <span>·</span>
-        <span className="text-yellow-700">קרוב ≤ {NEARBY_METERS / 1000}ק״מ</span>
+        <span className="text-yellow-700 dark:text-yellow-400">קרוב ≤ {NEARBY_METERS / 1000}ק״מ</span>
         <span>·</span>
-        <span className="text-red-700">רחוק &gt; {NEARBY_METERS / 1000}ק״מ</span>
+        <span className="text-red-700 dark:text-red-400">רחוק &gt; {NEARBY_METERS / 1000}ק״מ</span>
       </div>
 
       {/* Search + filter row */}

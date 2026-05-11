@@ -272,7 +272,7 @@ function DepartureTimeline({ items, now }: { items: DepartureInfo[]; now: Date }
                   ) : minsLeftMs !== null ? (
                     <span
                       className={`text-xs font-semibold tabular-nums whitespace-nowrap ${
-                        isAlmostDue ? 'text-orange-500' : 'text-[var(--text-muted)]'
+                        isAlmostDue ? 'text-orange-500 dark:text-orange-400' : 'text-[var(--text-muted)]'
                       }`}
                     >
                       {fmtMinsLeft(minsLeftMs)}
@@ -305,8 +305,8 @@ function WeeklyComparisonChart({ data }: { data: WeeklyPoint[] }) {
     : Minus
 
   const trendColor =
-    diff > 0 ? 'text-red-500'   // more departures = bad
-    : diff < 0 ? 'text-green-500'
+    diff > 0 ? 'text-red-500 dark:text-red-400'   // more departures = bad
+    : diff < 0 ? 'text-green-500 dark:text-green-400'
     : 'text-[var(--text-muted)]'
 
   const trendLabel =

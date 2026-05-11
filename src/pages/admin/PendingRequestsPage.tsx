@@ -136,7 +136,7 @@ export function PendingRequestsPage() {
                   {classActive.map((d) => (
                     <div key={d.id} className="flex items-center justify-between text-xs text-orange-700 dark:text-orange-400">
                       <span>{d.student_name}</span>
-                      <span className="text-orange-500">חזרה {getTimeStr(d.end_at)}</span>
+                      <span className="text-orange-500 dark:text-orange-400">חזרה {getTimeStr(d.end_at)}</span>
                     </div>
                   ))}
                 </div>
@@ -156,7 +156,7 @@ export function PendingRequestsPage() {
             <div className="flex gap-2">
               <Button
                 variant="outline"
-                className="flex-1 border-[var(--red)] text-[var(--red)] hover:bg-red-50"
+                className="flex-1 border-[var(--red)] text-[var(--red)] hover:bg-red-50 dark:hover:bg-red-950/20"
                 onClick={() => handleReject(dep)}
                 disabled={isActing}
               >
