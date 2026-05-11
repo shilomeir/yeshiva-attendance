@@ -75,6 +75,7 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <input type="text" autoComplete="username" className="hidden" readOnly value="admin" />
           <div className="flex flex-col gap-2">
             <Label htmlFor="pin">קוד גישה</Label>
             <Input
