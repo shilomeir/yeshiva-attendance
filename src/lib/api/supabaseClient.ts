@@ -519,7 +519,7 @@ export class SupabaseApiClient implements IApiClient {
 
   async getAdminOverrides(): Promise<AdminOverride[]> {
     // Best-effort — don't let a missing/failing purge function break the audit log load
-    await supabase.rpc('purge_admin_overrides_retention').catch(() => {})
+    try { await supabase.rpc('purge_admin_overrides_retention') } catch { /* ignore */ }
 
     const { data, error } = await supabase
       .from('admin_overrides')
