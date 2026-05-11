@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { Edit2, Trash2 } from 'lucide-react'
+import { Pencil, Trash2 } from 'lucide-react'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Button } from '@/components/ui/button'
-import { StatusOverrideModal } from '@/components/admin/StatusOverrideModal'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { useStudentsStore } from '@/store/studentsStore'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student } from '@/types'
 
 interface StudentRowProps {
@@ -35,74 +36,86 @@ function getAvatarColor(id: string): string {
 }
 
 export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) {
-  const [showOverride, setShowOverride] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const { deleteStudent } = useStudentsStore()
 
   const handleDelete = async () => {
-    await deleteStudent(student.id)
-    onUpdate()
+    setDeleting(true)
+    try {
+      await deleteStudent(student.id)
+      onUpdate()
+    } catch (err) {
+      toast({
+        title: 'שגיאה במחיקה',
+        description: getErrorMessage(err, 'מחיקת התלמיד נכשלה'),
+        variant: 'destructive',
+      })
+      setConfirmDelete(false)
+    } finally {
+      setDeleting(false)
+    }
   }
 
-  const classLabel = student.classId?.includes('כיתה')
-    ? `כיתה ${student.classId.split('כיתה ')[1]}`
-    : student.classId ?? ''
+  const classLabel = student.classId?.replace(/^כיתה\s+/, '') ?? ''
 
   return (
-    <>
+    <div
+      className="flex items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 hover:bg-[var(--bg-2)] transition-colors"
+      style={{ height: '72px' }}
+    >
+      {/* Avatar */}
       <div
-        className="flex items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 hover:bg-[var(--bg-2)] transition-colors"
-        style={{ height: '72px' }}
+        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${getAvatarColor(student.id)}`}
       >
-        {/* Avatar */}
-        <div
-          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${getAvatarColor(student.id)}`}
-        >
-          {getInitials(student.fullName)}
+        {getInitials(student.fullName)}
+      </div>
+
+      {/* Info */}
+      <div className="flex flex-1 min-w-0 flex-col justify-center gap-0.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
+          {student.pendingApproval && (
+            <span className="shrink-0 rounded-full bg-[var(--orange)] px-1.5 py-0.5 text-[10px] font-bold text-white">
+              חדש
+            </span>
+          )}
+          {classLabel && (
+            <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+              {classLabel}
+            </span>
+          )}
         </div>
+        <span className="text-xs text-[var(--text-muted)]">
+          ת.ז. {student.idNumber} · {formatRelativeTime(student.lastSeen)}
+        </span>
+      </div>
 
-        {/* Info */}
-        <div className="flex flex-1 min-w-0 flex-col justify-center gap-0.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
-            {student.pendingApproval && (
-              <span className="shrink-0 rounded-full bg-[var(--orange)] px-1.5 py-0.5 text-[10px] font-bold text-white">
-                חדש
-              </span>
-            )}
-            {classLabel && (
-              <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                {classLabel}
-              </span>
-            )}
-          </div>
-          <span className="text-xs text-[var(--text-muted)]">
-            ת.ז. {student.idNumber} · {formatRelativeTime(student.lastSeen)}
-          </span>
-        </div>
+      {/* Status badge */}
+      <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
 
-        {/* Status badge */}
-        <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
+      {/* Edit student */}
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => onEditClass(student)}
+        className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--blue)]"
+        title="עריכת פרטי תלמיד"
+      >
+        <Pencil className="h-4 w-4" />
+      </Button>
 
-        {/* Edit status */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setShowOverride(true)}
-          className="shrink-0 h-8 w-8 text-[var(--text-muted)]"
-          title="עדכון סטטוס"
-        >
-          <Edit2 className="h-4 w-4" />
-        </Button>
-
-        {/* Delete */}
-        {confirmDelete ? (
-          <div className="flex shrink-0 items-center gap-1">
+      {/* Delete with confirmation */}
+      {confirmDelete ? (
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <span className="text-[10px] text-[var(--red)] leading-tight">מחיקה תמחק את כל ההיסטוריה</span>
+          <div className="flex items-center gap-1">
             <button
               onClick={handleDelete}
-              className="rounded px-2 py-1 text-xs font-medium text-white bg-[var(--red)] hover:opacity-90 transition-opacity"
+              disabled={deleting}
+              className="rounded px-2 py-1 text-xs font-medium text-white bg-[var(--red)] hover:opacity-90 transition-opacity disabled:opacity-50"
             >
-              מחק
+              {deleting ? '...' : 'מחק'}
             </button>
             <button
               onClick={() => setConfirmDelete(false)}
@@ -111,25 +124,18 @@ export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) 
               ביטול
             </button>
           </div>
-        ) : (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setConfirmDelete(true)}
-            className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--red)]"
-            title="מחיקת תלמיד"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        )}
-      </div>
-
-      <StatusOverrideModal
-        student={student}
-        open={showOverride}
-        onClose={() => setShowOverride(false)}
-        onSuccess={onUpdate}
-      />
-    </>
+        </div>
+      ) : (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setConfirmDelete(true)}
+          className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--red)]"
+          title="מחיקת תלמיד"
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
   )
 }

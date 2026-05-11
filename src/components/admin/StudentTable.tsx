@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { StudentRow } from '@/components/admin/StudentRow'
-import { ClassEditModal } from '@/components/admin/ClassEditModal'
+import { StudentEditModal } from '@/components/admin/StudentEditModal'
 import { useStudentsStore } from '@/store/studentsStore'
 import type { Student } from '@/types'
 
@@ -61,9 +61,9 @@ export function StudentTable() {
         </div>
       </div>
 
-      {/* Class edit modal rendered OUTSIDE contain:strict so fixed positioning works correctly */}
+      {/* Edit modal rendered OUTSIDE contain:strict so fixed positioning works correctly */}
       {editingStudent && (
-        <ClassEditModal
+        <StudentEditModal
           student={editingStudent}
           onClose={() => setEditingStudent(null)}
           onSaved={async () => {
@@ -72,7 +72,6 @@ export function StudentTable() {
           }}
         />
       )}
-
     </>
   )
 }
