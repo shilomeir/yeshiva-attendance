@@ -1,25 +1,35 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { LoginScreen } from '@/components/auth/LoginScreen'
-import { StudentLayout } from '@/components/student/StudentLayout'
-import { AdminLayout } from '@/components/admin/AdminLayout'
 import { SplashScreen } from '@/components/shared/SplashScreen'
-import { HomePage } from '@/pages/student/HomePage'
-import { AbsenceRequestPage } from '@/pages/student/AbsenceRequestPage'
-import { HistoryPage } from '@/pages/student/HistoryPage'
-import { DashboardPage } from '@/pages/admin/DashboardPage'
-import { StudentsPage } from '@/pages/admin/StudentsPage'
-import { CalendarPage } from '@/pages/admin/CalendarPage'
-import { AuditLogPage } from '@/pages/admin/AuditLogPage'
-import { SettingsPage } from '@/pages/admin/SettingsPage'
-import { RollCallPage } from '@/pages/admin/RollCallPage'
-import { PendingRequestsPage } from '@/pages/admin/PendingRequestsPage'
-import { ExceptionsPage } from '@/pages/admin/ExceptionsPage'
-import { ClassSupervisorDashboard } from '@/pages/class-supervisor/ClassSupervisorDashboard'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
 import { supabase } from '@/lib/supabase'
+
+// Layouts (small, always needed for the guard shell)
+const StudentLayout = lazy(() => import('@/components/student/StudentLayout').then(m => ({ default: m.StudentLayout })))
+const AdminLayout   = lazy(() => import('@/components/admin/AdminLayout').then(m => ({ default: m.AdminLayout })))
+
+// Student pages
+const HomePage           = lazy(() => import('@/pages/student/HomePage').then(m => ({ default: m.HomePage })))
+const AbsenceRequestPage = lazy(() => import('@/pages/student/AbsenceRequestPage').then(m => ({ default: m.AbsenceRequestPage })))
+const HistoryPage        = lazy(() => import('@/pages/student/HistoryPage').then(m => ({ default: m.HistoryPage })))
+
+// Admin pages
+const DashboardPage      = lazy(() => import('@/pages/admin/DashboardPage').then(m => ({ default: m.DashboardPage })))
+const StudentsPage       = lazy(() => import('@/pages/admin/StudentsPage').then(m => ({ default: m.StudentsPage })))
+const CalendarPage       = lazy(() => import('@/pages/admin/CalendarPage').then(m => ({ default: m.CalendarPage })))
+const AuditLogPage       = lazy(() => import('@/pages/admin/AuditLogPage').then(m => ({ default: m.AuditLogPage })))
+const SettingsPage       = lazy(() => import('@/pages/admin/SettingsPage').then(m => ({ default: m.SettingsPage })))
+const RollCallPage       = lazy(() => import('@/pages/admin/RollCallPage').then(m => ({ default: m.RollCallPage })))
+const PendingRequestsPage = lazy(() => import('@/pages/admin/PendingRequestsPage').then(m => ({ default: m.PendingRequestsPage })))
+const ExceptionsPage     = lazy(() => import('@/pages/admin/ExceptionsPage').then(m => ({ default: m.ExceptionsPage })))
+
+// Supervisor
+const ClassSupervisorDashboard = lazy(() =>
+  import('@/pages/class-supervisor/ClassSupervisorDashboard').then(m => ({ default: m.ClassSupervisorDashboard }))
+)
 
 function StudentGuard({ children }: { children: React.ReactNode }) {
   const { currentUser } = useAuthStore()
@@ -37,6 +47,14 @@ function ClassSupervisorGuard({ children }: { children: React.ReactNode }) {
   const { classSupervisor } = useAuthStore()
   if (!classSupervisor) return <Navigate to="/login" replace />
   return <>{children}</>
+}
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  )
 }
 
 export default function App() {
@@ -86,57 +104,58 @@ export default function App() {
     <>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
-      <Routes>
-        {/* Auth */}
-        <Route path="/login" element={<LoginScreen />} />
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
+          {/* Auth */}
+          <Route path="/login" element={<LoginScreen />} />
 
-        {/* Student routes */}
-        <Route
-          path="/student"
-          element={
-            <StudentGuard>
-              <StudentLayout />
-            </StudentGuard>
-          }
-        >
-          <Route index element={<HomePage />} />
-          <Route path="requests" element={<AbsenceRequestPage />} />
-          <Route path="history" element={<HistoryPage />} />
-        </Route>
+          {/* Student routes */}
+          <Route
+            path="/student"
+            element={
+              <StudentGuard>
+                <StudentLayout />
+              </StudentGuard>
+            }
+          >
+            <Route index element={<HomePage />} />
+            <Route path="requests" element={<AbsenceRequestPage />} />
+            <Route path="history" element={<HistoryPage />} />
+          </Route>
 
-        {/* Admin routes */}
-        <Route
-          path="/admin"
-          element={
-            <AdminGuard>
-              <AdminLayout />
-            </AdminGuard>
-          }
-        >
-          <Route index element={<DashboardPage />} />
-          <Route path="students" element={<StudentsPage />} />
-          <Route path="calendar" element={<CalendarPage />} />
-          <Route path="audit" element={<AuditLogPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="rollcall" element={<RollCallPage />} />
-          <Route path="requests" element={<PendingRequestsPage />} />
-          <Route path="exceptions" element={<ExceptionsPage />} />
-        </Route>
+          {/* Admin routes */}
+          <Route
+            path="/admin"
+            element={
+              <AdminGuard>
+                <AdminLayout />
+              </AdminGuard>
+            }
+          >
+            <Route index element={<DashboardPage />} />
+            <Route path="students" element={<StudentsPage />} />
+            <Route path="calendar" element={<CalendarPage />} />
+            <Route path="audit" element={<AuditLogPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="rollcall" element={<RollCallPage />} />
+            <Route path="requests" element={<PendingRequestsPage />} />
+            <Route path="exceptions" element={<ExceptionsPage />} />
+          </Route>
 
-        {/* Class supervisor route */}
-        <Route
-          path="/class-supervisor"
-          element={
-            <ClassSupervisorGuard>
-              <ClassSupervisorDashboard />
-            </ClassSupervisorGuard>
-          }
-        />
+          {/* Class supervisor route */}
+          <Route
+            path="/class-supervisor"
+            element={
+              <ClassSupervisorGuard>
+                <ClassSupervisorDashboard />
+              </ClassSupervisorGuard>
+            }
+          />
 
-        {/* Default redirect */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
+          {/* Fallback */}
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+      </Suspense>
     </>
   )
 }

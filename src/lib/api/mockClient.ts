@@ -9,6 +9,7 @@ import type {
   RecurringAbsence,
   StudentStatus,
   DashboardStats,
+  CampusStatusCounts,
   DailyPresenceData,
   ReasonData,
   HourlyData,
@@ -27,6 +28,9 @@ import type {
   ListDeparturesOptions,
   CreateEventPayload,
   PushNotificationTarget,
+  AddStudentPayload,
+  UpdateStudentPayload,
+  AppResult,
 } from './types'
 
 function toIso(d: Date | string): string {
@@ -130,7 +134,51 @@ export class MockApiClient implements IApiClient {
     return this.sendPushNotification(title, body)
   }
 
+  async addStudent(student: AddStudentPayload): Promise<AppResult<Student>> {
+    if (!/^\d{9}$/.test(student.idNumber)) {
+      return { error: { message: 'מספר זהות חייב להיות 9 ספרות' } }
+    }
+    const existing = await db.students.where('idNumber').equals(student.idNumber).first()
+    if (existing) {
+      return { error: { message: 'תלמיד עם מספר זהות זה כבר קיים במערכת' } }
+    }
+    const now = new Date().toISOString()
+    const newStudent: Student = {
+      id:            uuidv4(),
+      idNumber:      student.idNumber,
+      fullName:      student.fullName,
+      phone:         student.phone,
+      grade:         student.grade,
+      classId:       student.classId,
+      currentStatus: 'ON_CAMPUS',
+      lastSeen:      now,
+      lastLocation:  null,
+      deviceToken:   null,
+      push_token:    null,
+      pendingApproval: false,
+      createdAt:     now,
+    }
+    await db.students.add(newStudent)
+    return { data: newStudent }
+  }
+
+  async updateStudent(id: string, updates: UpdateStudentPayload): Promise<AppResult<Student>> {
+    const student = await db.students.get(id)
+    if (!student) return { error: { message: 'תלמיד לא נמצא' } }
+    const updated = { ...student, ...updates }
+    await db.students.put(updated)
+    return { data: updated }
+  }
+
   async deleteStudent(id: string): Promise<void> {
+    // Guard: refuse to delete a student with an ACTIVE or PENDING departure
+    const activeDeps = await db.departures
+      .where('student_id').equals(id)
+      .filter(d => ['ACTIVE', 'PENDING', 'APPROVED'].includes(d.status))
+      .first()
+    if (activeDeps) {
+      throw new Error('לא ניתן למחוק תלמיד עם יציאה פעילה. בטל את היציאה תחילה.')
+    }
     await db.students.delete(id)
     await db.events.where('studentId').equals(id).delete()
     await db.departures.where('student_id').equals(id).delete()
@@ -295,6 +343,9 @@ export class MockApiClient implements IApiClient {
       note: note ?? null,
     })
 
+    // Simulate push notification (mirrors supabaseClient which calls approve_departure RPC + send-push)
+    console.debug('[mock] Push: departure approved for student', dep.student_id)
+
     return { status: newStatus }
   }
 
@@ -411,6 +462,12 @@ export class MockApiClient implements IApiClient {
   async listDepartures(options: ListDeparturesOptions = {}): Promise<CalendarDeparture[]> {
     let departures = await db.departures.toArray()
 
+    // Mirror v_calendar_departures view: exclude terminal non-visible states unless caller asks
+    if (!options.status) {
+      const visible: DepartureStatus[] = ['PENDING', 'APPROVED', 'ACTIVE', 'COMPLETED']
+      departures = departures.filter((d) => visible.includes(d.status))
+    }
+
     if (options.studentId) departures = departures.filter((d) => d.student_id === options.studentId)
     if (options.classId) {
       const classStudents = await db.students.where('classId').equals(options.classId).toArray()
@@ -521,6 +578,13 @@ export class MockApiClient implements IApiClient {
     }
 
     await db.events.add(event)
+
+    // Mirror supabaseClient: update student status on CHECK_IN / CHECK_OUT events
+    if (payload.type === 'CHECK_IN' || payload.type === 'CHECK_OUT') {
+      const newStatus: StudentStatus = payload.type === 'CHECK_IN' ? 'ON_CAMPUS' : 'OFF_CAMPUS'
+      await db.students.update(payload.studentId, { currentStatus: newStatus, lastSeen: now })
+    }
+
     return event
   }
 
@@ -577,14 +641,14 @@ export class MockApiClient implements IApiClient {
       })
       if ('error' in result) throw new Error((result as { error: string }).error)
     } else if (newStatus === 'ON_CAMPUS') {
-      // Cancel all active departures for this student
-      const active = await db.departures
+      // Use cancelDeparture so logging + status update mirrors the RPC path
+      const live = await db.departures
         .where('student_id')
         .equals(studentId)
         .filter((d) => d.status === 'ACTIVE' || d.status === 'APPROVED' || d.status === 'PENDING')
         .toArray()
-      for (const d of active) {
-        await db.departures.update(d.id, { status: 'CANCELLED', cancelled_at: now })
+      for (const d of live) {
+        await this.cancelDeparture(d.id, 'admin', 'ADMIN', note)
       }
       await db.students.update(studentId, { currentStatus: 'ON_CAMPUS', lastSeen: now })
     } else {
@@ -617,9 +681,26 @@ export class MockApiClient implements IApiClient {
 
   // ── Analytics ─────────────────────────────────────────────────────────────
 
+  async getCampusStatusCounts(): Promise<CampusStatusCounts> {
+    const students = await db.students.toArray()
+    const byClass: CampusStatusCounts['byClass'] = {}
+    for (const s of students) {
+      if (!byClass[s.classId]) byClass[s.classId] = { total: 0, onCampus: 0, offCampus: 0 }
+      byClass[s.classId].total++
+      if (s.currentStatus === 'ON_CAMPUS') byClass[s.classId].onCampus++
+      if (s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE') byClass[s.classId].offCampus++
+    }
+    return {
+      total: students.length,
+      onCampus: students.filter(s => s.currentStatus === 'ON_CAMPUS').length,
+      offCampus: students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length,
+      pending: students.filter(s => s.pendingApproval).length,
+      byClass,
+    }
+  }
+
   async getDashboardStats(): Promise<DashboardStats> {
     const students = await db.students.toArray()
-    const total = students.length
     const onCampus = students.filter((s) => s.currentStatus === 'ON_CAMPUS').length
     const offCampus = students.filter((s) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
     const pending = students.filter((s) => s.pendingApproval).length
@@ -629,7 +710,8 @@ export class MockApiClient implements IApiClient {
     const longAbsent = students.filter(
       (s) => s.currentStatus !== 'ON_CAMPUS' && s.lastSeen !== null && s.lastSeen < cutoffISO
     ).length
-    return { total, onCampus, offCampus, pending, longAbsent }
+    // Exclude PENDING-status students from total (mirrors supabaseClient)
+    return { total: onCampus + offCampus, onCampus, offCampus, pending, longAbsent }
   }
 
   async getDailyPresence(days = 7): Promise<DailyPresenceData[]> {

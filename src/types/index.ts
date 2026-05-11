@@ -150,6 +150,7 @@ export interface SyncQueueItem {
   payload: Record<string, unknown>
   clientTimestamp: string
   retryCount: number
+  lastAttemptAt?: number  // Unix ms; undefined = never attempted
 }
 
 export interface RecurringAbsence {
@@ -168,6 +169,14 @@ export interface DashboardStats {
   offCampus: number
   pending: number
   longAbsent: number
+}
+
+export interface CampusStatusCounts {
+  total: number
+  onCampus: number
+  offCampus: number
+  pending: number
+  byClass: Record<string, { total: number; onCampus: number; offCampus: number }>
 }
 
 export interface ClassStat {

@@ -1,4 +1,4 @@
-import React, { Fragment, useEffect, useRef, useState } from 'react'
+import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Users, UserCheck, UserX, CalendarOff, Phone,
   AlertOctagon, CheckCircle2, XCircle, MapPin, Bell, Send, Loader2, Clock,
@@ -391,8 +391,8 @@ export function DashboardPage() {
       ].filter((d) => d.value > 0)
     : []
 
-  // Bar chart by grade — built from live classStats, not hardcoded GRADE_LEVELS
-  const gradeChartData = (() => {
+  // Bar chart by grade — memoized to avoid recompute on unrelated state changes
+  const gradeChartData = useMemo(() => {
     const gradeNames = [...new Set(classStats.map((cs) => cs.grade))].sort()
     return gradeNames.map((grade) => {
       const classes = classStats.filter((cs) => cs.grade === grade)
@@ -402,7 +402,7 @@ export function DashboardPage() {
         מחוץ: classes.reduce((s, cs) => s + cs.offCampus, 0),
       }
     }).filter((d) => d.בישיבה + d.מחוץ > 0)
-  })()
+  }, [classStats])
 
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">

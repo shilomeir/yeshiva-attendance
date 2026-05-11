@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { StudentRow } from '@/components/admin/StudentRow'
 import { ClassEditModal } from '@/components/admin/ClassEditModal'
+import { EditStudentModal } from '@/components/admin/EditStudentModal'
 import { useStudentsStore } from '@/store/studentsStore'
 import type { Student } from '@/types'
 
@@ -11,6 +12,7 @@ export function StudentTable() {
   const { filteredStudents, loadStudents, refreshStudent } = useStudentsStore()
   const parentRef = useRef<HTMLDivElement>(null)
   const [editingStudent, setEditingStudent] = useState<Student | null>(null)
+  const [editingStudentFull, setEditingStudentFull] = useState<Student | null>(null)
 
   const virtualizer = useVirtualizer({
     count: filteredStudents.length,
@@ -54,6 +56,7 @@ export function StudentTable() {
                   student={student}
                   onUpdate={loadStudents}
                   onEditClass={setEditingStudent}
+                  onEditStudent={setEditingStudentFull}
                 />
               </div>
             )
@@ -68,6 +71,16 @@ export function StudentTable() {
           onClose={() => setEditingStudent(null)}
           onSaved={async () => {
             await refreshStudent(editingStudent.id)
+            loadStudents()
+          }}
+        />
+      )}
+
+      {editingStudentFull && (
+        <EditStudentModal
+          student={editingStudentFull}
+          onClose={() => setEditingStudentFull(null)}
+          onSaved={() => {
             loadStudents()
           }}
         />

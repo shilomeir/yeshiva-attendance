@@ -1,10 +1,11 @@
 import type { GPSStatus } from '@/types'
+import { getConfig } from '@/lib/config/appConfig'
 
-// Campus coordinates: Yeshivat Shvi Hevron
+// Re-export as named constants for backward compatibility
 export const CAMPUS_LAT = 31.5253
 export const CAMPUS_LNG = 35.1056
 export const CAMPUS_RADIUS_METERS = 300
-export const AREA_RADIUS_METERS = 5000  // 5km — "in the Hebron area"
+export const AREA_RADIUS_METERS = 5000
 
 export interface GPSResult {
   lat: number
@@ -46,7 +47,8 @@ function getWebPosition(): Promise<GPSResult | GPSError> {
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude, accuracy } = position.coords
-        const distance = haversineDistance(CAMPUS_LAT, CAMPUS_LNG, latitude, longitude)
+        const { campusLat, campusLng } = getConfig()
+        const distance = haversineDistance(campusLat, campusLng, latitude, longitude)
 
         resolve({
           lat: latitude,

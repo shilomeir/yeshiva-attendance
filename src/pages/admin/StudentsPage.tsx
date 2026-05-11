@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import * as XLSX from 'xlsx'
-import { Download } from 'lucide-react'
+import { Download, Plus } from 'lucide-react'
 import { FilterBar } from '@/components/admin/FilterBar'
 import { StudentTable } from '@/components/admin/StudentTable'
+import { AddStudentModal } from '@/components/admin/AddStudentModal'
 import { useStudentsStore, normalizeHebrew } from '@/store/studentsStore'
 import { Button } from '@/components/ui/button'
 import { GRADE_LEVELS } from '@/lib/constants/grades'
@@ -60,6 +61,7 @@ export function StudentsPage() {
     setGrade,
     setClass,
   } = useStudentsStore()
+  const [showAddModal, setShowAddModal] = useState(false)
 
   useEffect(() => {
     loadStudents()
@@ -90,15 +92,25 @@ export function StudentsPage() {
               {isLoading ? '...' : filteredStudents.length}
             </span>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => exportToXlsx(students)}
-            className="flex items-center gap-1.5 text-xs"
-          >
-            <Download className="h-3.5 w-3.5" />
-            ייצוא Excel
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => setShowAddModal(true)}
+              className="flex items-center gap-1.5 text-xs"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              הוסף תלמיד
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportToXlsx(students)}
+              className="flex items-center gap-1.5 text-xs"
+            >
+              <Download className="h-3.5 w-3.5" />
+              ייצוא Excel
+            </Button>
+          </div>
         </div>
 
         {/* ── Grade tabs ─────────────────────────────────────────── */}
@@ -220,6 +232,13 @@ export function StudentsPage() {
           <StudentTable />
         )}
       </div>
+
+      {showAddModal && (
+        <AddStudentModal
+          onClose={() => setShowAddModal(false)}
+          onSaved={() => loadStudents()}
+        />
+      )}
     </div>
   )
 }
