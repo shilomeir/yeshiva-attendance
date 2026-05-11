@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Edit2, Trash2, GraduationCap } from 'lucide-react'
+import { Edit2, Trash2 } from 'lucide-react'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { Button } from '@/components/ui/button'
 import { StatusOverrideModal } from '@/components/admin/StatusOverrideModal'
@@ -11,7 +11,6 @@ interface StudentRowProps {
   student: Student
   onUpdate: () => void
   onEditClass: (student: Student) => void
-  onEditStudent: (student: Student) => void
 }
 
 function getInitials(name: string): string {
@@ -35,7 +34,7 @@ function getAvatarColor(id: string): string {
   return colors[Math.abs(hash) % colors.length]
 }
 
-export function StudentRow({ student, onUpdate, onEditClass, onEditStudent }: StudentRowProps) {
+export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) {
   const [showOverride, setShowOverride] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const { deleteStudent } = useStudentsStore()
@@ -84,17 +83,6 @@ export function StudentRow({ student, onUpdate, onEditClass, onEditStudent }: St
 
         {/* Status badge */}
         <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
-
-        {/* Edit student (full details) */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => onEditStudent(student)}
-          className="shrink-0 h-8 w-8 text-[var(--text-muted)]"
-          title="עריכת פרטי תלמיד"
-        >
-          <GraduationCap className="h-4 w-4" />
-        </Button>
 
         {/* Edit status */}
         <Button
