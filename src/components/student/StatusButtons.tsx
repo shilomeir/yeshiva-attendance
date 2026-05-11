@@ -4,6 +4,7 @@ import { OffCampusSheet } from '@/components/student/OffCampusSheet'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { StudentStatus } from '@/types'
 
 interface StatusButtonsProps {
@@ -51,8 +52,8 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
 
       onStatusChange('ON_CAMPUS')
       toast({ title: 'ברוך שובך!', description: 'החזרה לישיבה נרשמה בהצלחה' })
-    } catch {
-      toast({ title: 'שגיאה ברישום החזרה', description: 'נסה שוב', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה ברישום החזרה', description: getErrorMessage(err, 'רישום החזרה לישיבה נכשל'), variant: 'destructive' })
     } finally {
       setIsCheckingIn(false)
     }

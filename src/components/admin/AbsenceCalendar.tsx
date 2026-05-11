@@ -14,6 +14,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils/cn'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { CalendarDeparture } from '@/types'
 
 function getTimeStr(isoStr: string): string {
@@ -289,6 +291,7 @@ export function AbsenceCalendar() {
       setDayData(newDayData)
     } catch (err) {
       console.error('Failed to load calendar data:', err)
+      toast({ title: 'שגיאה בטעינת לוח היעדרויות', description: getErrorMessage(err, 'טעינת נתוני לוח ההיעדרויות נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }

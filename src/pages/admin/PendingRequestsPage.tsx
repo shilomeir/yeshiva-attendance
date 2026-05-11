@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import { api } from '@/lib/api'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { CalendarDeparture } from '@/types'
 
 function getTimeStr(isoStr: string): string {
@@ -38,8 +39,9 @@ export function PendingRequestsPage() {
         byClass[d.class_id].push(d)
       }
       setActiveByClass(byClass)
-    } catch {
-      console.error('Failed to load pending departures')
+    } catch (err) {
+      console.error('Failed to load pending departures', err)
+      toast({ title: 'שגיאה בטעינת בקשות', description: getErrorMessage(err, 'טעינת הבקשות הממתינות נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }
@@ -54,13 +56,13 @@ export function PendingRequestsPage() {
     try {
       const result = await action()
       if (result && typeof result === 'object' && 'error' in result) {
-        toast({ title: failMsg, description: (result as { error: string }).error, variant: 'destructive' })
+        toast({ title: failMsg, description: getResultErrorMessage(result, failMsg), variant: 'destructive' })
       } else {
         toast({ title: successMsg })
         // Realtime subscription will remove the card
       }
-    } catch {
-      toast({ title: failMsg, variant: 'destructive' })
+    } catch (err) {
+      toast({ title: failMsg, description: getErrorMessage(err, failMsg), variant: 'destructive' })
     } finally {
       setActing((prev) => ({ ...prev, [depId]: false }))
     }

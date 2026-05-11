@@ -19,6 +19,8 @@ import {
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat } from '@/types'
 
 // Thresholds
@@ -99,10 +101,14 @@ export function RollCallPage() {
   // Load class list when modal opens
   useEffect(() => {
     if (!showAuditModal) return
-    api.getClassStats().then((stats) => {
-      setAllClassStats(stats)
-      setSelectedClassIds(new Set(stats.map((s) => s.classId)))
-    })
+    api.getClassStats()
+      .then((stats) => {
+        setAllClassStats(stats)
+        setSelectedClassIds(new Set(stats.map((s) => s.classId)))
+      })
+      .catch((err) => {
+        toast({ title: 'שגיאה בטעינת כיתות', description: getErrorMessage(err, 'טעינת רשימת הכיתות נכשלה'), variant: 'destructive' })
+      })
   }, [showAuditModal])
 
   const handleOpenModal = () => {
@@ -182,12 +188,18 @@ export function RollCallPage() {
       // 3. Wait for students to respond, refreshing after timeout
       setIsWaiting(true)
       waitTimerRef.current = setTimeout(async () => {
-        const updated = await api.getStudents()
-        enrichAndSet(updated)
-        setLastRun(new Date())
-        setIsWaiting(false)
+        try {
+          const updated = await api.getStudents()
+          enrichAndSet(updated)
+          setLastRun(new Date())
+        } catch (err) {
+          toast({ title: 'שגיאה בעדכון תוצאות ביקורת', description: getErrorMessage(err, 'טעינת מיקומי התלמידים לאחר הביקורת נכשלה'), variant: 'destructive' })
+        } finally {
+          setIsWaiting(false)
+        }
       }, LOCATION_RESPONSE_TIMEOUT_MS)
-    } catch {
+    } catch (err) {
+      toast({ title: 'שגיאה בהפעלת ביקורת', description: getErrorMessage(err, 'שליחת בקשת מיקום לתלמידים נכשלה'), variant: 'destructive' })
       setIsLoading(false)
       setIsWaiting(false)
     }

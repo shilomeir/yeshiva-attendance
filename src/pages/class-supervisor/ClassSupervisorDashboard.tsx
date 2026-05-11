@@ -22,6 +22,7 @@ import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, CalendarDeparture } from '@/types'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -115,8 +116,8 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
       toast({ title: `${student.fullName} סומן כנוכח` })
       onSuccess()
       handleClose()
-    } catch {
-      toast({ title: 'שגיאה בעדכון הסטטוס', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה בעדכון הסטטוס', description: getErrorMessage(err, 'עדכון סטטוס התלמיד נכשל'), variant: 'destructive' })
     } finally { setIsSubmitting(false) }
   }
 
@@ -147,7 +148,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         actorRole: 'SUPERVISOR',
       })
       if ('error' in result) {
-        toast({ title: 'שגיאה', description: result.error, variant: 'destructive' })
+        toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'רישום היציאה נכשל'), variant: 'destructive' })
       } else if (result.status === 'QUOTA_FULL') {
         toast({ title: 'המכסה מלאה', description: 'לא ניתן לרשום יציאה — המכסה מלאה', variant: 'destructive' })
       } else {
@@ -155,8 +156,8 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         onSuccess()
         handleClose()
       }
-    } catch {
-      toast({ title: 'שגיאה ברישום היציאה', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה ברישום היציאה', description: getErrorMessage(err, 'רישום היציאה נכשל'), variant: 'destructive' })
     } finally { setIsSubmitting(false) }
   }
 
@@ -178,11 +179,11 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         actorRole: 'SUPERVISOR',
       })
       if ('error' in result) {
-        toast({ title: 'שגיאה', description: result.error, variant: 'destructive' })
+        toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'רישום ההיעדרות נכשל'), variant: 'destructive' })
         return
       }
       if (result.status === 'QUOTA_FULL') {
-        toast({ title: 'שגיאה בלתי צפויה', variant: 'destructive' })
+        toast({ title: 'שגיאה בלתי צפויה', description: getResultErrorMessage(result, 'המכסה מלאה למרות שהבקשה נשלחה כממתינה'), variant: 'destructive' })
         return
       }
       // Auto-approve as supervisor
@@ -190,8 +191,8 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
       toast({ title: `היעדרות אושרה עבור ${student.fullName}` })
       onSuccess()
       handleClose()
-    } catch {
-      toast({ title: 'שגיאה ברישום ההיעדרות', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה ברישום ההיעדרות', description: getErrorMessage(err, 'רישום ההיעדרות נכשל'), variant: 'destructive' })
     } finally { setIsSubmitting(false) }
   }
 
@@ -467,8 +468,9 @@ export function ClassSupervisorDashboard() {
           return depDate === todayStr && minsFromNow(d.end_at) > -60
         })
       )
-    } catch {
-      console.error('Failed to load supervisor data')
+    } catch (err) {
+      console.error('Failed to load supervisor data', err)
+      toast({ title: 'שגיאה בטעינת נתוני כיתה', description: getErrorMessage(err, 'טעינת נתוני אחראי הכיתה נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }

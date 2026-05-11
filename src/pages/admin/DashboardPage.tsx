@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useRef, useState } from 'react'
 import {
   Users, UserCheck, UserX, CalendarOff, Phone,
   AlertOctagon, CheckCircle2, XCircle, MapPin, Bell, Send, Loader2, Clock,
+  GraduationCap, School, UserRound,
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -14,6 +15,9 @@ import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import type { DashboardStats, Student, CalendarDeparture, ClassStat } from '@/types'
+import type { PushNotificationTarget } from '@/lib/api/types'
+
+type BroadcastTargetMode = 'all' | 'grade' | 'class' | 'student'
 
 function getTimeStr(isoStr: string): string {
   const d = new Date(isoStr)
@@ -41,6 +45,36 @@ function getLocationCategory(student: Student): 'inYeshiva' | 'inArea' | 'far' {
     if (dist <= AREA_RADIUS_METERS) return 'inArea'
   }
   return 'far'
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'he'))
+}
+
+function getBroadcastTargetStudents(
+  students: Student[],
+  mode: BroadcastTargetMode,
+  selectedGrade: string,
+  selectedClass: string,
+  selectedStudentId: string,
+): Student[] {
+  if (mode === 'all') return students
+  if (mode === 'grade') return selectedGrade ? students.filter((s) => s.grade === selectedGrade) : []
+  if (mode === 'class') return selectedClass ? students.filter((s) => s.classId === selectedClass) : []
+  if (mode === 'student') return selectedStudentId ? students.filter((s) => s.id === selectedStudentId) : []
+  return []
+}
+
+function getBroadcastTargetPayload(
+  mode: BroadcastTargetMode,
+  selectedGrade: string,
+  selectedClass: string,
+  selectedStudentId: string,
+): PushNotificationTarget | undefined {
+  if (mode === 'grade' && selectedGrade) return { grade: selectedGrade }
+  if (mode === 'class' && selectedClass) return { classId: selectedClass }
+  if (mode === 'student' && selectedStudentId) return { studentIds: [selectedStudentId] }
+  return undefined
 }
 
 // ── stat cards config ───────────────────────────────────────────────────────
@@ -156,6 +190,7 @@ export function DashboardPage() {
   const [longAbsentStudents, setLongAbsentStudents] = useState<Student[]>([])
   const [urgentRequests, setUrgentRequests] = useState<CalendarDeparture[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
+  const [allStudents, setAllStudents] = useState<Student[]>([])
   const [locationBreakdown, setLocationBreakdown] = useState({ inYeshiva: 0, inArea: 0, far: 0 })
   const [todayDepartures, setTodayDepartures] = useState<CalendarDeparture[]>([])
   const [, setTick] = useState(0)
@@ -166,6 +201,10 @@ export function DashboardPage() {
   // Broadcast notification state
   const [broadcastTitle, setBroadcastTitle] = useState('')
   const [broadcastBody, setBroadcastBody] = useState('')
+  const [broadcastTargetMode, setBroadcastTargetMode] = useState<BroadcastTargetMode>('all')
+  const [broadcastGrade, setBroadcastGrade] = useState('')
+  const [broadcastClass, setBroadcastClass] = useState('')
+  const [broadcastStudentId, setBroadcastStudentId] = useState('')
   const [broadcastSending, setBroadcastSending] = useState(false)
   const [broadcastResult, setBroadcastResult] = useState<{ sent: number; failed: number; lastError?: string } | null>(null)
   const broadcastResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -192,6 +231,7 @@ export function DashboardPage() {
       if (clsStatsRes.status === 'fulfilled') setClassStats(clsStatsRes.value)
 
       if (allStudentsRes.status === 'fulfilled') {
+        setAllStudents(allStudentsRes.value as Student[])
         const breakdown = { inYeshiva: 0, inArea: 0, far: 0 }
         for (const s of allStudentsRes.value as Student[]) {
           breakdown[getLocationCategory(s)]++
@@ -242,13 +282,58 @@ export function DashboardPage() {
     }
   }
 
+  const broadcastGrades = uniqueSorted(allStudents.map((s) => s.grade))
+  const broadcastClasses = uniqueSorted(
+    allStudents
+      .filter((s) => !broadcastGrade || s.grade === broadcastGrade)
+      .map((s) => s.classId)
+  )
+  const broadcastStudents = allStudents
+    .filter((s) => (!broadcastGrade || s.grade === broadcastGrade) && (!broadcastClass || s.classId === broadcastClass))
+    .sort((a, b) => a.fullName.localeCompare(b.fullName, 'he'))
+  const broadcastTargetStudents = getBroadcastTargetStudents(
+    allStudents,
+    broadcastTargetMode,
+    broadcastGrade,
+    broadcastClass,
+    broadcastStudentId
+  )
+  const broadcastRegisteredCount = broadcastTargetStudents.filter((s) => Boolean(s.push_token)).length
+  const broadcastTargetIsReady =
+    broadcastTargetMode === 'all' ||
+    (broadcastTargetMode === 'grade' && Boolean(broadcastGrade)) ||
+    (broadcastTargetMode === 'class' && Boolean(broadcastGrade && broadcastClass)) ||
+    (broadcastTargetMode === 'student' && Boolean(broadcastGrade && broadcastClass && broadcastStudentId))
+  const broadcastTargetLabel =
+    broadcastTargetMode === 'all'
+      ? 'כולם'
+      : broadcastTargetMode === 'grade'
+      ? broadcastGrade || 'שיעור'
+      : broadcastTargetMode === 'class'
+      ? broadcastClass || 'כיתה'
+      : broadcastStudents.find((s) => s.id === broadcastStudentId)?.fullName || 'תלמיד'
+
+  const setBroadcastMode = (mode: BroadcastTargetMode) => {
+    setBroadcastTargetMode(mode)
+    setBroadcastGrade('')
+    setBroadcastClass('')
+    setBroadcastStudentId('')
+    setBroadcastResult(null)
+  }
+
   const handleBroadcast = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!broadcastTitle.trim() && !broadcastBody.trim()) return
+    if ((!broadcastTitle.trim() && !broadcastBody.trim()) || !broadcastTargetIsReady) return
     setBroadcastSending(true)
     setBroadcastResult(null)
     try {
-      const result = await api.sendPushToAll(broadcastTitle.trim(), broadcastBody.trim())
+      const target = getBroadcastTargetPayload(
+        broadcastTargetMode,
+        broadcastGrade,
+        broadcastClass,
+        broadcastStudentId
+      )
+      const result = await api.sendPushNotification(broadcastTitle.trim(), broadcastBody.trim(), target)
       setBroadcastResult(result)
       setBroadcastTitle('')
       setBroadcastBody('')
@@ -731,13 +816,112 @@ export function DashboardPage() {
               <Bell className="h-5 w-5 text-[var(--blue)]" />
             </div>
             <div>
-              <CardTitle className="text-base text-[var(--blue)]">שליחת התראות לכולם</CardTitle>
-              <p className="text-xs text-[var(--text-muted)]">שלח התראה לכל המכשירים הרשומים</p>
+              <CardTitle className="text-base text-[var(--blue)]">שליחת התראות</CardTitle>
+              <p className="text-xs text-[var(--text-muted)]">בחר יעד, כתוב הודעה ושלח למכשירים הרשומים בלבד</p>
             </div>
           </div>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleBroadcast} className="flex flex-col gap-3">
+          <form onSubmit={handleBroadcast} className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" dir="rtl">
+              {[
+                { mode: 'all' as const, label: 'כולם', icon: Users },
+                { mode: 'grade' as const, label: 'שיעור', icon: GraduationCap },
+                { mode: 'class' as const, label: 'כיתה', icon: School },
+                { mode: 'student' as const, label: 'תלמיד', icon: UserRound },
+              ].map(({ mode, label, icon: Icon }) => {
+                const active = broadcastTargetMode === mode
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setBroadcastMode(mode)}
+                    className={`flex h-11 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors ${
+                      active
+                        ? 'border-[var(--blue)] bg-[var(--blue)] text-white shadow-sm'
+                        : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--blue)]/50'
+                    }`}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+
+            {broadcastTargetMode !== 'all' && (
+              <div className="grid gap-3 md:grid-cols-3" dir="rtl">
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-[var(--text-muted)]">שיעור</span>
+                  <select
+                    value={broadcastGrade}
+                    onChange={(e) => {
+                      setBroadcastGrade(e.target.value)
+                      setBroadcastClass('')
+                      setBroadcastStudentId('')
+                      setBroadcastResult(null)
+                    }}
+                    className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]/40"
+                  >
+                    <option value="">בחר שיעור</option>
+                    {broadcastGrades.map((grade) => (
+                      <option key={grade} value={grade}>{grade}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {(broadcastTargetMode === 'class' || broadcastTargetMode === 'student') && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-[var(--text-muted)]">כיתה</span>
+                    <select
+                      value={broadcastClass}
+                      onChange={(e) => {
+                        setBroadcastClass(e.target.value)
+                        setBroadcastStudentId('')
+                        setBroadcastResult(null)
+                      }}
+                      disabled={!broadcastGrade}
+                      className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--blue)]/40"
+                    >
+                      <option value="">בחר כיתה</option>
+                      {broadcastClasses.map((classId) => (
+                        <option key={classId} value={classId}>{classId}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {broadcastTargetMode === 'student' && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-[var(--text-muted)]">תלמיד</span>
+                    <select
+                      value={broadcastStudentId}
+                      onChange={(e) => {
+                        setBroadcastStudentId(e.target.value)
+                        setBroadcastResult(null)
+                      }}
+                      disabled={!broadcastGrade || !broadcastClass}
+                      className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--blue)]/40"
+                    >
+                      <option value="">בחר תלמיד</option>
+                      {broadcastStudents.map((student) => (
+                        <option key={student.id} value={student.id}>
+                          {student.fullName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
+
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-muted)]" dir="rtl">
+              יעד: <span className="font-semibold text-[var(--text)]">{broadcastTargetLabel}</span>
+              <span className="mx-2 text-[var(--border)]">|</span>
+              {broadcastTargetIsReady
+                ? `${broadcastRegisteredCount} מכשירים רשומים מתוך ${broadcastTargetStudents.length} תלמידים`
+                : 'בחר יעד כדי לראות כמה מכשירים יקבלו את ההודעה'}
+            </div>
             <input
               type="text"
               placeholder="כותרת ההתראה (לא חובה)"
@@ -756,7 +940,12 @@ export function DashboardPage() {
             />
             <button
               type="submit"
-              disabled={broadcastSending || (!broadcastTitle.trim() && !broadcastBody.trim())}
+              disabled={
+                broadcastSending ||
+                !broadcastTargetIsReady ||
+                broadcastRegisteredCount === 0 ||
+                (!broadcastTitle.trim() && !broadcastBody.trim())
+              }
               className="flex items-center justify-center gap-2 rounded-lg bg-[var(--blue)] px-4 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
             >
               {broadcastSending ? (
@@ -767,7 +956,7 @@ export function DashboardPage() {
               ) : (
                 <>
                   <Send className="h-4 w-4" />
-                  שלח לכולם
+                  שלח ל{broadcastTargetLabel}
                 </>
               )}
             </button>

@@ -34,7 +34,7 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 CREATE TABLE IF NOT EXISTS departures (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  student_id    UUID        NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  student_id    TEXT        NOT NULL REFERENCES students(id) ON DELETE CASCADE,
 
   -- Denormalized at submission time — never updated on class reassignment.
   -- This preserves quota correctness: a student's departure counts against
@@ -130,10 +130,10 @@ CREATE INDEX IF NOT EXISTS idx_events_departure_id
   ON events (departure_id);
 
 -- Fix the TEXT/TIMESTAMPTZ mismatch in events.expectedReturn.
--- All stored values are ISO-8601 strings so the cast is safe.
+-- NULLIF handles rows where the column is an empty string.
 ALTER TABLE events
   ALTER COLUMN "expectedReturn" TYPE TIMESTAMPTZ
-  USING "expectedReturn"::TIMESTAMPTZ;
+  USING NULLIF(TRIM("expectedReturn"), '')::TIMESTAMPTZ;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ DECLARE
   v_prev_status TEXT;
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    v_prev_status := NULL;
+    v_prev_status := '';   -- '' = "no prior state" (satisfies NOT NULL on admin_overrides)
   ELSE
     -- Only fire when status actually changes
     IF OLD.status IS NOT DISTINCT FROM NEW.status THEN
@@ -212,13 +212,13 @@ BEGIN
     timestamp,
     note
   ) VALUES (
-    gen_random_uuid(),
+    gen_random_uuid()::TEXT,
     NEW.student_id,
     COALESCE(NEW.approved_by, 'system'),
     'departure_' || NEW.status,
     v_prev_status,
     NEW.status,
-    NOW(),
+    NOW()::TEXT,
     NEW.admin_note
   );
 
@@ -256,7 +256,7 @@ CREATE TRIGGER departures_audit_update
 -- p_source = 'ADMIN_OVERRIDE' requires p_actor_role IN ('ADMIN','SUPERVISOR')
 
 CREATE OR REPLACE FUNCTION submit_departure(
-  p_student_id    UUID,
+  p_student_id    TEXT,
   p_start_at      TIMESTAMPTZ,
   p_end_at        TIMESTAMPTZ,
   p_reason        TEXT        DEFAULT NULL,
@@ -427,9 +427,9 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION submit_departure(UUID,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT)
+GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT)
   TO authenticated;
-GRANT EXECUTE ON FUNCTION submit_departure(UUID,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT)
+GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT)
   TO anon;
 
 
@@ -623,7 +623,7 @@ GRANT EXECUTE ON FUNCTION cancel_departure(UUID,TEXT,TEXT,TEXT) TO anon;
 
 CREATE OR REPLACE FUNCTION return_departure(
   p_id         UUID,
-  p_student_id UUID  DEFAULT NULL,
+  p_student_id TEXT  DEFAULT NULL,
   p_gps_lat    DOUBLE PRECISION DEFAULT NULL,
   p_gps_lng    DOUBLE PRECISION DEFAULT NULL
 )
@@ -663,14 +663,14 @@ BEGIN
     "gpsLat", "gpsLng", "gpsStatus", "syncedAt",
     departure_id
   ) VALUES (
-    gen_random_uuid(),
+    gen_random_uuid()::TEXT,
     v_dep.student_id,
     'CHECK_IN',
-    v_now,
+    v_now::TEXT,
     p_gps_lat,
     p_gps_lng,
-    CASE WHEN p_gps_lat IS NOT NULL THEN 'GRANTED'::text ELSE 'UNAVAILABLE'::text END,
-    v_now,
+    CASE WHEN p_gps_lat IS NOT NULL THEN 'GRANTED' ELSE 'UNAVAILABLE' END,
+    v_now::TEXT,
     p_id
   );
 
@@ -693,8 +693,8 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION return_departure(UUID,UUID,DOUBLE PRECISION,DOUBLE PRECISION) TO authenticated;
-GRANT EXECUTE ON FUNCTION return_departure(UUID,UUID,DOUBLE PRECISION,DOUBLE PRECISION) TO anon;
+GRANT EXECUTE ON FUNCTION return_departure(UUID,TEXT,DOUBLE PRECISION,DOUBLE PRECISION) TO authenticated;
+GRANT EXECUTE ON FUNCTION return_departure(UUID,TEXT,DOUBLE PRECISION,DOUBLE PRECISION) TO anon;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -789,6 +789,10 @@ GRANT EXECUTE ON FUNCTION tick_departures() TO anon;
 -- 11. DATA MIGRATION: absence_requests → departures
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Disable trigger during bulk data migration to avoid flooding admin_overrides audit log
+-- DISABLE TRIGGER USER skips FK system triggers — no superuser needed
+ALTER TABLE departures DISABLE TRIGGER USER;
+
 DO $$
 DECLARE
   v_now TIMESTAMPTZ := NOW();
@@ -841,10 +845,10 @@ IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'absence_r
     ar.reason,
     ar."adminNote",
     NULL,          -- approved_by unknown for historical records
-    ar."createdAt",
-    CASE WHEN ar.status = 'APPROVED' THEN ar."createdAt" ELSE NULL END,
-    CASE WHEN ar.status = 'REJECTED' THEN ar."createdAt" ELSE NULL END,
-    CASE WHEN ar.status = 'CANCELLED' THEN ar."createdAt" ELSE NULL END
+    NULLIF(ar."createdAt", '')::TIMESTAMPTZ,
+    CASE WHEN ar.status = 'APPROVED'  THEN NULLIF(ar."createdAt", '')::TIMESTAMPTZ ELSE NULL END,
+    CASE WHEN ar.status = 'REJECTED'  THEN NULLIF(ar."createdAt", '')::TIMESTAMPTZ ELSE NULL END,
+    CASE WHEN ar.status = 'CANCELLED' THEN NULLIF(ar."createdAt", '')::TIMESTAMPTZ ELSE NULL END
 
   FROM absence_requests ar
   JOIN students s ON s.id = ar."studentId"
@@ -886,18 +890,18 @@ SELECT
   gen_random_uuid(),
   e."studentId",
   s."classId",
-  e.timestamp,
+  e.timestamp::TIMESTAMPTZ,
   COALESCE(
     e."expectedReturn",
-    e.timestamp + INTERVAL '8 hours'   -- fallback for missing return time
+    e.timestamp::TIMESTAMPTZ + INTERVAL '8 hours'   -- fallback for missing return time
   ),
   'ACTIVE',
   'SELF',
   FALSE,
   e.reason,
-  e.timestamp,
-  e.timestamp,
-  e.timestamp
+  e.timestamp::TIMESTAMPTZ,
+  e.timestamp::TIMESTAMPTZ,
+  e.timestamp::TIMESTAMPTZ
 
 FROM (
   -- Latest CHECK_OUT per student
@@ -918,6 +922,9 @@ WHERE s."currentStatus" IN ('OFF_CAMPUS', 'OVERDUE')
 
 END;
 $$;
+
+-- Re-enable triggers now that bulk data migration is complete
+ALTER TABLE departures ENABLE TRIGGER USER;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -948,7 +955,7 @@ BEGIN
     PERFORM cron.schedule(
       'tick-departures',
       '*/1 * * * *',
-      $$SELECT tick_departures()$$
+      'SELECT tick_departures()'
     );
 
   END IF;

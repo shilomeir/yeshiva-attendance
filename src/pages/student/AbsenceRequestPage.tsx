@@ -7,6 +7,7 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { CalendarDeparture, DepartureStatus, QuotaFullResult, DepartureSubmitResult } from '@/types'
 
 const STATUS_CONFIG: Record<DepartureStatus, {
@@ -85,6 +86,7 @@ export function AbsenceRequestPage() {
       setRequests(data)
     } catch (err) {
       console.error('Failed to load departures:', err)
+      toast({ title: 'שגיאה בטעינת בקשות', description: getErrorMessage(err, 'טעינת בקשות ההיעדרות נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }
@@ -124,11 +126,7 @@ export function AbsenceRequestPage() {
       })
 
       if ('error' in result) {
-        const r = result as { error: string; message?: string }
-        const description = r.error === 'DUPLICATE_DEPARTURE'
-          ? 'יש לך בקשת יציאה פעילה לאותה תקופה'
-          : (r.message ?? r.error)
-        toast({ title: 'שגיאה', description, variant: 'destructive' })
+        toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'שליחת בקשת ההיעדרות נכשלה'), variant: 'destructive' })
         return
       }
 
@@ -152,8 +150,8 @@ export function AbsenceRequestPage() {
       })
       resetForm()
       await loadRequests()
-    } catch {
-      toast({ title: 'שגיאה בשליחת הבקשה', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה בשליחת הבקשה', description: getErrorMessage(err, 'שליחת בקשת ההיעדרות נכשלה'), variant: 'destructive' })
     } finally {
       setIsSubmitting(false)
     }
@@ -176,8 +174,8 @@ export function AbsenceRequestPage() {
         toast({ title: 'הבקשה בוטלה' })
       }
       setRequests((prev) => prev.filter((r) => r.id !== dep.id))
-    } catch {
-      toast({ title: 'שגיאה', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה', description: getErrorMessage(err, 'ביטול או סגירת הבקשה נכשלו'), variant: 'destructive' })
     }
   }
 

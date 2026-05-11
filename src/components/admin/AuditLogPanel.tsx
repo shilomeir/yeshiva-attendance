@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { formatDateTimeHebrew } from '@/lib/utils/formatTime'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { AdminOverride, Student } from '@/types'
 
 const PAGE_SIZE = 20
@@ -60,8 +62,9 @@ export function AuditLogPanel() {
 
       const paged = all.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
       setOverrides(paged.map((o) => ({ ...o, student: studentMap.get(o.studentId) })))
-    } catch {
-      console.error('Failed to load audit log')
+    } catch (err) {
+      console.error('Failed to load audit log', err)
+      toast({ title: 'שגיאה בטעינת לוג ביקורת', description: getErrorMessage(err, 'טעינת לוג הביקורת נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }

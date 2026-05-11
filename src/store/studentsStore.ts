@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student, StudentStatus } from '@/types'
 
 type FilterType = 'ALL' | 'OFF_CAMPUS' | 'PENDING'
@@ -129,7 +130,7 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
         isLoading: false,
       })
     } catch (error) {
-      set({ error: 'שגיאה בטעינת רשימת התלמידים', isLoading: false })
+      set({ error: getErrorMessage(error, 'טעינת רשימת התלמידים נכשלה'), isLoading: false })
     }
   },
 
@@ -151,7 +152,7 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
       set({
         students,
         filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
-        error: 'שגיאה בעדכון הסטטוס',
+        error: getErrorMessage(error, 'עדכון סטטוס התלמיד נכשל'),
       })
     }
   },
@@ -182,7 +183,11 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
     try {
       await api.deleteStudent(id)
     } catch (error) {
-      set({ students, filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass) })
+      set({
+        students,
+        filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
+        error: getErrorMessage(error, 'מחיקת התלמיד נכשלה'),
+      })
     }
   },
 

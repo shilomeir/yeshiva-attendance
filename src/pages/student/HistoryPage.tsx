@@ -5,6 +5,8 @@ import { useAuthStore } from '@/store/authStore'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { formatDateTimeHebrew } from '@/lib/utils/formatTime'
 import { supabase } from '@/lib/supabase'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Event, CalendarDeparture } from '@/types'
 
 type TimelineItem =
@@ -73,6 +75,7 @@ export function HistoryPage() {
       setDepartures(departuresData)
     } catch (err) {
       console.error('Failed to load history:', err)
+      toast({ title: 'שגיאה בטעינת ציר הזמן', description: getErrorMessage(err, 'טעינת היסטוריית הפעולות נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
     }

@@ -290,3 +290,53 @@ describe('Audit log retention', () => {
     expect(await db.adminOverrides.count()).toBe(1)
   })
 })
+
+describe('targeted push notifications', () => {
+  it('counts only students matching the selected target and with a push token', async () => {
+    const gradeA = 'שיעור א'
+    const gradeB = 'שיעור ב'
+    const classA1 = 'שיעור א כיתה 1'
+    const classA2 = 'שיעור א כיתה 2'
+    const classB1 = 'שיעור ב כיתה 1'
+
+    const targetStudent = makeStudent({
+      fullName: 'Target Student',
+      grade: gradeA,
+      classId: classA1,
+      push_token: '{"endpoint":"target"}',
+    })
+    const classmate = makeStudent({
+      fullName: 'Classmate',
+      idNumber: '223456789',
+      grade: gradeA,
+      classId: classA1,
+      push_token: '{"endpoint":"classmate"}',
+    })
+    const otherClass = makeStudent({
+      fullName: 'Other Class',
+      idNumber: '323456789',
+      grade: gradeA,
+      classId: classA2,
+      push_token: '{"endpoint":"other-class"}',
+    })
+    const otherGrade = makeStudent({
+      fullName: 'Other Grade',
+      idNumber: '423456789',
+      grade: gradeB,
+      classId: classB1,
+      push_token: '{"endpoint":"other-grade"}',
+    })
+    const noToken = makeStudent({
+      fullName: 'No Token',
+      idNumber: '523456789',
+      grade: gradeA,
+      classId: classA1,
+      push_token: null,
+    })
+    await db.students.bulkAdd([targetStudent, classmate, otherClass, otherGrade, noToken])
+
+    await expect(api.sendPushNotification('title', 'body', { grade: gradeA })).resolves.toEqual({ sent: 3, failed: 0 })
+    await expect(api.sendPushNotification('title', 'body', { classId: classA1 })).resolves.toEqual({ sent: 2, failed: 0 })
+    await expect(api.sendPushNotification('title', 'body', { studentIds: [targetStudent.id] })).resolves.toEqual({ sent: 1, failed: 0 })
+  })
+})

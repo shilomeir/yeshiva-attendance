@@ -20,6 +20,7 @@ import {
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
 import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { Student, StudentStatus } from '@/types'
 
 const STATUS_OPTIONS: { value: StudentStatus; label: string }[] = [
@@ -57,8 +58,8 @@ export function StatusOverrideModal({ student, open, onClose, onSuccess }: Statu
 
       onSuccess()
       onClose()
-    } catch {
-      toast({ title: 'שגיאה בעדכון הסטטוס', variant: 'destructive' })
+    } catch (err) {
+      toast({ title: 'שגיאה בעדכון הסטטוס', description: getErrorMessage(err, 'עדכון סטטוס התלמיד נכשל'), variant: 'destructive' })
     } finally {
       setIsSubmitting(false)
     }
