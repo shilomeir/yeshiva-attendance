@@ -515,7 +515,11 @@ export function ClassSupervisorDashboard() {
   const classOnCampus = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
   const classOffCampus = students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
   const classTotal = students.length
-  const classPct = classTotal > 0 ? Math.round((classOnCampus / classTotal) * 100) : 0
+
+  // Yeshiva-wide available spots (across all classes)
+  const yeshivaQuota = classStats.reduce((sum, cs) => sum + calcQuota(cs.total), 0)
+  const yeshivaOut = classStats.reduce((sum, cs) => sum + cs.offCampus, 0)
+  const yeshivaSpots = Math.max(0, yeshivaQuota - yeshivaOut)
 
   // Check if any student has GPS data (audit mode)
   const hasLocationData = students.some(s => s.lastLocation !== null)
@@ -533,9 +537,9 @@ export function ClassSupervisorDashboard() {
     .sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
 
   const classColor =
-    classPct >= 80 ? { bar: 'bg-green-500', text: 'text-[var(--green)]', ring: 'ring-green-200 dark:ring-green-800' }
-    : classPct >= 60 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
-    : { bar: 'bg-red-500', text: 'text-[var(--red)]', ring: 'ring-red-200 dark:ring-red-800' }
+    yeshivaSpots === 0 ? { bar: 'bg-red-500', text: 'text-[var(--red)]', ring: 'ring-red-200 dark:ring-red-800' }
+    : yeshivaSpots <= 3 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
+    : { bar: 'bg-green-500', text: 'text-[var(--green)]', ring: 'ring-green-200 dark:ring-green-800' }
 
   const unmarkedCount = students.length - auditPresence.size
 
@@ -622,12 +626,18 @@ export function ClassSupervisorDashboard() {
                   <p className="text-xs text-[var(--text-muted)]">{gradeName}</p>
                 </div>
               </div>
-              <span className={`text-3xl font-extrabold ${classColor.text}`}>
-                {isLoading ? '—' : `${classPct}%`}
-              </span>
+              <div className="flex flex-col items-end">
+                <span className={`text-3xl font-extrabold ${classColor.text}`}>
+                  {isLoading ? '—' : yeshivaSpots}
+                </span>
+                <span className="text-[10px] text-[var(--text-muted)]">מקומות פנויים בישיבה</span>
+              </div>
             </div>
             <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
-              <div className={`h-full rounded-full transition-all duration-700 ${classColor.bar}`} style={{ width: `${isLoading ? 0 : classPct}%` }} />
+              <div
+                className={`h-full rounded-full transition-all duration-700 ${classColor.bar}`}
+                style={{ width: `${isLoading || yeshivaQuota === 0 ? 0 : Math.min(100, Math.round((yeshivaOut / yeshivaQuota) * 100))}%` }}
+              />
             </div>
             <div className="mt-3 flex gap-4 text-sm">
               <div className="flex items-center gap-1.5">
