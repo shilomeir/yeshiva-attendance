@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import * as XLSX from 'xlsx'
-import { Download, Plus } from 'lucide-react'
+import { Download } from 'lucide-react'
 import { FilterBar } from '@/components/admin/FilterBar'
 import { StudentTable } from '@/components/admin/StudentTable'
-import { AddStudentModal } from '@/components/admin/AddStudentModal'
 import { useStudentsStore, normalizeHebrew } from '@/store/studentsStore'
 import { Button } from '@/components/ui/button'
 import { GRADE_LEVELS } from '@/lib/constants/grades'
@@ -61,8 +60,6 @@ export function StudentsPage() {
     setGrade,
     setClass,
   } = useStudentsStore()
-  const [showAddModal, setShowAddModal] = useState(false)
-
   useEffect(() => {
     loadStudents()
   }, [])
@@ -93,14 +90,6 @@ export function StudentsPage() {
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={() => setShowAddModal(true)}
-              className="flex items-center gap-1.5 text-xs"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              הוסף תלמיד
-            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -233,12 +222,6 @@ export function StudentsPage() {
         )}
       </div>
 
-      {showAddModal && (
-        <AddStudentModal
-          onClose={() => setShowAddModal(false)}
-          onSaved={() => loadStudents()}
-        />
-      )}
     </div>
   )
 }
