@@ -444,6 +444,7 @@ export function ClassSupervisorDashboard() {
   const [, setTick] = useState(0)
   const [manualAuditActive, setManualAuditActive] = useState(false)
   const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
+  const [showAuditWarning, setShowAuditWarning] = useState(false)
 
   // Derive safely before hooks — avoids conditional-return-before-useEffect violation
   const classId = classSupervisor?.classId ?? ''
@@ -536,6 +537,17 @@ export function ClassSupervisorDashboard() {
     : classPct >= 60 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
     : { bar: 'bg-red-500', text: 'text-[var(--red)]', ring: 'ring-red-200 dark:ring-red-800' }
 
+  const unmarkedCount = students.length - auditPresence.size
+
+  const handleFinishAudit = () => {
+    if (unmarkedCount > 0) {
+      setShowAuditWarning(true)
+    } else {
+      setManualAuditActive(false)
+      setAuditPresence(new Map())
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[var(--bg)] flex flex-col" dir="rtl">
       {/* Header */}
@@ -584,10 +596,15 @@ export function ClassSupervisorDashboard() {
               })}
             </div>
             <button
-              onClick={() => setManualAuditActive(false)}
+              onClick={handleFinishAudit}
               className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600"
             >
               סיום ביקורת
+              {unmarkedCount > 0 && (
+                <span className="mr-2 rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
+                  {unmarkedCount} לא מסומנים
+                </span>
+              )}
             </button>
           </div>
         )}
@@ -816,6 +833,37 @@ export function ClassSupervisorDashboard() {
           </CardContent>
         </Card>
       )}
+
+      {/* Audit warning dialog */}
+      <Dialog open={showAuditWarning} onOpenChange={setShowAuditWarning}>
+        <DialogContent dir="rtl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertOctagon className="h-5 w-5 text-amber-500" />
+              יש תלמידים לא מסומנים
+            </DialogTitle>
+            <DialogDescription>
+              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו כנוכחים או נעדרים.
+              לסיים את הביקורת בכל זאת?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex gap-2 pt-2">
+            <Button variant="outline" onClick={() => setShowAuditWarning(false)} className="flex-1">
+              חזור לסימון
+            </Button>
+            <Button
+              className="flex-1 bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={() => {
+                setShowAuditWarning(false)
+                setManualAuditActive(false)
+                setAuditPresence(new Map())
+              }}
+            >
+              סיים בכל זאת
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Edit sheet */}
       <EditStudentSheet
