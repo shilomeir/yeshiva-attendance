@@ -235,7 +235,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
               className={`flex items-center justify-center gap-2 rounded-xl py-4 text-base font-semibold transition-colors ${
                 isOutside
                   ? 'border border-[var(--border)] bg-[var(--surface)] text-sm font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)] py-3'
-                  : 'border-2 border-orange-300 bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800'
+                  : 'border-2 border-orange-300 bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800 dark:text-orange-400 dark:hover:bg-orange-950/30'
               }`}
             >
               <LogOut className={isOutside ? 'h-4 w-4' : 'h-5 w-5'} />
@@ -243,7 +243,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
             </button>
             <button
               onClick={() => setMode('request')}
-              className="flex items-center justify-center gap-2 rounded-xl border-2 border-indigo-300 bg-indigo-50 py-4 text-base font-semibold text-indigo-600 hover:bg-indigo-100 transition-colors dark:bg-indigo-950/20 dark:border-indigo-800"
+              className="flex items-center justify-center gap-2 rounded-xl border-2 border-indigo-300 bg-indigo-50 py-4 text-base font-semibold text-indigo-600 hover:bg-indigo-100 transition-colors dark:bg-indigo-950/20 dark:border-indigo-800 dark:text-indigo-400 dark:hover:bg-indigo-950/30"
             >
               <FileText className="h-5 w-5" />
               רישום היעדרות מאושרת
@@ -572,11 +572,11 @@ export function ClassSupervisorDashboard() {
                     <div className="flex gap-2">
                       <button
                         onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, true))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === true ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50'}`}
+                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === true ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
                       >נוכח</button>
                       <button
                         onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, false))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === false ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50'}`}
+                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === false ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
                       >נעדר</button>
                     </div>
                   </div>
@@ -806,7 +806,7 @@ export function ClassSupervisorDashboard() {
                   <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
                     <span className="font-medium text-sm text-[var(--text)] flex-1">{dep.student_name}</span>
                     <span className="text-xs text-[var(--text-muted)] shrink-0">{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
-                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
+                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500 dark:text-orange-400' : isPending ? 'text-blue-500 dark:text-blue-400' : 'text-[var(--text-muted)]'}`}>
                       {isActive ? `נותרו ${minsEnd} דק'` : isPending ? `בעוד ${minsStart} דק'` : 'הסתיים'}
                     </span>
                   </div>

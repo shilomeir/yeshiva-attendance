@@ -376,11 +376,11 @@ export function AbsenceCalendar() {
 
       {/* Legend */}
       <div className="flex flex-wrap gap-3 text-xs text-[var(--text-muted)]">
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-green-200" />פחות מ-5%</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-yellow-200" />5-15%</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-red-200" />מעל 15%</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-slate-200" />שבת / פרשה</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-sky-100 ring-1 ring-sky-200" />חגים וראש חודש</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-green-200 dark:bg-green-800" />פחות מ-5%</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-yellow-200 dark:bg-yellow-800" />5-15%</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-red-200 dark:bg-red-800" />מעל 15%</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-slate-200 dark:bg-slate-600" />שבת / פרשה</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-sky-100 dark:bg-sky-900 ring-1 ring-sky-200 dark:ring-sky-700" />חגים וראש חודש</span>
         <a
           className="underline-offset-2 hover:underline"
           href={HEBCAL_ATTRIBUTION_URL}

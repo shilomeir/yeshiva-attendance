@@ -162,7 +162,7 @@ export function StudentsPage() {
               className={cn(
                 'shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-all',
                 !selectedClass
-                  ? 'bg-slate-700 text-white shadow-sm dark:bg-slate-300 dark:text-slate-900'
+                  ? 'bg-slate-700 text-white shadow-sm dark:bg-slate-600 dark:text-white'
                   : 'bg-[var(--bg-2)] text-[var(--text-muted)] hover:bg-[var(--border)]'
               )}
             >
@@ -184,7 +184,7 @@ export function StudentsPage() {
                   className={cn(
                     'shrink-0 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all',
                     isActive
-                      ? 'bg-slate-700 text-white shadow-sm dark:bg-slate-300 dark:text-slate-900'
+                      ? 'bg-slate-700 text-white shadow-sm dark:bg-slate-600 dark:text-white'
                       : 'bg-[var(--bg-2)] text-[var(--text-muted)] hover:bg-[var(--border)]'
                   )}
                 >

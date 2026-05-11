@@ -468,7 +468,7 @@ export function DashboardPage() {
                       <span className="text-xs text-[var(--text-muted)]">{dep.class_id}</span>
                     </div>
                     <span className="text-xs text-[var(--text-muted)] shrink-0">{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
-                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500' : isPending ? 'text-blue-500' : 'text-[var(--text-muted)]'}`}>
+                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500 dark:text-orange-400' : isPending ? 'text-blue-500 dark:text-blue-400' : 'text-[var(--text-muted)]'}`}>
                       {isActive ? `נותרו ${minsEnd} דק'` : isPending ? `בעוד ${minsStart} דק'` : 'הסתיים'}
                     </span>
                   </div>
