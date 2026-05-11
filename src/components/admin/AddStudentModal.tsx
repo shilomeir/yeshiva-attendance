@@ -15,7 +15,7 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
   const [fullName, setFullName] = useState('')
   const [idNumber, setIdNumber] = useState('')
   const [phone, setPhone] = useState('')
-  const [selectedGrade, setSelectedGrade] = useState(GRADE_LEVELS[0].name)
+  const [selectedGrade, setSelectedGrade] = useState<string>(GRADE_LEVELS[0].name)
   const [selectedClass, setSelectedClass] = useState(getClasses(GRADE_LEVELS[0].name)[0] ?? '')
   const [saving, setSaving] = useState(false)
 
