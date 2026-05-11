@@ -65,6 +65,7 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleChangePin} className="flex flex-col gap-4">
+            <input type="text" autoComplete="username" className="hidden" readOnly value="admin" />
             <div className="flex flex-col gap-2">
               <Label htmlFor="oldPin">סיסמה נוכחית</Label>
               <div className="relative">

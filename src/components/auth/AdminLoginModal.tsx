@@ -88,6 +88,7 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
                 setError('')
               }}
               className="text-center text-2xl tracking-widest"
+              autoComplete="current-password"
               autoFocus
             />
             {error && (
