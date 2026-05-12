@@ -233,7 +233,6 @@ export class SupabaseApiClient implements IApiClient {
       p_force_pending: payload.forcePending ?? false,
       p_actor_id:      payload.actorId ?? null,
       p_actor_role:    payload.actorRole ?? 'STUDENT',
-      p_actor_pin:     payload.actorPin ?? null,
     })
     if (error) throw error
     const result = data as SubmitDepartureResult
