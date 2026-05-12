@@ -23,6 +23,8 @@ interface AuthState {
   error: string | null
   /** Admin PIN held in-memory (session only, never persisted) for ADMIN_OVERRIDE PIN verification */
   _adminPinSession: string | null
+  /** Timestamp of last admin activity for inactivity timeout */
+  _adminSessionStart: number | null
   login: (idNumber: string) => Promise<boolean>
   loginAdmin: (pin: string) => Promise<boolean>
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
@@ -31,7 +33,13 @@ interface AuthState {
   logout: () => void
   clearError: () => void
   getAdminPin: () => string | null
+  /** Check if admin session has expired due to inactivity (15 minutes) and auto-logout if so */
+  checkAdminSessionExpiry: () => void
+  /** Update admin session activity timestamp */
+  updateAdminSessionActivity: () => void
 }
+
+const ADMIN_SESSION_TIMEOUT_MS = 15 * 60 * 1000 // 15 minutes
 
 export const useAuthStore = create<AuthState>()(
   persist(
@@ -43,6 +51,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       _adminPinSession: null,
+      _adminSessionStart: null,
 
       login: async (idNumber: string) => {
         set({ isLoading: true, error: null })
@@ -74,7 +83,13 @@ export const useAuthStore = create<AuthState>()(
         })
         if (error) return false
         // Store PIN in-memory only (not persisted) for ADMIN_OVERRIDE server-side verification
-        set({ isAdmin: true, classSupervisor: null, currentUser: null, _adminPinSession: pin })
+        set({
+          isAdmin: true,
+          classSupervisor: null,
+          currentUser: null,
+          _adminPinSession: pin,
+          _adminSessionStart: Date.now(),
+        })
         return true
       },
 
@@ -119,10 +134,32 @@ export const useAuthStore = create<AuthState>()(
           supabase.auth.signOut().catch(() => {})
         }
         localStorage.removeItem('yeshiva_remembered_id')
-        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null })
+        set({
+          currentUser: null,
+          isAdmin: false,
+          classSupervisor: null,
+          error: null,
+          _adminPinSession: null,
+          _adminSessionStart: null,
+        })
       },
 
       clearError: () => set({ error: null }),
+
+      checkAdminSessionExpiry: () => {
+        const { isAdmin, _adminSessionStart } = get()
+        if (!isAdmin || !_adminSessionStart) return
+        if (Date.now() - _adminSessionStart > ADMIN_SESSION_TIMEOUT_MS) {
+          get().logout()
+        }
+      },
+
+      updateAdminSessionActivity: () => {
+        const { isAdmin } = get()
+        if (isAdmin) {
+          set({ _adminSessionStart: Date.now() })
+        }
+      },
 
       getAdminPin: () => get()._adminPinSession,
     }),
