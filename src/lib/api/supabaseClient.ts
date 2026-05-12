@@ -294,7 +294,7 @@ export class SupabaseApiClient implements IApiClient {
     try {
       const { data: dep } = await supabase
         .from('departures')
-        .select('student_id')
+        .select('student_id, start_at, end_at')
         .eq('id', departureId)
         .single()
       if (!dep) return
@@ -304,11 +304,19 @@ export class SupabaseApiClient implements IApiClient {
         .eq('id', dep.student_id)
         .single()
       if (student?.push_token) {
+        // Format time details for notification
+        const startDate = new Date(dep.start_at)
+        const endDate = new Date(dep.end_at)
+        const startDateStr = startDate.toLocaleDateString('he-IL', { day: 'numeric', month: 'short' })
+        const startTimeStr = startDate.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false })
+        const endTimeStr = endDate.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false })
+        const timeDetails = `${startDateStr} ${startTimeStr}–${endTimeStr}`
+
         await supabase.functions.invoke('send-push', {
           body: {
             subscription: student.push_token,
             title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
-            body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
+            body: adminNote || `הבקשה שלך אושרה: ${timeDetails}`,
           },
         })
       }
