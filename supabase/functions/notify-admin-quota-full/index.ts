@@ -50,12 +50,16 @@ function jsonOk(data: unknown): Response {
   })
 }
 
-async function sendPush(subscription: string, title: string, body: string): Promise<boolean> {
+async function sendPush(
+  subscription: string,
+  title: string,
+  body: string,
+): Promise<{ sent: boolean; gone: boolean }> {
   const res = await supabase.functions.invoke('send-push', {
     body: { subscription, title, body },
   })
-  const data = res.data as { sent?: boolean } | null
-  return data?.sent === true
+  const data = res.data as { sent?: boolean; gone?: boolean } | null
+  return { sent: data?.sent === true, gone: data?.gone === true }
 }
 
 Deno.serve(async (req) => {
@@ -126,14 +130,16 @@ Deno.serve(async (req) => {
     await Promise.all(
       (tokenRows ?? []).map(async (row) => {
         try {
-          const ok = await sendPush(row.value, title, notifyBody)
+          const { sent: ok, gone } = await sendPush(row.value, title, notifyBody)
           if (ok) {
             sent++
-          } else {
+          } else if (gone) {
+            // Only remove token when the push service explicitly says it's gone (410/404)
             staleKeys.push(row.key)
           }
+          // Transient failures (network errors, 5xx) are left in place for retry next time
         } catch {
-          staleKeys.push(row.key)
+          // Network-level exception — do not remove the token
         }
       }),
     )

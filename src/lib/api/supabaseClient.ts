@@ -303,14 +303,17 @@ export class SupabaseApiClient implements IApiClient {
         .select('push_token')
         .eq('id', dep.student_id)
         .single()
-      if (student?.push_token) {
-        await supabase.functions.invoke('send-push', {
-          body: {
-            subscription: student.push_token,
-            title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
-            body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
-          },
-        })
+      if (!student?.push_token) return
+      const pushRes = await supabase.functions.invoke('send-push', {
+        body: {
+          subscription: student.push_token,
+          title: 'בוקר טוב! היציאה שלך אושרה, לך בשלום 🎉',
+          body: adminNote || 'הבקשה שלך אושרה על ידי הנהלת הישיבה',
+        },
+      })
+      const pushData = pushRes?.data as { sent?: boolean; gone?: boolean } | null
+      if (pushData?.gone) {
+        await supabase.from('students').update({ push_token: null }).eq('id', dep.student_id)
       }
     } catch {
       // Non-fatal
@@ -354,14 +357,17 @@ export class SupabaseApiClient implements IApiClient {
         .eq('id', dep.student_id)
         .single()
 
-      if (student?.push_token) {
-        await supabase.functions.invoke('send-push', {
-          body: {
-            subscription: student.push_token,
-            title: 'בקשת היציאה החריגה נדחתה',
-            body: adminNote || 'הבקשה שלך נדחתה על ידי הנהלת הישיבה',
-          },
-        })
+      if (!student?.push_token) return
+      const pushRes = await supabase.functions.invoke('send-push', {
+        body: {
+          subscription: student.push_token,
+          title: 'בקשת היציאה החריגה נדחתה',
+          body: adminNote || 'הבקשה שלך נדחתה על ידי הנהלת הישיבה',
+        },
+      })
+      const pushData = pushRes?.data as { sent?: boolean; gone?: boolean } | null
+      if (pushData?.gone) {
+        await supabase.from('students').update({ push_token: null }).eq('id', dep.student_id)
       }
     } catch {
       // Non-fatal
