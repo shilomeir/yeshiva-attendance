@@ -32,6 +32,7 @@ const FILTER_OPTIONS: { value: 'all' | DepartureStatus; label: string }[] = [
   { value: 'ACTIVE', label: 'פעיל' },
   { value: 'COMPLETED', label: 'הסתיים' },
   { value: 'REJECTED', label: 'נדחה' },
+  { value: 'CANCELLED', label: 'בוטל' },
 ]
 
 function todayStr(): string {
@@ -112,9 +113,27 @@ export function AbsenceRequestPage() {
     if (!currentUser || !startDate || isEndBeforeStart) return
     setIsSubmitting(true)
     try {
+      // Validate start date is not in the past
+      const startDateObj = new Date(startDate)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      if (startDateObj < today) {
+        toast({ title: 'תאריך בעבר', description: 'לא ניתן להגיש בקשה לתאריך שעבר', variant: 'destructive' })
+        setIsSubmitting(false)
+        return
+      }
+
       const effectiveEndDate = endDate && endDate !== startDate ? endDate : startDate
       const startAt = new Date(`${startDate}T${startTime}:00`).toISOString()
       const endAt = new Date(`${effectiveEndDate}T${endTime}:00`).toISOString()
+
+      // Validate departure duration does not exceed 30 days
+      const daysOfAbsence = Math.ceil((new Date(effectiveEndDate).getTime() - startDateObj.getTime()) / (1000 * 60 * 60 * 24))
+      if (daysOfAbsence > 30) {
+        toast({ title: 'משך ארוך מדי', description: 'בקשת יציאה לא יכולה להיות ליותר מ-30 ימים', variant: 'destructive' })
+        setIsSubmitting(false)
+        return
+      }
 
       const result = await api.submitDeparture({
         studentId: currentUser.id,

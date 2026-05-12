@@ -6,6 +6,7 @@ import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
 import { supabase } from '@/lib/supabase'
+import { toast } from '@/hooks/use-toast'
 
 // Layouts (small, always needed for the guard shell)
 const StudentLayout = lazy(() => import('@/components/student/StudentLayout').then(m => ({ default: m.StudentLayout })))
@@ -60,13 +61,40 @@ function PageFallback() {
 export default function App() {
   const { initialize } = useSyncStore()
   const { subscribeToRealtime } = useStudentsStore()
-  const { currentUser } = useAuthStore()
+  const { currentUser, isAdmin, checkAdminSessionExpiry, updateAdminSessionActivity } = useAuthStore()
   const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
     const cleanup = initialize()
     return cleanup
   }, [initialize])
+
+  // Check admin session expiry every 60 seconds and on activity
+  useEffect(() => {
+    if (!isAdmin) return
+    const interval = setInterval(() => {
+      checkAdminSessionExpiry()
+    }, 60000) // Check every 60 seconds
+    return () => clearInterval(interval)
+  }, [isAdmin, checkAdminSessionExpiry])
+
+  // Update admin session activity on user interaction
+  useEffect(() => {
+    if (!isAdmin) return
+    const handleActivity = () => {
+      updateAdminSessionActivity()
+    }
+    document.addEventListener('mousemove', handleActivity)
+    document.addEventListener('keydown', handleActivity)
+    document.addEventListener('click', handleActivity)
+    document.addEventListener('touchstart', handleActivity)
+    return () => {
+      document.removeEventListener('mousemove', handleActivity)
+      document.removeEventListener('keydown', handleActivity)
+      document.removeEventListener('click', handleActivity)
+      document.removeEventListener('touchstart', handleActivity)
+    }
+  }, [isAdmin, updateAdminSessionActivity])
 
   useEffect(() => {
     const cleanup = subscribeToRealtime()
