@@ -39,16 +39,18 @@ export function StudentLayout() {
 
   const handleRememberYes = async () => {
     if (!currentUser) return
-    const subscription = await subscribeToPush()
-    if (subscription) {
-      await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
+    try {
+      const subscription = await subscribeToPush()
+      if (subscription) {
+        await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
+      }
+    } catch {
+      // Push setup failed — still save the remembered ID below
     }
-    const lastId = sessionStorage.getItem('last_login_id')
-    if (lastId) {
-      localStorage.setItem(SAVED_ID_KEY, lastId)
-      localStorage.setItem('yeshiva_remembered_id', lastId)
-      sessionStorage.removeItem('last_login_id')
-    }
+    const idToSave = sessionStorage.getItem('last_login_id') ?? currentUser.idNumber
+    localStorage.setItem(SAVED_ID_KEY, idToSave)
+    localStorage.setItem('yeshiva_remembered_id', idToSave)
+    sessionStorage.removeItem('last_login_id')
     setBannerVisible(false)
   }
 
