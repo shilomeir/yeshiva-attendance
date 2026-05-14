@@ -1,12 +1,14 @@
 -- The DB had two overloaded versions of submit_departure (10-param and 11-param
 -- with p_actor_pin). PostgREST cannot resolve overloaded functions and throws
 -- "not found in schema cache" on every request. Fix: drop both overloads,
--- recreate only the canonical 10-param version, reload the schema cache.
+-- recreate a single 11-param version that accepts p_actor_pin (DEFAULT NULL,
+-- ignored) so both old PWA cached bundles (11-param) and new frontend code
+-- (10-param) work without schema cache ambiguity. Reload the schema cache.
 
 DROP FUNCTION IF EXISTS public.submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT);
 DROP FUNCTION IF EXISTS public.submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT,TEXT);
 
-CREATE OR REPLACE FUNCTION submit_departure(
+CREATE FUNCTION submit_departure(
   p_student_id    TEXT,
   p_start_at      TIMESTAMPTZ,
   p_end_at        TIMESTAMPTZ,
@@ -16,7 +18,8 @@ CREATE OR REPLACE FUNCTION submit_departure(
   p_approved_by   TEXT        DEFAULT NULL,
   p_force_pending BOOLEAN     DEFAULT FALSE,
   p_actor_id      TEXT        DEFAULT NULL,
-  p_actor_role    TEXT        DEFAULT 'STUDENT'
+  p_actor_role    TEXT        DEFAULT 'STUDENT',
+  p_actor_pin     TEXT        DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -103,7 +106,8 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT,TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT,TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION submit_departure(TEXT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,BOOLEAN,TEXT,TEXT,BOOLEAN,TEXT,TEXT,TEXT) TO service_role;
 
 NOTIFY pgrst, 'reload schema';
