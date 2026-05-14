@@ -21,7 +21,6 @@ const DashboardPage      = lazy(() => import('@/pages/admin/DashboardPage').then
 const StudentsPage       = lazy(() => import('@/pages/admin/StudentsPage').then(m => ({ default: m.StudentsPage })))
 const CalendarPage       = lazy(() => import('@/pages/admin/CalendarPage').then(m => ({ default: m.CalendarPage })))
 const AuditLogPage       = lazy(() => import('@/pages/admin/AuditLogPage').then(m => ({ default: m.AuditLogPage })))
-const SettingsPage       = lazy(() => import('@/pages/admin/SettingsPage').then(m => ({ default: m.SettingsPage })))
 const RollCallPage       = lazy(() => import('@/pages/admin/RollCallPage').then(m => ({ default: m.RollCallPage })))
 const PendingRequestsPage = lazy(() => import('@/pages/admin/PendingRequestsPage').then(m => ({ default: m.PendingRequestsPage })))
 const ExceptionsPage     = lazy(() => import('@/pages/admin/ExceptionsPage').then(m => ({ default: m.ExceptionsPage })))
@@ -136,7 +135,6 @@ export default function App() {
             <Route path="students" element={<StudentsPage />} />
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="audit" element={<AuditLogPage />} />
-            <Route path="settings" element={<SettingsPage />} />
             <Route path="rollcall" element={<RollCallPage />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
