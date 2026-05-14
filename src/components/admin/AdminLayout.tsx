@@ -4,7 +4,6 @@ import {
   Users,
   Calendar,
   FileText,
-  Settings,
   LogOut,
   Menu,
   X,
@@ -26,7 +25,6 @@ const NAV_ITEMS = [
   { to: '/admin/exceptions', icon: AlertOctagon, label: 'חריגות עכשיו' },
   { to: '/admin/requests', icon: ClipboardList, label: 'בקשות ממתינות' },
   { to: '/admin/audit', icon: FileText, label: 'לוג ביקורת' },
-  { to: '/admin/settings', icon: Settings, label: 'הגדרות' },
 ]
 
 export function AdminLayout() {
