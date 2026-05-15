@@ -28,3 +28,6 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Claude Code per-user overrides
+.claude/settings.local.json
