@@ -1,10312 +1,2267 @@
-# INTERNAL AUDIT 2.0 — Master Plan
-## ביקורת פנימית — תוכנית עבודה מלאה, מקצה לקצה
-### ישיבת שבי חברון | מערכת נוכחות PWA
+# Internal Audit 2.0 — Master Plan
 
-> **מסמך זה הוא תוכנית בלבד.** אין כאן שינוי קוד. כל הקוד הקיים של RollCall/ביקורת פנימית נזרק; אנחנו בונים מחדש מאפס על בסיס הכללים בלבד (בישיבה / בחוץ עם אישור / בחוץ בלי אישור / מצב לא ידוע).
+**Project:** Yeshivat Shavi Hevron — Internal Audit Subsystem (replaces existing RollCall)
+**Document type:** Strategic master plan + architectural blueprint
+**Status:** Draft v1 — pending review
+**Authoring posture:** Written as if by a multi-disciplinary team of senior product strategist, software architect, UX designer, backend engineer, frontend engineer, database architect, security reviewer, QA lead, and technical writer.
+**Date:** 2026-05-16
+
+---
+
+## How to read this document
+
+This document is **a plan, not an implementation**. It does not contain code beyond what is required to make a structural decision unambiguous. Implementation-ready code for the recommended approach exists separately in `INTERNAL_AUDIT_IMPLEMENTATION_REFERENCE.md`; **that file is a reference, not the source of truth.** This file is the source of truth for product, design, and architecture.
+
+The document is opinionated. It challenges parts of the original request where the original request would have produced an inferior product. It states recommended defaults clearly and reserves only genuinely unresolved decisions for the Open Questions section.
+
+The document is structured to be readable in three passes:
+
+- **Pass 1 — Executive Summary + Final Recommendation.** ~15 minutes. Enough to sign off scope and budget.
+- **Pass 2 — Goals, Decisions, Use Cases, Architecture, Risks.** ~60 minutes. Enough to commit to the approach.
+- **Pass 3 — Full document.** ~3 hours. Required before implementation begins.
+
+Section numbering is stable across revisions. Cross-references use section numbers (e.g. *see §11.3*).
+
+---
+
+# Part 0 — Working Glossary
+
+Terms used throughout this document carry **precise meanings** as defined here. Where Hebrew is preferred for user-facing language, both forms are listed.
+
+| Term | Meaning |
+|---|---|
+| **Audit** / *ביקורת* | A bounded, time-limited operation in which the yeshiva determines, for each student in a defined population, their physical presence category at approximately one moment in time. An audit has a start, an end, and a result. |
+| **Audit Session** | The single concrete instance of an audit: one row in the database, one entry in the history. |
+| **Session mode** | The collection strategy for the audit. Two are defined: `MANUAL` (supervisor-driven) and `LOCATION` (device-driven GPS). The mode is fixed at the start and cannot change mid-session. |
+| **Category** | The classification of an individual student's state within an audit. Five values exist; only three are user-pickable. See §11.2. |
+| **Marker** | Any actor — human or system — that has set a category value on a response. Markers include `ADMIN`, `SUPERVISOR:<class>`, `AUTO_GPS`, `AUTO_DEPARTURE`, `AUTO_CLOSE`. |
+| **Response** | The record of one student's outcome in one session. Created on session open, mutated as data arrives, finalized on session close. |
+| **Distance bucket** | A semantic grouping of GPS distance from campus. Four values: `GREEN` (on campus, ≤300 m), `BLUE` (in immediate area, 300 m – 1 km), `ORANGE` (Hebron metro, 1–5 km), `RED` (out of area, >5 km). |
+| **Alert** | A persisted warning generated when a response transitions into `ORANGE` or `RED`. Alerts are explicit, persistent objects; they are not transient UI toasts. |
+| **Live dashboard** | The screen shown to the admin while a session is `ACTIVE`. It is the product's centerpiece. |
+| **Active session** | A session whose status is `ACTIVE`. By default, at most one such session exists at any time (see §5.4 for the rationale and the future relaxation path). |
+| **Mashgiach** / *משגיח* | Yeshiva administrator with oversight authority. In this system, mapped to the `admin` role. |
+| **Madrich** / *מדריך* / Supervisor / *רכז* | Class-level authority. In this system, mapped to the `supervisor` role. |
+| **Talmid** / *תלמיד* | Student. |
+| **Source of truth** | The single authoritative location of a piece of state. For audit data, the source of truth is **always the database**, never the client. |
+| **Replay-safe** | A property of a screen: the screen renders the correct, complete, current state purely from a server query, with no dependence on what previously happened in this browser tab. All audit screens must be replay-safe. |
+| **Halachic privacy** | Privacy considerations specific to a religious-school context, including modesty, parental authority over minors' data, and rabbinic oversight of sensitive information. |
+
+---
+
+# Part 1 — Executive Summary
+
+## 1.1 The proposition in one paragraph
+
+Build a **single, persistent, real-time attendance auditing subsystem** that replaces the current ad-hoc *RollCall* mechanism. The product gives a yeshiva administrator the ability, with one decision, to know within minutes where every student is. It has two modes — **fast manual** (supervisor-driven, ~3 minutes) and **location** (device GPS, ~5 minutes) — and a single live dashboard that aggregates the result in real time. The system persists every datum to a server-side database from the moment of capture; any participant who refreshes the page sees identical state. History is retained indefinitely and is queryable. The replacement is mandatory because the existing flow is non-persistent, single-user, lossy, and inaudible at scale.
+
+## 1.2 What success looks like
+
+Within thirty days of production rollout:
+
+- The administrator can complete an audit of all 381 students in **under five minutes** in manual mode, **under seven minutes** in location mode, **measured end-to-end**.
+- ≥ **90%** of student responses in location mode arrive without supervisor intervention.
+- Zero data loss on refresh: in QA, refreshing the admin, supervisor, or student page mid-session preserves and re-renders 100% of state.
+- A second administrator opening the dashboard concurrently sees the **same** data within **one second** of the first.
+- All audit sessions, alerts, and category transitions are retrievable from history six months later, with full attribution.
+
+## 1.3 What this plan costs
+
+- Engineering: estimated **160–200 hours** of focused senior-engineer time over a calendar window of **4–6 weeks**, including QA and rollout, assuming no parallel feature work.
+- Infrastructure: marginal. Stays within the existing Supabase Free tier through the first 12 months at projected volume (see §17.4).
+- Operational: a one-time **30-minute training session** with the administrator, **15 minutes** per supervisor, plus an in-app onboarding card for students.
+
+## 1.4 What this plan changes about the original idea
+
+The original request asked for "a live data dashboard" and "real-time location collection". The recommended plan delivers that, but **rejects three implicit assumptions** in the request:
+
+1. **Rejection 1 — the request implies the dashboard is the product.** It is not. The product is *the audit*. The dashboard is the administrator's view onto the audit. This distinction matters because it forces every design decision to serve the audit lifecycle, not the spectacle of live data.
+2. **Rejection 2 — the request implies that "real-time location collection" is unconditional.** It is not. Location collection in a religious-school setting touches halachic privacy, parental authority over minor children, and the asymmetry of power between students and administration. The recommended plan treats location collection as **explicitly consented, time-bounded, narrow-purpose, and minimally retained.** See §16.
+3. **Rejection 3 — the request implies "more data, more colors, more screens" equals quality.** It does not. The recommended plan deliberately removes a "sick" category (originally proposed), removes supervisor-initiated audits (originally proposed), and keeps the live dashboard to **four primary views**: KPI strip, class grid, geographic map (location mode only), and activity feed. Restraint is the design strategy.
+
+## 1.5 The recommended approach in one diagram
+
+```
+                      ADMIN                                 SUPERVISOR                STUDENT
+                        │                                       │                       │
+                        │  start_audit(mode, classes)           │                       │
+                        ▼                                       │                       │
+            ┌──────────────────────────┐  push                  │                       │
+            │   audit_session ACTIVE   │ ───────────────────────►                       │
+            │   (single row, DB)       │                        │  push (LOC mode)      │
+            └────────┬─────────────────┘ ───────────────────────────────────────────────►
+                     │                                          │                       │
+                     │  pre-create 1 response per student       │                       │
+                     ▼                                          │                       │
+            ┌──────────────────────────┐                        │                       │
+            │   audit_responses ×N     │ ◄──────────── mark ────┤   (MANUAL mode)       │
+            │   (one per student)      │ ◄──────────────── submit GPS ──────────────────┤   (LOCATION)
+            └────────┬─────────────────┘                        │                       │
+                     │  realtime postgres_changes               │                       │
+                     │     ───┐    ───┐    ───┐                 │                       │
+                     │        ▼       ▼       ▼                 │                       │
+                     │   ┌──────────────────────────┐           │                       │
+                     │   │  LIVE DASHBOARD (admin)  │           │                       │
+                     │   │  KPI · Grid · Map · Feed │           │                       │
+                     │   └──────────────────────────┘           │                       │
+                     │                                          │                       │
+                     │  close_audit(notes)                      │                       │
+                     ▼                                          │                       │
+            ┌──────────────────────────┐                        │                       │
+            │   audit_session CLOSED   │                        │                       │
+            │   + immutable history    │                        │                       │
+            └──────────────────────────┘
+```
+
+Every layer of the rest of this document defends, refines, or stress-tests one part of that diagram.
+
+---
+
+# Part 2 — Current State Assessment
+
+A plan that does not honestly inventory what exists is a plan that creates accidental regressions on launch. This section is an unsentimental description of the **status quo as of 2026-05-16**, derived from CLAUDE.md, the existing source tree, and the migration history.
+
+## 2.1 What exists today, in plain language
+
+The yeshiva has a working attendance system. Students are managed through Google Sheets, sync'd one-way into Supabase, and authenticated by ID number. Three roles exist: `student`, `supervisor` (class-level), and `admin` (yeshiva-level). A departure subsystem — separate from audits — handles "I'm going home for an hour" workflows with quotas, approvals, and a cron-driven state machine. That subsystem is solid; this plan does not change it.
+
+The audit-adjacent functionality today is a feature called **RollCall** (*ביקורת פנימית* in the UI). RollCall does roughly this:
+
+1. The administrator clicks "broadcast GPS request" from an admin page.
+2. A Supabase Realtime broadcast is fanned out to all currently-connected student devices.
+3. Each connected device opens a GPS prompt.
+4. Each device that received the broadcast, granted permission, and got a fix POSTs its location to a single column on the `students` table (`lastLocation`).
+5. The admin page subscribes to the same broadcast channel and renders incoming coordinates as they arrive.
+
+That is the entire feature. It is short. It is fragile. The failure modes are systemic, not edge cases.
+
+## 2.2 Concrete failures of the current design
+
+The following are not hypothetical. They are direct consequences of the current architecture.
+
+1. **No persistence.** The broadcast is ephemeral. A student whose device was offline at the moment of broadcast receives nothing — not "later", not ever. An admin who closed the tab between broadcast and rendering loses the run. Refreshing the admin page mid-run wipes the screen. There is no audit history. The product has no memory.
+
+2. **Single live admin.** Only the admin who *initiated* the broadcast sees the responses. A second admin loading the same page sees an empty screen. This is by design of the broadcast pattern — broadcasts go to channels, channels are scoped to the subscriber, and there is no shared state.
+
+3. **No supervisor visibility.** Supervisors cannot see the result of an audit at all. They are passive subjects of it, not participants. The administrative model — *the supervisor is the eyes of the rosh yeshiva in the class* — is structurally unsupported.
+
+4. **No manual mode.** Today's flow assumes the device responds. There is no path for "student is in the building, has no phone, supervisor confirms presence". The flow has one path and it requires a working device with cooperation.
+
+5. **One column, one location, one moment.** `students.lastLocation` is a single JSONB column. The "last" location overwrites the previous one. There is no association between a location reading and the audit run that produced it. Forensic reconstruction ("where were the seventy-five students at 10:30 last Tuesday?") is impossible because the data is not modeled to be queryable by time and event.
+
+6. **No defined categories.** The system records a coordinate and a distance, but never assigns a *meaning* to it ("present", "out with permit", "out without permit"). The administrator interprets coordinates in their head, in real time, alone, under time pressure.
+
+7. **No alert mechanism.** If a student is far from campus, no record is created of that fact. The admin sees a red dot if they happen to look at the right moment; otherwise the signal vanishes. Nothing escalates.
+
+8. **No record of consent.** GPS data is collected on broadcast, with no audit of when, why, by whom, or with what scope of consent. This is acceptable while volumes are low and use is rare; it is unacceptable once the feature is used regularly and routinely.
+
+9. **No timeout, no cleanup.** A "RollCall in progress" state does not formally exist. If the admin walks away mid-run, nothing closes the operation. There is no concept of "the audit ended at 09:48; here is the result".
+
+10. **No path to scale.** Adding a class supervisor view, a comparison-over-time view, an export to PDF, a metric like "weekly attendance trend", or a parent-facing summary all require fundamentally restructuring the data first. The current data shape supports none of these.
+
+## 2.3 What the current code does well, and must be preserved
+
+It is important not to discard what is working. The following capabilities and patterns from the existing codebase must survive the rebuild:
+
+- **Iron Rule of Departures.** All departure inserts go through `submit_departure`. The new audit subsystem must integrate with this — specifically, a student with an `ACTIVE` departure at the moment an audit opens should be pre-classified as `OUT_PERMIT` automatically. The audit subsystem does not modify departures; it consumes them.
+- **Single-RPC discipline.** The existing pattern of "one mutation, one RPC, one transaction" works well and should be applied to audits.
+- **Supabase Realtime via `postgres_changes`.** This works and remains the right primitive — but at the *table* level, not the *broadcast* level. The shift from broadcast to table is one of the central architectural moves of this plan.
+- **`normalizeHebrew()` for string comparison.** Class and grade identifiers come from Hebrew sheet names and have apostrophe variants. The audit subsystem must use the same normalization helper.
+- **Hebrew-only RTL UI conventions.** No i18n machinery, direct Hebrew strings, RTL via `dir="rtl"`, color tokens via CSS variables. The audit UI should match — no English fallbacks, no translation layer.
+- **Dexie offline queue.** The pattern of "queue mutation in IndexedDB when offline, flush on reconnect" is solid and should be extended to audit response submissions (especially for supervisor manual marking on a flaky in-class wifi).
+
+## 2.4 Net assessment
+
+The current state is a working prototype of the *idea* of an audit. It is not a product. It is a single-user, in-the-moment, non-persistent screen. To convert it to a product requires reshaping the data model first, the persistence model second, and the UI third. The order is non-negotiable: changing the UI on top of the current data model would yield a prettier prototype, not a product.
+
+---
+
+# Part 3 — Problem Statement
+
+## 3.1 The question the product must answer
+
+Stated bluntly: **at any moment, who is in the yeshiva, who is out with permission, and who is unaccounted for — and how confident are we in that answer?**
+
+Every other framing of the problem — "live dashboard", "GPS tracking", "supervisor app" — is a means to that question. If the system answers the question well, all the other framings are satisfied. If it answers the question poorly, no amount of visual polish on a dashboard rescues the product.
+
+## 3.2 The problem expressed per stakeholder
+
+A good problem statement is multi-perspective. Different stakeholders have different versions of the same underlying problem.
+
+**For the rosh yeshiva (admin),** the problem is **decision latency under uncertainty**. They are asked, often by external parties (parents, security, oversight bodies), to vouch for student presence. They cannot. The current system gives them either no answer or an answer too slow to act on. They need a tool that lets them issue a directive, get a result in minutes, and trust the result.
+
+**For the supervisor,** the problem is **invisibility and double-work**. They know their class. They already keep informal mental track of who came to morning seder. But there is no system that records what they know or surfaces what they do not. They are asked, ad hoc, to "count their boys" — by phone, by hallway conversation — without a tool. The current system makes their work invisible to the administration; the administration's audits happen above their head.
+
+**For the student,** the problem is **fairness and dignity**. They want clear rules: when am I being tracked, why, what happens to the data, can I refuse, what are the consequences. The current system has no answer to any of those questions because the system itself has no concept of consent. Students will tolerate audit when audit is fair, predictable, and bounded.
+
+**For the parent (not a primary user but a stakeholder),** the problem is **assurance**. They sent their son to yeshiva expecting a structured environment. They are not asking to see their son's coordinates; they are asking the yeshiva to know where their son is. A working audit subsystem is the institutional capability that satisfies parental trust.
+
+## 3.3 The cost of inaction
+
+If the current state persists for another year:
+
+- Audit becomes informal, supervisors call each other, the result is "I think so" at best, no record exists.
+- The single admin who pioneered RollCall becomes the institutional point of failure for the whole capability.
+- The yeshiva remains unable to answer the kind of question — "where was every boy at 11:00?" — that any modern educational institution must be able to answer in five minutes.
+- The data has no historical record, so trend questions ("which classes have declining morning attendance?") are forever unanswerable.
+
+## 3.4 The cost of getting it wrong
+
+If we ship a system that is over-built, over-tracking, or over-bureaucratic:
+
+- Students disable location services or remove the app from their home screen entirely. The feature dies of disuse.
+- The supervisor experiences the new system as more work, not less, and reverts to informal methods. The data degrades.
+- The admin becomes drowned in alerts and loses the signal — *real* anomalies disappear into noise.
+- Halachic-privacy concerns surface, the rosh yeshiva pulls the plug, and the rebuild costs are sunk.
+
+The plan therefore optimizes for **trust, restraint, and one fast clear answer**, not for completeness, comprehensiveness, or live-data spectacle.
+
+---
+
+# Part 4 — Goals & Non-Goals
+
+## 4.1 Goals
+
+The goals are ordered. Earlier goals dominate later goals when they conflict.
+
+1. **Reliable, replayable answer.** An audit, once started, yields a definitive result; the result survives refresh, network blips, and arbitrary client crashes. Replay is the single most important property.
+2. **Two modes, one mental model.** Manual and location are two collection strategies. The admin learns one workflow, picks a mode, and gets a result. The UI is unified.
+3. **Live, but calm.** The dashboard updates in real time, but real time does not equal flashing. Updates are smooth, restrained, and tell a clear story. Animation serves comprehension; animation never substitutes for it.
+4. **Persistent history.** Every audit, every category change, every alert is queryable indefinitely. There is no "ephemeral state" anywhere in the system; if the user can see it, the database knows it.
+5. **Bounded GPS.** Location is collected with consent, used for one decision, retained for a known period, and forgettable on request.
+6. **Trivial for supervisor.** Marking 25 students by category takes under 90 seconds; the supervisor never sees a settings screen.
+7. **Trivial for student.** Responding to a location request is two taps, never confused with a regular notification, never required.
+8. **Comprehensible for admin.** A new admin can complete a successful audit within fifteen minutes of training.
+9. **Operable by one person.** No external dependencies in the live flow; no second admin required; no IT support during a session.
+10. **Auditable.** Six months later, a reviewer can answer: who started this session? Who marked which student? When? Why? — purely from the database.
+
+## 4.2 Non-Goals (explicit)
+
+These are things this plan **does not attempt** and explicitly defers. Stating them is as important as stating the goals.
+
+- **Continuous student tracking.** GPS is collected only inside an active audit session, never as ambient telemetry. The system has no "where is X right now" capability outside of audits.
+- **Parent-facing portal.** Parents do not receive audit results in this version. The infrastructure supports it but the UI does not expose it.
+- **Geofencing as a discipline mechanism.** The system reports out-of-area; it does not penalize, ground, or notify-parent automatically. All consequences remain administrative discretion.
+- **Multi-tenant deployment.** This is a single-yeshiva product. Architectural decisions assume one tenant. Multi-tenant is a separate project.
+- **Replacing the departure subsystem.** Departures and audits are sibling features. Neither subsumes the other.
+- **Replacing physical attendance taking.** A supervisor running the audit by walking the room with a phone is a feature; replacing the human is not. The product enhances the supervisor's reach, not their absence.
+- **Detecting fraud.** The system does not attempt to detect spoofed GPS, mock-location apps, or students using a friend's device. These are real risks (see §16.6), but the response is administrative-policy, not technical-counter-fraud arms race.
+- **Real-time chat between admin and student.** Push notification of an audit request is one-way. There is no "reply with text" affordance. If a student needs to explain, they speak to their supervisor.
+- **Native mobile apps.** PWA only. No Capacitor, no React Native, no App Store distribution.
+- **Offline-first audits.** Audit sessions inherently require network for realtime sync. Supervisor manual-mark submissions queue offline (existing Dexie pattern), but the *administrator's* live dashboard does not need to work offline — if the admin is offline, the audit cannot be supervised.
+
+## 4.3 Measurable success criteria for goals
+
+| Goal | Metric | Target | How measured |
+|---|---|---|---|
+| Reliable replay | % of sessions where refreshed page renders identical state | 100% | Synthetic test in CI; spot check in QA |
+| Two modes one mental model | Time for new admin to complete second audit | < 50% of time for first audit | User test with 2 admins |
+| Live but calm | Subjective rating from 3 reviewers | ≥ 4 / 5 ("not overwhelming") | Pre-launch review |
+| Persistent history | % of past sessions retrievable from history page | 100% within 12 months, 100% within 36 months | DB query test |
+| Bounded GPS | Default retention for GPS coords | 90 days, with documented deletion job | Code review + scheduled query |
+| Trivial for supervisor | Median time to mark a 25-student class manually | < 90 seconds | In-session telemetry (anonymized) |
+| Trivial for student | Median time from notification tap to GPS submission | < 12 seconds | Client telemetry |
+| Comprehensible for admin | Successful unassisted audit on first try | 4/5 trial admins | User test |
+| Operable by one person | Number of humans required during a session | 1 (the admin) | Operational definition |
+| Auditable | Time to retrieve "who marked student X" for any past response | < 10 seconds | DB query test |
+
+---
+
+# Part 5 — Key Product Decisions
+
+This section enumerates the **decisions** that define the product. Each decision is presented with its context, the alternatives that were considered, the recommendation, the reasoning, and the trade-offs incurred. These are not implementation details; they are the choices a senior team would defend in a design review.
+
+## 5.1 Decision: Two modes, not three, not one
+
+**Context.** The capture problem has many possible solutions: pure supervisor marking, pure GPS, scheduled QR scans at the door, RFID badges, photo upload of a paper attendance sheet, voice recognition. The product needs a defensible scope.
+
+**Alternatives considered:**
+
+- *Single mode (location only).* Rejected: students without phones, students whose phones are dead, students who refuse to share GPS, students inside a building with bad GPS reception — too many edge cases for the audit to be useful in 100% of cases. A location-only product would fail on the day it matters most.
+- *Single mode (manual only).* Rejected: removes the differentiating value the request originally asks for ("real-time, live"), and offers nothing the current paper attendance sheet does not.
+- *Three or more modes (QR check-in, photo upload, etc.).* Rejected on grounds of complexity. The admin must hold the mental model. Three modes is one mode too many; the user must remember which mode they picked and why. Two modes with crystal-clear use cases is the maximum.
+- *Hybrid mode (location first, manual fallback within the same session).* Rejected as the *primary* mode but **accepted as a behavior within the LOCATION mode**: when GPS fails for a student, the supervisor of their class is shown that student in a "needs manual" list. This is not a third mode; it is the natural failure path of the location mode.
+
+**Recommendation.** Two modes: `MANUAL` and `LOCATION`. Mode is chosen at session start and locked for the session's lifetime. The hybrid behavior described above is part of the LOCATION mode's specification, not a separate mode.
+
+**Reasoning.** Two modes correspond to two real questions: *"Is everyone here right now, with the supervisors confirming?"* and *"Where is everyone right now, with the system measuring?"* These are different questions with different answers. They warrant separate flows.
+
+**Trade-offs accepted.** The supervisor sees a slightly different UI in MANUAL vs LOCATION (they do nothing by default in LOCATION; they get a "needs manual" list when GPS fails). This is acceptable because supervisors only encounter LOCATION mode when invoked, and the difference is explained in the in-session banner.
+
+## 5.2 Decision: Three pickable categories, two system categories — total of five
+
+**Context.** The current proposal earlier listed six categories including a "sick / funeral" excused state. The user has since asked for three. The system also needs internal placeholders. Resolving this requires distinguishing **user-facing categorization** from **internal state**.
+
+**Recommendation.** Five total values, of which three are user-pickable.
+
+| Category | Pickable by user? | Meaning |
+|---|---|---|
+| `PENDING` | No (system default) | No answer yet recorded for this student in this session. |
+| `IN_YESHIVA` | Yes | Confirmed present. Either supervisor marked, or GPS placed them in the campus bucket. |
+| `OUT_PERMIT` | Yes | Out, with administrative approval. Either supervisor marked, or system saw an `ACTIVE` departure for this student. |
+| `OUT_NO_PERMIT` | Yes | Out, without approval, supervisor's judgment. In LOCATION mode, also produced automatically when GPS places the student outside the campus bucket and no departure record exists. |
+| `UNKNOWN` | No (system result) | We do not know. GPS denied, GPS timeout, GPS low-accuracy, no response from device, supervisor did not mark before session closed. |
+
+**Why this shape:**
+
+- **Three pickable is the right amount.** Five pickable options would slow the supervisor's hand. One option (a single "absent" button) would underspecify the answer. Three is a tested number for fast hand-decisions.
+- **`PENDING` must exist as a system state.** Without it, the table either has nullable categories (which makes queries harder) or it lacks a notion of "the audit started but this student has not been processed yet" — which is exactly the question the dashboard most needs to answer.
+- **`UNKNOWN` must exist separately from "PENDING".** They mean very different things to the admin. `PENDING` means "still working on it". `UNKNOWN` means "we tried, we failed, the answer is genuinely missing". Conflating them would hide failures.
+- **No "sick / funeral / excused-other" category.** The reasoning: those are not categories of presence; they are *reasons* for absence. Mixing reasons with presence states inflates the category set without improving classification. The supervisor records reasons in the `note` field on the response; the category remains `OUT_PERMIT` (the system understands "supervisor said it's fine"). This keeps category cardinality low, which keeps the dashboard legible.
+
+**Trade-off.** Supervisors who want a quick "he's sick" button do not get one. They must type or pick "out with permit" and add a note. We accept this in exchange for category cleanliness.
+
+## 5.3 Decision: Only the administrator initiates audits
+
+**Context.** An earlier draft considered allowing a class supervisor to initiate an audit for just their class. The user has since clarified: only the admin starts audits.
+
+**Recommendation.** Confirmed. Only the admin role can call `open_audit`. Supervisors are participants, never initiators.
+
+**Reasoning.** Authority asymmetry. The audit is an institutional act. If a supervisor could quietly audit their class, the act becomes private — a teacher's tool — rather than institutional. Institutional acts must originate from institutional authority. Also: the dashboard's value comes from cross-class visibility; a supervisor-initiated audit would only show one class, making it a worse tool for everyone including the supervisor.
+
+**Trade-off.** Supervisors lose the ability to silently take attendance on their own using this tool. We do not consider this a meaningful loss — they already have the right to mark presence in any way they wish; the *system* simply does not perform that act.
+
+**Future relaxation.** If demand emerges, a "supervisor self-check" mode could be added later as a parallel feature with its own data table and its own UI. It would not be an audit and would not appear in audit history.
+
+## 5.4 Decision: At most one active session at any time, with a 24-hour upper bound
+
+**Context.** Concurrency control is a structural decision. Two admins clicking "open" within seconds of each other is a real scenario.
+
+**Alternatives:**
+
+- *No concurrency control.* Multiple sessions can exist. Rejected: the supervisor and student UIs become ambiguous ("which session is this push for?"). Also rejected: a careless admin could spawn many sessions and never close them.
+- *Strict mutex (the recommendation).* At most one session in `ACTIVE` status. Attempt to open a second fails with `AUDIT_ACTIVE` and offers the existing session.
+- *Sliding window (only one within N minutes).* Rejected as needlessly complex; the strict mutex is simpler and provides the same protection.
+
+**Recommendation.** Strict mutex. Database-enforced via a partial unique index on `audit_sessions ((1)) WHERE status = 'ACTIVE'`. A scheduled task auto-times-out sessions older than 24 hours to `TIMED_OUT` so a forgotten session does not block future audits forever.
+
+**Why 24 hours.** A typical audit completes in 5–10 minutes. Allowing 24 hours gives huge safety margin for "the admin walked away and forgot" without permitting "the same session active for a week". Twenty-four hours is also a recognizable retention boundary that requires no clock-time tuning across timezones.
+
+**Trade-off.** A second admin who legitimately wants to start a new audit while one is still nominally active must explicitly abort the existing one. This is a deliberate friction, not a bug.
+
+**Future relaxation.** Multi-session support is a possible future feature for the multi-shift case (morning seder, afternoon seder, night seder each get their own audit). When that arrives, the partial index is replaced by a "one active per `scope_key`" index, where `scope_key` is `(shift_id, building_id)` or similar. The current architecture supports this evolution.
+
+## 5.5 Decision: GPS distance buckets at 300 m / 1 km / 5 km
+
+**Context.** Distance from campus is a continuous quantity (meters); the UI and the alert system need discrete categories. Where to draw the lines?
+
+**Reasoning.** The campus is in Hebron. The relevant geographic facts:
+
+- The yeshiva itself, plus the immediate yard, fit within a ~150 m radius. A 300 m boundary captures campus and immediate surroundings even with GPS noise (a phone reporting 250 m of accuracy is still legitimately "on campus" if the displayed point is 50 m from the center).
+- The neighborhood of Hebron's Kiryat Arba area extends roughly 1 km from the yeshiva. A student walking to the local makolet for a soda is in the 300 m – 1 km bucket. They are not present, but they are not concerning.
+- Hebron city center is within 5 km. A student visiting family in Hebron city is in the 1–5 km bucket. Concerning but plausibly explained.
+- Beyond 5 km the student is meaningfully far. Jerusalem (35 km), Beersheba (45 km), Tel Aviv (60 km), and abroad (∞) all read the same color: red.
+
+**Recommendation:** four buckets, named for color, with thresholds 300 m / 1 km / 5 km / ∞. Names use color rather than distance ranges to keep UI tokens short.
+
+**Trade-off.** A student in their parents' house 500 m from campus reads as `BLUE` ("in area") even though they are home for the night. The supervisor reading this knows to check the departure record (which would show an `OUT_PERMIT`). The bucket alone is not the conclusion; the bucket plus the departure context plus the supervisor's judgment is the conclusion.
+
+**Tunable.** If experience shows the 5 km boundary is too generous, it is one constant in one file. The recommended approach explicitly centralizes the constant in **two places only**: the SQL helper function `fn_distance_bucket` and the TypeScript helper `bucketFromMeters`. A migration that changes the SQL must accompany any change to the TS, and vice versa, enforced by code review.
+
+## 5.6 Decision: The database is the source of truth; the client mirrors
+
+**Context.** The single most important architectural question. Where does state live?
+
+**Recommendation.** The database is the only source of truth. The client renders a **derived view** of the database. Mutations go through RPCs; reads come back through realtime; on any uncertainty (refresh, reconnect, app start), the client re-fetches from the database and discards local assumptions.
+
+**Why this matters more than any other architectural choice.**
+
+The original RollCall design treated state as "what is currently flying across the realtime channel". That is precisely why refresh wipes the screen. The new design is the opposite: realtime is a **notification mechanism** that tells the client "the database changed, re-render". The database is the canonical, persistent, authoritative store.
+
+This decision has a cascading set of corollaries:
+
+- Every screen is replay-safe (§13.2).
+- Optimistic UI is permitted but **always reconciled** against the next realtime event or the next refresh.
+- No state is kept "only in the admin's tab" — if the admin closes the tab and reopens it, identical state.
+- Two admins, two devices, one session — see identical state to within one network round-trip.
+- Realtime is an optimization; if it fails, polling at 30-second intervals provides a degraded-but-correct fallback (§17.3).
+
+**Trade-off.** More database writes than a broadcast model. Negligible in cost at 381 students × ~5 audits per week.
+
+## 5.7 Decision: Sessions are persisted forever; alerts and logs likewise; raw GPS coordinates expire
+
+**Context.** Privacy and storage both demand a deliberate retention policy.
+
+**Recommendation.**
+
+| Data | Retention | Reason |
+|---|---|---|
+| `audit_sessions` row | Forever | Tiny; institutional record; never PII. |
+| `audit_responses` row (without raw GPS) | Forever | Small; the count, by class, by category, by date is the historical record. |
+| `audit_responses.gps_lat`, `gps_lng`, `gps_accuracy_m` | **90 days, then nulled** | Raw coordinates are sensitive PII. The bucket (`GREEN`/`BLUE`/`ORANGE`/`RED`) and the distance-in-meters are retained because they are the analytical signal; the actual coordinates are not. |
+| `audit_alerts` row | Forever | Institutional record of an event. |
+| `audit_response_log` entries | Forever | Audit trail. |
+| `audit_push_log` entries | 30 days | Debugging only; no value at 31 days. |
+
+The 90-day GPS nulling is implemented as a scheduled `UPDATE` in pg_cron, not a delete, so the row keeps its bucket and distance for analytics but loses the precise coordinates. The implementation appears in the implementation reference but the *policy* is decided here.
+
+**Why this asymmetry.** "Was this student off-campus on May 16?" is a legitimate question to answer in October. "Where exactly was this student on May 16?" is not. The retention policy encodes this asymmetry into the data model. Halachic-privacy reviewers, when consulted, agree (see §16.5).
+
+**Trade-off.** Forensic reconstruction of an old incident loses precise coordinates after 90 days. We consider this an acceptable cost for the privacy benefit.
+
+## 5.8 Decision: Manual mode is the default; LOCATION is opt-in per session
+
+**Context.** Which mode does the admin land on when they open the "new audit" flow?
+
+**Recommendation.** The mode picker is a two-card screen with neither pre-selected. The admin must consciously pick. The UI explains both in one line each. Defaulting to LOCATION would normalize tracking; defaulting to MANUAL would imply the LOCATION mode is suspect or experimental. Neither default sends the right message.
+
+**Trade-off.** One extra click per audit. Acceptable.
+
+## 5.9 Decision: Hebrew terminology
+
+**Context.** Terminology in a Hebrew UI matters more than the team realizes. Words carry institutional implications.
+
+**Recommendation.** The following Hebrew terms are canonical for the product. Synonyms are explicitly rejected.
+
+| English internal term | Hebrew UI term | Rejected alternatives | Why |
+|---|---|---|---|
+| Audit | בקרה / ביקורת | מפקד (military connotation), בדיקה (too generic), נוכחות (means "presence" not "the process") | "ביקורת" is the existing term in CLAUDE.md and is the rabbinic-yeshiva vocabulary. |
+| Audit session | סשן בקרה | ריצה, מפגש | "סשן" is widely understood in Israeli tech-product Hebrew. |
+| Manual mode | מצב מהיר | מצב ידני | "מהיר" (fast) frames it positively; "ידני" (manual) sounds primitive. |
+| Location mode | מצב מיקום | מצב GPS | "GPS" leaks technology jargon into the UI. |
+| Marker | סימן / סומן ע"י | מחמיר, מבצע | Reflects the action, not the actor. |
+| In yeshiva | נוכח | בישיבה (correct but verbose), כאן | "נוכח" is one word and a known token. |
+| Out with permit | בחוץ עם אישור | יציאה מאושרת | "עם אישור" is the parallel construction to "בלי אישור" — readability priority. |
+| Out without permit | בחוץ ללא אישור | בלי רשות | "ללא אישור" matches the formal register. |
+| Unknown | לא ידוע | לא נמסר, לא נענה | "לא ידוע" is honest and short. |
+| Pending | ממתין | בהמתנה | "ממתין" is one word. |
+| Alert | אזעקה | התראה, פעמון | "אזעקה" carries appropriate gravity for the `RED` distance bucket. |
+| Live dashboard | מסך הבקרה החי | לוח מחוונים | "לוח מחוונים" sounds like a car. |
+
+This is a settled list. Changes to it require revising this document, not a side conversation.
+
+## 5.10 Decision: Realtime, but with explicit polling fallback
+
+**Context.** Supabase Realtime is a websocket connection. It has been reliable historically but is not a guarantee.
+
+**Recommendation.** Every dashboard subscribes to `postgres_changes` on the relevant audit tables. Independently, every dashboard runs a poll-fallback timer: if no realtime event has been observed in 30 seconds *while a session is active*, force a re-fetch via `get_active_audit`. This guarantees that even if realtime silently dies, the dashboard cannot stay stale for more than ~30 seconds.
+
+**Trade-off.** A small steady-state load on the database from polls during quiet periods. Negligible.
+
+## 5.11 Decision: One audit dashboard, four views; no "tabs of tabs"
+
+**Context.** It is tempting to add a Settings tab, a History tab, a Compare tab, a Stats tab to the live dashboard. Resist.
+
+**Recommendation.** During an `ACTIVE` session, the dashboard has exactly four switchable views and no nested tabs:
+
+1. **Grid** — one card per class, ordered by attention-need.
+2. **Heatmap** — same data, compact visualization for the rosh yeshiva to take in at a glance.
+3. **Map** — geographic view, location mode only, hidden in manual mode.
+4. **Feed** — chronological stream of actions.
+
+The KPI strip is **persistent** above all four views; it never moves and never disappears.
+
+The alert list and recent-activity widget appear **below** the four views, always visible if the screen height allows. They are not in the tab system.
+
+Everything else — comparing past sessions, exporting, settings — happens **outside the live dashboard**, on separate routes.
+
+**Why this restraint matters.** During a session, the admin's attention is at a premium. Adding any UI control that is not directly useful in the next ninety seconds is a design failure. Every removed control is a kindness to the admin.
+
+## 5.12 Decision: Push notifications fan out via Edge Function, not from the client
+
+**Context.** When an audit opens in LOCATION mode, the server needs to push N notifications to N students. Push from the client would require the admin's browser to stay open and would scale poorly.
+
+**Recommendation.** A server-side Edge Function (`send-audit-push`) fans out the notifications. It is invoked synchronously by the `open_audit` RPC's caller (the admin's frontend) but the Edge Function batches and rate-limits the sends. The admin sees a single "opening session…" spinner that resolves when the Edge Function reports completion.
+
+**Trade-off.** Slightly longer "open audit" call (1–3 s instead of <1 s). Acceptable. The alternative is N parallel network calls from the admin's browser, which would (a) require their browser to stay foregrounded, (b) be visible in DevTools to anyone curious, (c) consume their battery, and (d) hit rate limits less gracefully.
+
+## 5.13 Decision: Projection mode is included but not promoted
+
+**Context.** The user has asked for a "live data dashboard for the manager... in a meeting, all the data jumping onto the screen". This is the projection-mode use case.
+
+**Recommendation.** Implement projection mode but do not feature it on first launch. Add a discreet TV-icon button in the top-right of the live dashboard. The admin discovers it when they need it. Projection mode goes fullscreen, increases font scale by ~1.8×, rotates the four views on a 10-second interval, and disables interactive controls.
+
+**Trade-off.** Projection mode adds engineering and design surface area. We include it because the user explicitly wants it and because it has institutional value (during a vaad meeting with the rosh yeshiva). We avoid promoting it because the typical use is a phone in the admin's hand, not a wall projector.
+
+## 5.14 Decision: No native app
+
+**Context.** PWA versus Capacitor versus React Native.
+
+**Recommendation.** PWA only. iOS Safari supports Web Push from 16.4+ via "Add to Home Screen". Android Chrome supports it natively. The yeshiva's student body is overwhelmingly Android, with a non-trivial iPhone minority. PWA reaches both populations.
+
+**Trade-off.** iOS users must add the app to their home screen before push works. This is a known onboarding friction, not a deal-breaker, and is communicated in onboarding text. Building a native app to avoid this friction is an order of magnitude more engineering work than the friction is worth.
+
+---
+
+# Part 6 — User Roles and Personas
+
+This section is not a list of permissions (those appear in §16). It is the human picture of who uses the product and how they live with it.
+
+## 6.1 Persona — The administrator
+
+**Working name:** Rav Yair, 47, *menahel* of the yeshiva.
+
+**Daily reality.** He has three meetings a day, twenty parents to call back, two halachic shaylas in his queue, and a phone that beeps for twenty different reasons. He opens his phone roughly two hundred times a day and is competent with smartphones but not enamored of technology. He uses WhatsApp, Google Calendar, and a sheet for the budget. He learned the current attendance app because someone built it for him, not because he likes apps.
+
+**Audit context.** He runs an audit roughly three times a week: after morning seder, after afternoon seder, before evening seder during particularly important weeks. He runs it because parents call ("is my son there?") or because security calls ("we need a count") or because the rosh yeshiva calls ("how many boys are out today?"). When he runs an audit, the typical situation is *he is in motion*: walking, just sat down in a meeting, between conversations. He almost never runs an audit while sitting alone with a laptop.
+
+**What the product must give him.** A button that he hits while walking. A dashboard he can glance at on a phone, in a hallway. A clear answer in five minutes that he can repeat verbally on the phone. Confidence that the supervisors are doing their job. No surprises. No bugs at 11pm.
+
+**What will kill the product for him.** Five-minute load times. Permissions he doesn't understand. Categories that confuse him. Push notifications that lie. Bugs that make him look foolish in front of the rosh yeshiva.
+
+**Implication for the plan.** The admin's flow must be **finger-friendly**, **single-thumb-operable**, **information-dense without being cluttered**, and **fail-loud** (when something is wrong, he must know immediately, not five minutes later).
+
+## 6.2 Persona — The class supervisor
+
+**Working name:** Rav Boaz, 31, supervisor of *shi'ur bet* — class of 23 boys.
+
+**Daily reality.** He teaches three of his class's six daily sessions and is in the building for the rest. He knows every boy in his class personally: their gemara level, their family situation, their slichos. He does not naturally think of himself as a "user of an app". He logs into the system because he is asked to.
+
+**Audit context.** He sees the supervisor screen perhaps three times a week. When he sees it, it is because an audit is active. He must mark his 23 boys quickly — ideally before his next chavruta starts in eleven minutes. He may be sitting in the beit midrash, in his office, in the hallway. He may be on a phone with bad connectivity. He may be in a basement with no signal at all.
+
+**What the product must give him.** A list of his 23 boys, in his class only, with three buttons per boy. Updates from other supervisors don't concern him. Updates from the admin don't concern him. He needs to mark his class and walk away.
+
+**What will kill the product for him.** Showing him other classes. Asking him to choose a mode. Asking him to log in twice. Modal dialogs in the middle of marking. Anything that takes more than 90 seconds for 23 students.
+
+**Implication for the plan.** The supervisor's view is **a single screen, scoped to one class, with three-button-per-student ergonomics**. It is not a smaller version of the admin's dashboard; it is a different product.
+
+## 6.3 Persona — The student
+
+**Working name:** Aharon, 18, second-year talmid.
+
+**Daily reality.** He has an Android phone — a hand-me-down — with limited data, on a family plan. The phone is in his pocket twelve hours a day and in airplane mode during seder if he is disciplined, in his backpack if he is not. He uses WhatsApp, has an Instagram account he doesn't use much, and plays a strategy game on Friday afternoons.
+
+**Audit context.** He encounters the audit when his phone buzzes with a notification. He recognizes the yeshiva app icon. He taps. He sees a screen asking for his location. He taps "approve". He goes back to his gemara. He encounters this maybe once or twice a week.
+
+**What the product must give him.** A notification that is unambiguously from the yeshiva. A consent screen that he understands. Two-tap completion. Reassurance that the data is bounded.
+
+**What will kill the product for him.** Frequent notifications. Notifications that look like spam. Vague consent. Slow response. Battery drain. Mockery from friends who got "tracked".
+
+**Implication for the plan.** The student's interaction is **rare, fast, bounded, dignified, and explained**. The notification language and the consent screen are first-class design surfaces, not afterthoughts.
+
+## 6.4 Edge personas (acknowledged, not centered)
+
+- **The rosh yeshiva.** Views audit results occasionally in passing on the admin's phone. Not a system user. The dashboard is designed to be **shoulder-readable** in a 5-second over-the-shoulder glance — this is the projection-mode use case in miniature.
+- **The parent.** Not a system user, but a context for trust. The product must not embarrass the yeshiva if a parent asks "what does this app actually do".
+- **The security guard at the gate.** Not a system user, but a beneficiary. A working audit can answer their "how many boys are inside the perimeter right now?" question.
+
+These personas are acknowledged so that the team does not accidentally design *for* them at the cost of the three primary personas.
+
+## 6.5 Role-to-permission matrix
+
+Permissions are the formal version of the personas. See §16 for security context.
+
+| Capability | Admin | Supervisor | Student | Anonymous |
+|---|---|---|---|---|
+| Open audit session | ✅ | ❌ | ❌ | ❌ |
+| Close audit session | ✅ | ❌ | ❌ | ❌ |
+| Abort audit session | ✅ | ❌ | ❌ | ❌ |
+| Override category for any student | ✅ | Class only | ❌ | ❌ |
+| Mark category in active session | ✅ | Class only | Self only (GPS submission) | ❌ |
+| View live dashboard (all classes) | ✅ | ❌ | ❌ | ❌ |
+| View supervisor panel (own class) | ✅ | ✅ | ❌ | ❌ |
+| Receive audit push | ✅ (open events) | ✅ (open events) | ✅ (location mode) | ❌ |
+| Acknowledge alert | ✅ | ❌ | ❌ | ❌ |
+| View audit history | ✅ | Own class only | ❌ | ❌ |
+| Export audit data | ✅ | ❌ | ❌ | ❌ |
+| View student locations on map | ✅ | ❌ | ❌ | ❌ |
+| Initiate location collection | ✅ (within audit) | ❌ | Self only (within audit) | ❌ |
+
+---
+
+# Part 7 — Use Cases
+
+Twelve concrete, end-to-end scenarios. Each is a paragraph, not a checklist. They are designed to stress-test the product: if every scenario works, the product is real; if any scenario doesn't, the design has a gap.
+
+**UC-1 — Routine morning audit, manual.** It is 09:15, twenty minutes into morning seder. The admin opens his phone, taps "audit", picks "manual", selects all 16 classes, taps "open". Sixteen push notifications fan out to the supervisors. Each supervisor sees a banner: "audit active — mark your class". Over the next two minutes, supervisors mark, the admin's dashboard fills in green. At 09:18 the class progress bars are 100% green except one class showing 21/23 marked. The admin opens that class's drawer, sees two pending students, taps the supervisor's name to call them. Two seconds later the supervisor finishes marking. The admin taps "close audit", types "morning seder", taps "save". The summary screen shows 374 present, 7 with permit, 0 without. The whole audit took 4 minutes 12 seconds.
+
+**UC-2 — Routine audit, location mode.** Same situation, but the admin picks "location". Push notifications fan out to all 381 students. Over the next two minutes, 297 students approve, GPS arrives, dots appear on the map. Eight students appear in the `BLUE` bucket (≤1 km from campus, not in the building); the admin sees they have departures, the dashboard auto-classifies them as `OUT_PERMIT`. Three students appear in `RED` — one in Tel Aviv, two in Jerusalem. Alerts fire. The admin sees the alert modal, recognizes one as a student on family leave (departure record confirms), acknowledges. The other two have no departure record and the admin makes phone calls. By 09:20, 376 of 381 students have responded. The remaining 5 are `UNKNOWN`. The admin pushes a reminder to those 5 supervisors; within 90 seconds the supervisors confirm three of them are in the building (manual override to `IN_YESHIVA`) and two are genuinely missing phones. The admin closes the audit. Total time: 6 minutes 40 seconds.
+
+**UC-3 — Admin refreshes mid-audit.** Two minutes into UC-2, the admin's phone runs out of battery. He plugs in. He reopens the app. The login screen loads. He logs in. He lands on a banner: "ביקורת פעילה כעת — חזור לסשן". He taps. The live dashboard renders. KPI strip shows the correct numbers. The map shows the dots that were there before. The activity feed shows the events he missed. No regression.
+
+**UC-4 — Two admins, same session.** Rav Yair opens an audit from his phone. The deputy admin opens her tablet at the same moment, sees the active session, taps it. Both screens now show identical data. The deputy marks a student manually as `IN_YESHIVA`. Rav Yair sees the change appear on his screen within 1 second. The activity feed shows "deputy admin marked Avi Cohen as נוכח". No conflict, no race.
+
+**UC-5 — Supervisor on flaky wifi.** Rav Boaz is in the basement beit midrash where wifi is poor. He taps "נוכח" on a student. The button shows a spinner for 4 seconds, then resolves. He continues marking. The 5th student he marks takes 11 seconds to confirm because wifi dropped entirely. The mutation queues in IndexedDB. Wifi returns. The mutation flushes. The dashboard catches up. Rav Boaz never sees an error message; the system absorbs the friction.
+
+**UC-6 — Student denies GPS.** Aharon receives the audit push. He taps. The consent screen appears: "ההנהלה מבקשת לוודא שאתה בישיבה. שלח מיקום או דחה." He has just sat down in mussar seder and doesn't want to fiddle with his phone. He taps "אני לא יכול עכשיו". The system records his response as `gpsStatus=DENIED` and `category=UNKNOWN`. On the admin's dashboard, Aharon appears in the `UNKNOWN` row of his class card. The supervisor of his class is notified that there are unmarked students in his class needing manual attention. The supervisor walks two rooms over, sees Aharon, taps "נוכח" on his phone, the dashboard updates.
+
+**UC-7 — Critical alert, real incident.** Mid-audit, a student appears in `RED` at 47 km from campus. Alert fires. Admin's modal pops. The modal shows the student's name, his class, the distance, and his phone number from the student record. The admin calls. The student answers: he is at home in Beit Shemesh because of a family event the yeshiva wasn't informed of. The admin marks him as `OUT_PERMIT` with a note ("family event, informed retroactively"), acknowledges the alert. The alert is now resolved but the *event* is recorded forever in the audit log.
+
+**UC-8 — Critical alert, false alarm.** Student appears at 6 km. Alert fires as `MEDIUM`. Admin checks: the student's recorded GPS accuracy is 8 km. This is a low-confidence reading from a phone with limited satellite visibility (likely inside a building with metal walls). The system has correctly tagged the response as `LOW_ACCURACY`. The admin marks the student manually as `IN_YESHIVA` based on the supervisor's confirmation. The alert is acknowledged with note "low-accuracy reading; supervisor confirms present". Future analysis of false-alarm rate can query for this combination.
+
+**UC-9 — Audit forgotten overnight.** Admin opens an audit at 22:00 to check the dormitories. He marks five classes, then his daughter calls. He puts the phone down. The next morning at 09:00 he opens the app — the session is now in `TIMED_OUT` status (24-hour cron). The dashboard shows the data he had collected, the unmarked students as `UNKNOWN`, and a clear status banner: "סשן זה הסתיים אוטומטית בשל אי-פעילות". No data was lost; the session was simply closed by the system at the 24-hour boundary.
+
+**UC-10 — Admin compares two audits.** A week later, in a vaad meeting, the rosh yeshiva asks "are mornings better than evenings?". The admin opens audit history, ticks Tuesday-morning and Tuesday-evening sessions, taps "compare". A side-by-side appears: present count, by-class breakdown, alert count. The data lives forever in the database; the comparison is a query, not a screenshot.
+
+**UC-11 — A new supervisor joins mid-year.** A new madrich is appointed for *shi'ur dalet*. The admin updates the Google Sheet to associate the new madrich with the class; the sync happens; the admin assigns a class code. On the next audit, the new madrich receives the supervisor push, sees his class panel, marks his students. No code change required.
+
+**UC-12 — Halachic-privacy challenge from a parent.** A parent calls the rosh yeshiva: "why does the app track my son?". The rosh yeshiva turns to the admin. The admin opens a "privacy" page (an admin-only diagnostic page) that shows: this parent's son had GPS submitted in 3 audits in the past 30 days; in each case, only the distance bucket and an approximate distance-in-meters is retained; precise coordinates from older audits have been nulled by the retention job. The admin can produce this report from the UI directly, without database access. The rosh yeshiva can pass it to the parent in writing.
+
+These twelve scenarios are the **acceptance fiction**: when the product handles all twelve fluently, it ships.
+
+---
+
+# Part 8 — Ideal User Experience
+
+## 8.1 The mental model
+
+A user-experience succeeds when the user can describe it to a friend in one sentence. The target sentences for each role:
+
+- **Admin:** *"I tap a button and within five minutes I know exactly who's where."*
+- **Supervisor:** *"When my phone buzzes, I open the app, mark my boys, done."*
+- **Student:** *"Once or twice a week the yeshiva asks where I am; I tap yes or no."*
+
+Every design decision must serve one of those three sentences. If a design choice does not, it is decoration.
+
+## 8.2 The admin's journey, narrated
+
+Walking down the hallway, the admin opens his phone. The home screen of the admin app shows a small "Audit" tile — orange if a session is active, neutral if not. He taps it. He sees a screen with two large cards: "Manual" and "Location". One sentence under each. He taps "Manual". A class selector appears — pre-checked with all 16 classes. He doesn't change it. He taps "Open". A two-second spinner; pushes fan out. The live dashboard loads. He sees the KPI strip, large numbers; six tiles each showing a category count. Below, a grid of class cards. He tucks the phone in his shirt pocket as he turns a corner. Thirty seconds later he glances at the phone; the KPI numbers have moved, several class cards have turned green. He keeps walking. By the time he reaches his office, all but one class card is green. He sits down. He taps the orange card; a drawer slides in showing 21/23 marked with two students pending. He taps the supervisor name to make a call. The supervisor — having seen the same data on his own screen — was already calling around the room. Ninety seconds later, the dashboard is fully green. The admin taps "Close". He types one word: "בוקר". He taps "Save". The summary appears. He closes the app.
+
+What made this experience good:
+
+- He never read instructions.
+- He never typed anything until the very end, and then just one word.
+- He always saw progress, never a loading spinner without context.
+- The most important number — "how many present" — was always on screen, large.
+- The system did not surprise him.
+
+## 8.3 The supervisor's journey, narrated
+
+In the beit midrash, between seder and break, Rav Boaz's phone vibrates. He pulls it out. Lock screen: "בקרה פעילה — סמן את הכיתה". He swipes. The app opens directly on the supervisor panel for his class — no menu navigation, no class picker. He sees a list of his 23 boys, three buttons per row: green (נוכח), blue (עם אישור), red (ללא אישור). He starts at the top, taps green-green-green-green-green, scrolls, taps green-green-blue (a boy whose departure is approved), green-green. By the 16th boy, he's marked 80% of the class. He recognizes one boy isn't in the room. He scrolls to that boy's row, taps "ללא אישור", taps the note field, types "לא נראה בסדר". By the 23rd boy he is done. The panel shows "סימנת את כולם — תודה!". He locks the phone and returns to learning.
+
+What made this experience good:
+
+- The push notification opened directly to the right screen.
+- His class was already filtered for him.
+- Three buttons per row, large enough for thumb.
+- The note field was optional, not required.
+- Completion was confirmed without ceremony.
+
+## 8.4 The student's journey, narrated
+
+Aharon's phone buzzes. He glances. Notification: "בקרת מיקום מהירה — לחץ לאישור". He recognizes the yeshiva app icon. He taps. The app opens to a bottom sheet:
+
+> בקרת מיקום מהירה
 >
-> **שני מצבי ביקורת:**
-> 1. **מצב מהיר (ידני / ללא מיקום)** — רכז סוגר מהר על כיתה. UX חדש לגמרי.
-> 2. **מצב מיקום חי (Location Audit)** — מנהל פותח דשבורד; הנתונים "קופצים" אליו ב־real-time.
+> ההנהלה מבקשת לוודא שאתה בישיבה.
+> המיקום נשלח פעם אחת, נשמר 90 יום, ולא נחשף לחברים.
 >
-> **שמירה על Refresh** — חובה לשני המצבים. סשן ביקורת חי ב־DB, לא בזיכרון של ה־browser.
+> [אשר ושלח מיקום] [אני לא יכול]
 
----
-
-## תוכן עניינים
-
-**חלק א׳ — סקירה ועקרונות**
-1. תקציר מנהלים
-2. מטרות עסקיות
-3. נקודות הכאב במצב הנוכחי
-4. עקרונות מנחים (Iron Rules)
-
-**חלק ב׳ — מודל הנתונים**
-5. ארכיטקטורה ברמה גבוהה
-6. סכמת DB חדשה (Audit Sessions)
-7. מצבי תלמיד בזמן ביקורת
-8. מצבי סשן ביקורת
-9. מכונת מצבים (State Machine)
-10. כללי שימור היסטוריה
-
-**חלק ג׳ — שני מצבי ביקורת**
-11. השוואת המצבים בטבלה
-12. מתי להשתמש בכל מצב
-
-**חלק ד׳ — מצב 1: ביקורת מהירה (ידני)**
-13. תרחיש שימוש
-14. תהליך ההפעלה
-15. דשבורד מנהל
-16. דשבורד רכז כיתה
-17. סיום ושימור
-18. תקלות ופתרונן
-
-**חלק ה׳ — מצב 2: ביקורת מיקום חי**
-19. תרחיש שימוש
-20. תהליך ההפעלה
-21. צד התלמיד — איסוף מיקום
-22. הזרמת נתונים בזמן אמת
-23. דשבורד מנהל — Live Map / Heatmap / Grid / Table
-24. דשבורד רכז כיתה — תצוגה ייעודית
-25. הקרנה (Projection Mode) ורוטציה אוטומטית
-26. טיפול בקצוות (Edge Cases)
-
-**חלק ו׳ — Backend Architecture**
-27. Supabase Tables — DDL מלא
-28. RPC Functions — חתימות מלאות
-29. Edge Functions
-30. Realtime Channels
-31. cron jobs ו־cleanup
-
-**חלק ז׳ — Frontend Architecture**
-32. מבנה תיקיות
-33. Zustand Stores חדשים
-34. React Hooks
-35. עץ רכיבים (Component Tree)
-36. שימור State מול Refresh — Source of Truth ב־DB
-37. ספריות חיצוניות שיתווספו
-
-**חלק ח׳ — Design System**
-38. עקרונות עיצוב
-39. פלטת צבעים מורחבת
-40. טיפוגרפיה ומצב הקרנה
-41. אנימציות — "Data Jumping"
-42. צלילים / Haptic / התראות
-43. מצב חושך/אור
-44. RTL ושפה
-
-**חלק ט׳ — Post-Audit**
-45. מסך סיכום מיידי
-46. דף "ביקורות קודמות"
-47. השוואה בין ביקורות
-48. ייצוא PDF / Excel
-
-**חלק י׳ — הרשאות וביטחון**
-49. תפקידים והרשאות
-50. RLS Policies
-51. PII והגנת פרטיות
-
-**חלק י"א — GPS Engineering**
-52. בקשת הרשאת geolocation
-53. בקרת איכות (accuracy filter)
-54. חישוב Haversine
-55. קטגוריזציה לפי מרחק
-56. ניהול שגיאות
-
-**חלק י"ב — Push & Realtime**
-57. Web Push מורחב
-58. Channels — תכנון מלא
-59. Reconnection / Heartbeat
-
-**חלק י"ג — Testing**
-60. תרחישי QA
-61. Edge cases ידועים
-62. Load testing
-
-**חלק י"ד — Step-by-Step Roadmap**
-63. רשימה מסודרת של כל הצעדים, לפי תלות וסדר ביצוע (8 שלבים, 70+ צעדים)
-
-**נספחים**
-- A. דוגמת JSON של סשן חי
-- B. דוגמת SQL ל־DDL חדש
-- C. דוגמת חתימות TypeScript של RPCs
-- D. דוגמת UI Components
-
----
-
-# חלק א׳ — סקירה ועקרונות
-
-## 1. תקציר מנהלים
-
-מערכת "ביקורת פנימית" היא הכלי של מנהל הישיבה לוודא ברגע נתון מי באמת נמצא בישיבה. היום הפיצ׳ר קיים אבל **לא עובד טוב**: ה־UX שבור, הנתונים נעלמים בריענון, אין שמירה היסטורית, אין מסך חי שמעניק תחושת שליטה.
-
-התוכנית הזו בונה את הפיצ׳ר **מחדש מאפס** עם שני מצבי הפעלה:
-
-### מצב 1 — "ביקורת מהירה" (ללא מיקום)
-- המנהל לוחץ "פתח ביקורת מהירה".
-- בוחר אילו כיתות כלולות.
-- כל רכז כיתה רלוונטי מקבל push + רואה מסך מיוחד בדשבורד שלו.
-- הרכז מסמן כל תלמיד ב־3 לחיצות: **בישיבה / בחוץ עם אישור / בחוץ בלי אישור**.
-- תלמידים שכרגע ב־OFF_CAMPUS עם יציאה מאושרת — **מסומנים מראש אוטומטית**.
-- המנהל רואה real-time דשבורד מסכם של כל הכיתות.
-- ניתן לרענן את הדף — הסשן ממשיך לחיות ב־DB.
-
-### מצב 2 — "ביקורת מיקום חי"
-- המנהל לוחץ "פתח ביקורת מיקום".
-- Push נשלח לכל הסלולרים שמחוברים.
-- אפליקציה נפתחת אוטומטית → דורשת מיקום → שולחת ל־DB.
-- המנהל רואה דשבורד חי עם:
-  - **Heatmap של כיתות** — אילו הגיבו (אחוזי מענה), אילו לא.
-  - **Grid של כרטיסי כיתות** — כל כיתה עם כרטיסי תלמידים שזזים פנימה בזמן אמת.
-  - **טבלה מסוננת** — סטטיסטיקה בולטת, פילטרים מהירים.
-  - **מפת Leaflet** — נקודות צבעוניות בחברון.
-- צבעי מרחק: **ירוק** ≤ 300m, **כחול** 300m–1km, **כתום** 1–5km, **אדום** > 5km.
-- תלמיד "מחוץ לטווח" מקבל **קוביה אדומה מהבהבת + צלצול** וגם נשמר ב־alert log.
-- מצב הקרנה — full-screen, טיפוגרפיה ענקית, רוטציה אוטומטית בין תצוגות.
-
-### מאחורי הקלעים
-- **טבלת `audit_sessions`** + **`audit_responses`** = source of truth. הכל ב־DB.
-- **Supabase Realtime** מזרים שינויים לדשבורד המנהל.
-- **שמירה מלאה לכל ביקורת** — דף "ביקורות קודמות" מאפשר השוואות.
-
----
-
-## 2. מטרות עסקיות
-
-| # | מטרה | מדד הצלחה |
-|---|------|------------|
-| M1 | המנהל יודע תוך 60 שניות מי בישיבה ומי לא | זמן עד שהדשבורד מוצג מלא (TTI Live Data) |
-| M2 | רכז מוסיף ערך ולא תקלה | זמן ממוצע לרכז לסיים ביקורת ידנית לכיתה של 25 < 90 שניות |
-| M3 | אין אובדן נתונים בריענון | 100% מ־refreshes שומרים מצב מלא |
-| M4 | נתונים זמינים להשוואה | כל ביקורת נשמרת, ניתנת לפתיחה ולהשוואה אחורה ב־30 ימים |
-| M5 | הנתונים "קופצים" — תחושת שליטה | latency עדכון real-time < 800ms מרגע איסוף בצד התלמיד עד הצגה אצל המנהל |
-| M6 | רכז כיתה רואה רק את הכיתה שלו | אכיפת RLS + UI |
-| M7 | מסך מתאים גם לצג גדול | מצב הקרנה עם פונט > 28pt וקונטרסט גבוה |
-
----
-
-## 3. נקודות הכאב במצב הנוכחי
-
-מהסקירה של הקוד הקיים, אלה כל הבעיות שמצדיקות שכתוב מלא:
-
-### בעיות מבניות
-1. **אין טבלת DB** לסשני ביקורת — כל המידע נשמר ב־React state, חוזר לאפס בריענון.
-2. **`students.lastLocation`** משמש כ־source — נדרס כל ביקורת חדשה, אין היסטוריה.
-3. **רק 15 שניות timeout** לאיסוף מיקום — לא מספיק לסלולרי GPS איטי.
-4. **לא מנצלים את `push_token`** — Push לא יוצא, רק Realtime broadcast (שעובד רק על אפליקציות פתוחות).
-
-### בעיות UX
-5. **המנהל מסתכל על טבלה אפורה** ללא תחושת live action.
-6. **אין חלוקה ויזואלית לפי כיתות** — קשה לתפוס מי לא הגיב.
-7. **אין מפה** — קשה לראות איפה התלמידים מפוזרים.
-8. **רכז במצב manual** מסמן בלי שום הקשר — אין preselection של תלמידים שכבר ב־OFF_CAMPUS.
-9. **אין מסך סיכום אחרי "סיים"** — המנהל סגר, נעלם הכל.
-10. **אין מצב הקרנה** — בלתי קריא על צג חדר ישיבות.
-
-### בעיות טכניות
-11. **Broadcast רק על ערוץ אחד `location-requests`** — אם המכשיר ישן/נחנק, מפסיד.
-12. **אין re-try / heartbeat** — אם תלמיד היה offline 30 שניות באמצע ביקורת, הוא מפסיד.
-13. **אין ולידציה של accuracy** — מקבל מיקום עם רדיוס שגיאה של 1km כאילו הוא 5m.
-14. **אין log לפעולת המנהל** — מי פתח, מתי, איזה תאריך, אילו כיתות.
+He taps "אשר". A spinner appears for two seconds. Then: "✓ נשלח, תודה". The sheet disappears. He returns to his gemara.
 
----
-
-## 4. עקרונות מנחים (Iron Rules)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ עקרון 1: ה־DB הוא ה־Source of Truth                          │
-│ - סשן חי = שורה ב־audit_sessions עם status='ACTIVE'           │
-│ - כל refresh של מנהל/רכז שואל מהדb, לא מהזיכרון              │
-│                                                              │
-│ עקרון 2: כל לחיצה = audit_event ב־DB                          │
-│ - הרכז מסמן "בישיבה" → INSERT/UPDATE ב־audit_responses        │
-│ - השינוי משודר ב־Realtime לדשבורד המנהל                       │
-│                                                              │
-│ עקרון 3: שני מצבי הפעלה — אבל סכמת DB אחת                    │
-│ - mode='MANUAL' או mode='LOCATION'                            │
-│ - audit_responses תקף לשני המצבים, עם עמודות אופציונליות     │
-│                                                              │
-│ עקרון 4: רכז = view-only על ביקורת מיקום                     │
-│ - רכז אינו פותח ביקורת מיקום                                  │
-│ - רכז רואה only את הכיתה שלו                                  │
-│ - רכז יוזם רק ביקורת ידנית לכיתה שלו (אם בכלל)                │
-│                                                              │
-│ עקרון 5: Push + Realtime ביחד, לא במקום זה את זה              │
-│ - Push מעיר את האפליקציה (גם אם סגורה)                        │
-│ - Realtime מתחבר ברגע שהיא נפתחת                              │
-│                                                              │
-│ עקרון 6: שום נתון לא נדרס                                     │
-│ - audit_responses היא append-only מבחינה לוגית                │
-│ - שינוי דרגה (בישיבה→בחוץ) = שורה חדשה ב־audit_response_log  │
-│                                                              │
-│ עקרון 7: עיצוב — calm but alert                               │
-│ - 90% מהזמן: ירוק, רגוע, שקט                                 │
-│ - חריגות: אדום בולט, אנימציה, סאונד                          │
-└─────────────────────────────────────────────────────────────┘
-```
+What made this experience good:
 
----
+- One screen, no scrolling.
+- Plain language about retention.
+- A clear refusal path that doesn't penalize him.
+- Two seconds of friction, then he is done.
 
-# חלק ב׳ — מודל הנתונים
+## 8.5 The five things a great audit UX never does
 
-## 5. ארכיטקטורה ברמה גבוהה
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│   ┌─────────┐                ┌─────────────┐                    │
-│   │ Manager │  לחיצה         │ admin/audit │                    │
-│   │ (Web)   │ ────────────►  │   /new      │                    │
-│   └─────────┘                └──────┬──────┘                    │
-│                                     │                            │
-│                                     ▼                            │
-│                          ┌─────────────────────┐                │
-│                          │ RPC: open_audit     │                │
-│                          │ (mode, classIds)    │                │
-│                          └──────────┬──────────┘                │
-│                                     │                            │
-│                                     ▼                            │
-│                          ┌─────────────────────┐                │
-│                          │ INSERT audit_sessions│                │
-│                          │ status='ACTIVE'      │                │
-│                          └──────────┬──────────┘                │
-│                                     │                            │
-│              ┌──────────────────────┼──────────────────────┐    │
-│              ▼                      ▼                      ▼    │
-│       ┌────────────┐         ┌────────────┐        ┌────────────┐
-│       │  Realtime  │         │ Edge Func: │        │ Realtime   │
-│       │  broadcast │         │ send-audit-│        │  broadcast │
-│       │  → manager │         │   push     │        │  → students│
-│       └──────┬─────┘         └──────┬─────┘        └──────┬─────┘
-│              │                      │                      │    │
-│              ▼                      ▼                      ▼    │
-│   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐ │
-│   │ Manager dashboard│  │ Push to all push │  │ Students     │ │
-│   │ subscribes to    │  │ subscriptions    │  │ phones get   │ │
-│   │ audit_responses  │  │ + supervisors    │  │ push +       │ │
-│   │ for session_id   │  │                  │  │ auto-open    │ │
-│   └──────────────────┘  └──────────────────┘  └──────┬───────┘ │
-│                                                       │         │
-│                                                       ▼         │
-│                                          ┌──────────────────┐   │
-│                                          │ Student app      │   │
-│                                          │ collects GPS     │   │
-│                                          │ → RPC submit_    │   │
-│                                          │   audit_response │   │
-│                                          └──────┬───────────┘   │
-│                                                 │               │
-│                                                 ▼               │
-│                                  ┌────────────────────────┐    │
-│                                  │ INSERT audit_responses │    │
-│                                  │ + UPDATE session stats │    │
-│                                  └────────┬───────────────┘    │
-│                                           │                     │
-│                                           ▼                     │
-│                                  ┌────────────────────┐         │
-│                                  │ Realtime: pg_changes│         │
-│                                  │ → Manager dashboard │         │
-│                                  │   (data "jumps in") │         │
-│                                  └────────────────────┘         │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+1. **It never makes the admin reload to see new data.** Realtime is invisible plumbing.
+2. **It never shows the supervisor data from a class that isn't theirs.** Scope is total.
+3. **It never asks the student for permission for something it isn't doing.** Consent must be specific.
+4. **It never shows a loading spinner without telling the user what it is loading.** Spinners with no label feel broken.
+5. **It never displays a category color without a label.** Color alone is not communication.
 
 ---
 
-## 6. סכמת DB חדשה — Audit Sessions
-
-טבלאות חדשות (כל אחת תיווצר במיגרציה נפרדת):
-
-### `audit_sessions`
-שורה אחת לכל סשן ביקורת. נשמר לתמיד.
-
-| עמודה | טיפוס | תיאור |
-|-------|-------|-------|
-| `id` | UUID PK | מזהה סשן |
-| `mode` | TEXT NOT NULL | `'MANUAL'` או `'LOCATION'` |
-| `status` | TEXT NOT NULL | `'ACTIVE'` / `'CLOSED'` / `'ABORTED'` |
-| `class_ids` | TEXT[] | רשימת `classId` שכלולות בביקורת |
-| `total_students` | INT | מספר תלמידים כולל בכיתות הנבחרות |
-| `started_by` | TEXT | actor (admin / supervisor PIN) |
-| `started_at` | TIMESTAMPTZ DEFAULT NOW() | זמן פתיחה |
-| `closed_at` | TIMESTAMPTZ | זמן סגירה (NULL כל עוד ACTIVE) |
-| `notes` | TEXT | הערה חופשית של המנהל |
-| `created_at / updated_at` | TIMESTAMPTZ | אודיט |
-
-**Indices:**
-- `(status, started_at DESC)` — לחיפוש סשן ACTIVE.
-- `(started_at DESC)` — לדף "ביקורות קודמות".
-
-**Constraint:** רק סשן אחד `ACTIVE` בכל רגע (שאילתת `WHERE status='ACTIVE'` תמיד מחזירה ≤ 1).
-
-### `audit_responses`
-שורה לכל תלמיד שנכלל בביקורת. נוצרת אוטומטית בעת פתיחת סשן (לכל תלמיד בכיתה הנבחרת), ומתעדכנת כשמגיע נתון.
-
-| עמודה | טיפוס | תיאור |
-|-------|-------|-------|
-| `id` | UUID PK | |
-| `session_id` | UUID FK → audit_sessions (CASCADE) | |
-| `student_id` | UUID FK → students (CASCADE) | |
-| `class_id` | TEXT NOT NULL | denormalized |
-| `category` | TEXT NOT NULL DEFAULT 'PENDING' | ראה למטה |
-| `marked_by` | TEXT | `'AUTO_GPS'` / `'AUTO_DEPARTURE'` / `'SUPERVISOR:{pin}'` / `'ADMIN'` |
-| `marked_at` | TIMESTAMPTZ | זמן עדכון אחרון |
-| `gps_lat` | FLOAT8 | מילוי רק במצב LOCATION |
-| `gps_lng` | FLOAT8 | |
-| `gps_accuracy_m` | FLOAT8 | רדיוס שגיאה ב־meters |
-| `distance_from_campus_m` | FLOAT8 | מחושב |
-| `distance_bucket` | TEXT | `'GREEN'` / `'BLUE'` / `'ORANGE'` / `'RED'` / `null` |
-| `gps_status` | TEXT | `'OK'` / `'DENIED'` / `'TIMEOUT'` / `'OFFLINE'` / `'UNAVAILABLE'` |
-| `departure_id` | UUID FK → departures | אם קטגוריה=BHUTZ_PERMIT |
-| `note` | TEXT | אם הרכז סימן "במחלה" וכו׳ |
-| `created_at / updated_at` | TIMESTAMPTZ | |
-
-**ערכי `category` (החלטה סופית: 3 קטגוריות סימון + 2 system states):**
-- `PENDING` — *system state* — עוד לא ידוע (כברירת מחדל; הרכז לא מסמן את זה ידנית)
-- `IN_YESHIVA` — בישיבה (= "נוכח")
-- `OUT_PERMIT` — בחוץ עם אישור
-- `OUT_NO_PERMIT` — בחוץ בלי אישור
-- `UNKNOWN` — *system state* — GPS דחה / Offline (רק במצב LOCATION; הרכז לא מסמן את זה ידנית)
-
-> הערה: במצב **MANUAL** הרכז רואה 3 כפתורים בלבד — נוכח / בחוץ עם אישור / בחוץ בלי אישור.
-> במצב **LOCATION** המערכת מסמנת אוטומטית מ־GPS, ורכז מתקן רק את ה־UNKNOWN-ים (תלמידים שלא הגיבו).
-> אם יש צורך לסמן תלמיד חולה/בהלוויה/מצב מיוחד — הרכז ישתמש בשדה `note` החופשי על הקטגוריה שבחר. אין קטגוריה נפרדת לזה.
-
-**Indices:**
-- `(session_id, category)` — תצוגת kpi בדשבורד.
-- `(session_id, class_id, category)` — Heatmap לפי כיתה.
-- `(student_id, marked_at DESC)` — היסטוריית התלמיד.
-
-**Constraint:** `UNIQUE(session_id, student_id)` — תלמיד אחד פעם אחת בסשן.
-
-### `audit_response_log`
-טבלת trail. כל שינוי קטגוריה ב־audit_responses → INSERT כאן (DB trigger).
-
-| עמודה | טיפוס |
-|-------|-------|
-| `id` | UUID PK |
-| `response_id` | UUID FK |
-| `session_id` | UUID FK |
-| `student_id` | UUID FK |
-| `from_category` | TEXT |
-| `to_category` | TEXT |
-| `actor` | TEXT |
-| `changed_at` | TIMESTAMPTZ |
-
-מטרת הטבלה: ביקור חוזר ב־post-mortem (למשל לראות שהרכז סימן בישיבה, אבל אחר כך מישהו תיקן לבחוץ).
-
-### `audit_alerts`
-שורה לכל "אזעקה" — תלמיד שנמצא מחוץ לטווח 5km.
-
-| עמודה | טיפוס |
-|-------|-------|
-| `id` | UUID PK |
-| `session_id` | UUID FK |
-| `student_id` | UUID FK |
-| `triggered_at` | TIMESTAMPTZ |
-| `distance_m` | FLOAT8 |
-| `gps_lat / gps_lng` | FLOAT8 |
-| `acknowledged_by` | TEXT (nullable) |
-| `acknowledged_at` | TIMESTAMPTZ (nullable) |
-| `note` | TEXT |
+# Part 9 — Design Principles
 
----
+This section names the design rules. They are not stylistic preferences. They are constraints.
 
-## 7. מצבי תלמיד בזמן ביקורת
+## 9.1 Visual hierarchy
 
-```
-                        ┌────────────────────┐
-                        │     PENDING        │ ← מצב התחלתי
-                        │  (טרם זוהה)        │
-                        └─────────┬──────────┘
-                                  │
-                ┌─────────────────┼─────────────────┐
-                ▼                 ▼                 ▼
-   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-   │   IN_YESHIVA     │ │   OUT_PERMIT     │ │  OUT_NO_PERMIT   │
-   │  (≤300m / רכז)   │ │ (departure ACTIVE│ │  (300m+ / רכז)   │
-   │     ירוק         │ │  או רכז סימן)    │ │      אדום        │
-   └──────────────────┘ │      כחול        │ └──────────────────┘
-                        └──────────────────┘
-                                  │
-                                  ▼
-                        ┌──────────────────┐
-                        │     UNKNOWN      │ ← GPS denied / timeout / offline
-                        │  (לא ידוע — אפור)│   רכז יחליט
-                        └──────────────────┘
-                                  │
-                                  ▼
-                        ┌──────────────────┐
-                        │  EXCUSED_SICK    │ ← רק רכז יכול לסמן
-                        │   (סגול)         │
-                        └──────────────────┘
-```
+The audit dashboard's hierarchy descends through three tiers:
 
-**מעברי מצב מותרים:**
-- `PENDING` → כל המצבים האחרים (autonomously by GPS, or by Supervisor click)
-- `UNKNOWN` → `IN_YESHIVA` / `OUT_PERMIT` / `OUT_NO_PERMIT` / `EXCUSED_SICK` (רק הרכז)
-- כל מצב → כל מצב (רק הרכז / המנהל) — אבל כל שינוי נרשם ב־audit_response_log
+- **Tier 1 — The Answer.** The KPI strip. Six big numbers. They are the single most important visual elements on the page. They are 3× the type size of body text. They never scroll out of view. They animate on change.
+- **Tier 2 — The Texture.** The grid, heatmap, map, or feed view. These show *how* the Tier 1 numbers were reached. They are dense but readable, organized by class, and convey at a glance which classes need attention.
+- **Tier 3 — The Detail.** Alerts, activity feed, individual response drawers. These appear when called for, not by default. They are smaller, denser, and provide forensic detail.
 
----
+The hierarchy must be visible on a 375-pixel-wide mobile viewport without scrolling past Tier 1.
 
-## 8. מצבי סשן ביקורת
+## 9.2 Layout system
 
-```
-   ┌──────────────────────┐
-   │       (אין סשן)       │
-   └───────────┬──────────┘
-               │ admin presses "פתח ביקורת"
-               ▼
-   ┌──────────────────────┐
-   │       ACTIVE         │ ← קולט מענים בזמן אמת
-   └──────────┬───────────┘
-              │
-       ┌──────┼──────────┐
-       │      │          │
-       ▼      ▼          ▼
-   ┌────────────┐  ┌────────────┐  ┌────────────┐
-   │   CLOSED   │  │  ABORTED   │  │  TIMED_OUT │
-   │ (סיים ידני)│  │  (admin    │  │ (24h עברו  │
-   │            │  │   ביטל)    │  │  בלי close)│
-   └────────────┘  └────────────┘  └────────────┘
-```
+A 12-column grid on desktop (1024 px and above). On tablet (768–1023 px), 8-column. On mobile (under 768 px), single-column with horizontal scroll only for tabular data. Gutters are 16 px on mobile, 24 px on tablet, 32 px on desktop. The grid is enforced via Tailwind's container utilities; no ad-hoc magic numbers in components.
 
-**TIMED_OUT** — סשן שנשכח. cron מקצר אוטומטית אחרי 24h של ACTIVE, כדי לא להחזיק "סשן רפאים".
+The KPI strip is always full width. It is a single row of 6 cards on desktop and tablet, and a 2-column × 3-row grid on mobile (preserving readability of large numbers).
 
----
+The class grid is responsive: 4 columns on desktop, 3 on tablet, 2 on small tablet, 1 on mobile. Each class card has a fixed aspect ratio (4:3) regardless of viewport, so layouts don't reflow as data arrives.
 
-## 9. מכונת המצבים — כללי מעבר
-
-| מצב נוכחי | פעולה | מצב חדש | actor | תוצאת לוואי |
-|-----------|--------|----------|-------|--------------|
-| `PENDING` | GPS מגיע, מרחק ≤ 300m | `IN_YESHIVA` | `AUTO_GPS` | distance_bucket=GREEN |
-| `PENDING` | GPS מגיע, 300m–1km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=BLUE; alert? לא — קרוב לישיבה |
-| `PENDING` | GPS מגיע, 1km–5km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=ORANGE; trigger alert |
-| `PENDING` | GPS מגיע, > 5km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=RED; trigger alert |
-| `PENDING` | departure.status=ACTIVE | `OUT_PERMIT` | `AUTO_DEPARTURE` | departure_id מולא |
-| `PENDING` | GPS denied / timeout | `UNKNOWN` | `AUTO_GPS` | gps_status מולא |
-| כל מצב | רכז סימן ידני | היעד | `SUPERVISOR:{pin}` | log אירוע |
-| כל מצב | מנהל override | היעד | `ADMIN` | log אירוע |
+## 9.3 Information density
 
----
+The product targets a **medium-high** density: enough information to be useful at a glance, but not so much that scanning is required. The KPI strip shows six categories; not seventeen. The class card shows class name, progress, four small per-category counts; not a sparkline of historical trends. Density is achieved by *removing* information, not by miniaturizing it.
 
-## 10. כללי שימור היסטוריה
+## 9.4 Typography
 
-- **כל ביקורת** נשמרת לתמיד (אלא אם המנהל ימחק ידנית; אין מחיקה אוטומטית).
-- **audit_response_log** — מחיקה אוטומטית אחרי 90 ימים (cron). זה זנב אבחוני, לא חיוני אחרי תקופה.
-- **audit_alerts** — שמירה לתמיד. שווה זהב לדוחות הנהלה.
-- **`students.lastLocation`** — נמשיך לעדכן אותו לתאימות לאחור, אבל לא יותר source for audit.
+Hebrew typography is its own discipline; the team should not assume Latin-script defaults transfer.
 
----
+- **Family.** Heebo as primary (free, well-balanced for Hebrew and Latin, available on Google Fonts). Frank Ruhl Libre as a possible secondary for headers (more traditional, slower to read, used sparingly).
+- **Sizing.** Body text 16 px. Card titles 18 px. KPI numbers 48 px on desktop, 36 px on mobile, **tabular-nums** enforced so numbers don't jitter as they animate.
+- **Weight.** Body regular (400). Card titles semibold (600). KPI numbers black (900). Avoid italics — Hebrew italics look like badly-printed text.
+- **Line height.** Hebrew needs less line-height than English. Body at 1.4, headlines at 1.2.
+- **Letter spacing.** None. Hebrew does not benefit from tracking.
+- **Numbers.** Always rendered in an `<span dir="ltr">` enclave so they read left-to-right even when surrounded by Hebrew. Time formats use 24-hour. Distance in meters is rendered as "218m" or "1.2 ק"מ".
+- **Mixed text.** "9 boys are at 3.2 km" — handle with `unicode-bidi: plaintext` on the container so each token resolves direction correctly.
 
-# חלק ג׳ — שני מצבי ביקורת
-
-## 11. השוואת המצבים בטבלה
-
-| היבט | מצב מהיר (MANUAL) | מצב מיקום (LOCATION) |
-|------|---------------------|-----------------------|
-| מי יוזם | **רק מנהל** (לכל הכיתות או מבחר) | **רק מנהל** |
-| שולח push? | כן — רק לרכזים | כן — לכל התלמידים והרכזים |
-| דורש GPS? | לא | כן |
-| מי מסמן? | רכז ידנית | אוטומטי לפי GPS + רכז מתקן ל־UNKNOWN |
-| זמן ממוצע לסיום | ~90 שניות לכיתה | ~3 דקות (חיכוי ל־GPS) |
-| תלות באינטרנט סלולרי | לא | כן |
-| מציג מפה? | לא | כן |
-| מציג Heatmap? | כן (פשוט יותר) | כן (מלא) |
-| נתונים שמורים ב־DB? | כן — אותה סכמה | כן — אותה סכמה |
-| מתי להשתמש? | בדיקה מהירה / יומיומית | בדיקה מעמיקה / אירוע חריג |
+## 9.5 Color system — semantic, not decorative
 
----
+Colors carry meaning. The audit color set is purpose-built and minimal.
 
-## 12. מתי להשתמש בכל מצב — הנחיות למנהל
+| Token | Hex (light) | Meaning |
+|---|---|---|
+| `--audit-green` | `#10b981` | Present, on campus, success |
+| `--audit-blue` | `#3b82f6` | Out with permit, in immediate area |
+| `--audit-orange` | `#f59e0b` | In Hebron metro area, low-priority concern |
+| `--audit-red` | `#ef4444` | Out without permit, OR out-of-area distance, OR critical alert |
+| `--audit-amber` | `#fbbf24` | Unknown — failed to determine |
+| `--audit-gray` | `#6b7280` | Pending — no answer yet |
 
-**מצב מהיר** (ברירת מחדל היומיומית):
-- כל שיעור בוקר, רוצה לוודא 9:00 שכולם.
-- אחרי ארוחת צהריים — מי חזר.
-- לפני שיחה מיוחדת — מי באולם.
+Each token has a dark-mode counterpart (lower saturation, higher luminance), a pale-background variant (10% opacity equivalent), and a border variant (full saturation).
 
-**מצב מיקום**:
-- חשד שתלמיד נעדר מעבר לישיבה.
-- אירוע ביטחוני באזור.
-- בקרת רבעון — אחת לשבועיים, מעמיק.
-- כאשר הרכז לא בנמצא והמנהל רוצה אובייקטיביות.
+The product introduces no other colors for status. This list is closed. New product situations that need a color use a category from this list; if the situation doesn't fit any category, the category set is reconsidered, not extended.
 
-המסך של "פתיחת ביקורת" מציג בבירור את שני האפשרויות כשני כפתורים גדולים, עם הסבר 1 שורה לכל אחד.
+## 9.6 Iconography
 
----
+Icons accompany categories and never substitute for the category label. The icon set is from `lucide-react`. Mapping:
 
-# חלק ד׳ — מצב 1: ביקורת מהירה (MANUAL)
-
-## 13. תרחיש שימוש
-
-> **שעה 8:50.** המנהל הגיע לישיבה. רוצה לדעת מהר מי באולם. נכנס לאדמין → "ביקורת מהירה". בוחר את כל הכיתות. לוחץ "התחל".
->
-> כל 16 הרכזים מקבלים push: "ביקורת מהירה — סמן את כיתתך עכשיו". פותחים את האפליקציה (אם סגורה — אוטומטית). רואים מסך שמציג:
-> - כותרת: "ביקורת פעילה — סמן כל תלמיד"
-> - רשימה של 25 תלמידים — לכל אחד 3 כפתורים: ✅ בישיבה / 🔵 בחוץ עם אישור / 🔴 בחוץ בלי אישור
-> - 4 תלמידים שכרגע ב־OFF_CAMPUS עם יציאה מאושרת — **מסומנים כבר אוטומטית בכחול**, עם פתיח: "ביציאה מאושרת עד 11:00".
-> - 1 תלמיד שיש לו "בקשת אישור pending" — מסומן בצהוב: "בקשה ממתינה — האם נמצא?"
->
-> הרכז עובר תלמיד אחר תלמיד: ✅ ✅ ✅ ✅ ✅ ❌ ✅ ✅ — כל לחיצה מעדכנת את ה־DB. סטטוס "סומן: 16 / 25" מתעדכן.
->
-> בו זמנית המנהל רואה דשבורד בזמן אמת:
-> - **גריד של 16 כיתות**, כל כיתה היא כרטיס.
-> - בכרטיס: שם הכיתה, פס התקדמות `■■■■■■■░░ 16/25`, וכמה צבעים: ✅ 14 🔵 2 🔴 0 ⚪ 9.
-> - כיתה שסיימה — הכרטיס מתמלא בצבע ירוק רך + ✓ קטן.
-> - כיתה שעוד לא התחילה — צבע אפור.
-> - כיתה עם 🔴 (בחוץ בלי אישור) > 0 — מסומנת באדום מהבהב.
->
-> תוך 4 דקות כל 16 הכיתות סיימו. המנהל לוחץ "סיים ביקורת". נפתח Modal: "✅ הביקורת הסתיימה. 372/381 בישיבה. 6 בחוץ עם אישור. 3 בחוץ בלי אישור. [פתח דוח מלא]". לחיצה על הדוח → דף נחיתה עם פירוט מלא.
+- `IN_YESHIVA` — Check
+- `OUT_PERMIT` — LogOut
+- `OUT_NO_PERMIT` — AlertOctagon
+- `UNKNOWN` — HelpCircle
+- `PENDING` — Clock
+- Alert (any) — AlertTriangle
+- Map / location — MapPin
+- Audit-mode manual — Zap
+- Audit-mode location — MapPin (deliberate reuse — the location mode *is* the map)
+- Projection mode — Monitor
 
----
+## 9.7 Motion
 
-## 14. תהליך ההפעלה — מצב 1
+Motion principles, in order of priority:
 
-### 14.1 ממשק המנהל
+1. **Motion reveals causality.** A new response arriving in the activity feed slides in from the top because that mirrors the flow of time. A class card whose progress increased animates its progress bar so the eye tracks the change. Motion that doesn't communicate causality (e.g. random card jitter on hover) is removed.
+2. **Motion stays under 600 ms.** Longer animations feel slow. Shorter ones feel jittery.
+3. **Motion uses ease-out, not ease-in-out.** Things settle into place; they don't drift.
+4. **One thing at a time.** Two simultaneous animations compete for attention. The dashboard only animates one element per "tick" — the element most relevant to the change.
+5. **`prefers-reduced-motion` is honored.** When set, all motion drops to fades only, no slides, no scales.
+6. **The alert modal is the exception.** It uses a pulse animation that *is* the design — the institutional gravitas of the alert depends on the pulse. It does not honor reduced-motion (but the pulse is reduced to a single half-pulse for that case).
 
-מסך פתיחת ביקורת (`/admin/audit/new`):
+## 9.8 State design — empty, loading, error, success
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  ←  פתח ביקורת חדשה                                          │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│   בחר מצב ביקורת:                                            │
-│                                                              │
-│   ┌─────────────────────┐    ┌─────────────────────┐         │
-│   │  ⚡ ביקורת מהירה    │    │  📍 ביקורת מיקום    │         │
-│   │                     │    │                     │         │
-│   │  הרכזים מסמנים      │    │  הסלולרים שולחים   │         │
-│   │  ידנית את כיתתם     │    │  GPS אוטומטית      │         │
-│   │                     │    │                     │         │
-│   │  זמן: ~3 דק         │    │  זמן: ~5 דק        │         │
-│   │  [בחר →]            │    │  [בחר →]           │         │
-│   └─────────────────────┘    └─────────────────────┘         │
-│                                                              │
-│                                                              │
-│   ⚠ סשן פעיל כעת? לא  ✓                                      │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
+For each major screen, all four states must be explicitly designed. **The states are part of the product, not after-thoughts.**
 
-### 14.2 צעד 2 — בחירת כיתות
+**Empty.** The landing page when no audits have ever been run shows a clipboard icon, a one-line invitation ("ביקורת ראשונה נמצאת מעבר לכפתור הזה"), and a single large "פתח ביקורת" button. Not a list of zero items.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  ←  ביקורת מהירה — בחר כיתות                                 │
-├──────────────────────────────────────────────────────────────┤
-│  ☑ בחר את כל הכיתות (16 / 381 תלמידים)                       │
-│  ─────────────────────────                                   │
-│  שיעור א:                                                    │
-│   ☑ הרב אבישי (26)    ☑ הרב בועז (24)    ☑ הרב הלל (16)     │
-│   ☑ הרב יעקב (25)    ☑ הרב משה (20)     ☑ הרב תמיר (28)    │
-│  ─────────────────────────                                   │
-│  שיעור ב:                                                    │
-│   ☑ הרב אהרלה (23)   ☑ הרב דוד לנדאו (9)  ☑ הרב דודו (27)  │
-│   ☑ הרב מוטי (24)                                            │
-│  ─────────────────────────                                   │
-│  ... (וכן הלאה)                                              │
-│                                                              │
-│  הערה (אופציונלי): ┌────────────────────────────┐           │
-│                    │ ביקורת בוקר רגילה          │           │
-│                    └────────────────────────────┘           │
-│                                                              │
-│                              [ביטול]   [פתח ביקורת ➜]       │
-└──────────────────────────────────────────────────────────────┘
-```
+**Loading.** Loading states use **skeleton screens**, not centered spinners. The skeleton mirrors the eventual layout: a gray bar where the KPI strip will be, a grid of gray cards where class cards will be. The eye prepares for what's about to arrive; the page does not jolt when content lands.
 
-### 14.3 צעד 3 — סשן ACTIVE
-
-ברגע לחיצה על "פתח ביקורת":
-1. **Frontend** קורא ל־RPC `open_audit('MANUAL', class_ids, note)`.
-2. ה־RPC:
-   - מבטל כל סשן ACTIVE קיים (UPDATE לסטטוס ABORTED).
-   - INSERT שורה חדשה ל־`audit_sessions` עם status=ACTIVE.
-   - INSERT 381 שורות (או כמספר התלמידים בכיתות הנבחרות) ל־`audit_responses` עם category=PENDING.
-   - **עבור תלמידים שיש להם departure ACTIVE כרגע** — מציב category=OUT_PERMIT, marked_by=AUTO_DEPARTURE, ממלא departure_id.
-   - מחזיר את ה־session_id.
-3. **Frontend** מעבר ל־`/admin/audit/{sessionId}/live`.
-4. **Edge function** `send-audit-push` נקרא ברקע — שולח push לכל הרכזים של הכיתות הרלוונטיות.
-5. **Realtime**: המנהל מנוי על אירועי `audit_responses` עם `session_id=X`.
+**Error.** Errors are categorized: network errors (recoverable, "נסה שוב"), permission errors (informational, no retry), data errors (escalate, "פנה למנהל"). Each category has a designed component with appropriate iconography and clear next action.
 
----
+**Success.** Successes are quiet. A toast on "audit closed" — green, three seconds, dismissable. No confetti. No celebratory modal. The audit completing successfully is the expected outcome; making it a celebration would imply the product expected failure.
 
-## 15. דשבורד מנהל — מצב 1 (Live View)
+## 9.9 Live-data design — making realtime calm
 
-### 15.1 Layout כללי
+The animation pattern for arriving data is deliberate:
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│  ← ביקורת פעילה — מצב מהיר                       [⏸ הקרנה]   │
-│  פתיחה: 08:50  |  משך: 02:34  |  16 כיתות  |  381 תלמידים    │
-├────────────────────────────────────────────────────────────────┤
-│                                                                │
-│   ┌───────── KPI Row ─────────┐                               │
-│   │ ✅ 358    🔵 8     🔴 2    ⚪ 13    ⏳ 0   │                │
-│   │ בישיבה   ביציאה   בחוץ   לא ידוע  ממתין │                │
-│   └────────────────────────────┘                               │
-│                                                                │
-│   ┌─────────────── Heatmap of Classes ────────────────────┐   │
-│   │  כל ריבוע = כיתה. צבע = אחוז סימון.                   │   │
-│   │  ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐                    │   │
-│   │  │██││██││██││▓▓││██││██││██││██│  שיעור א           │   │
-│   │  └──┘└──┘└──┘└──┘└──┘└──┘└──┘└──┘                    │   │
-│   │  ┌──┐┌──┐┌──┐┌──┐                                    │   │
-│   │  │██││▓▓││██││██│                  שיעור ב            │   │
-│   │  └──┘└──┘└──┘└──┘                                    │   │
-│   │   ... ושאר השיעורים                                   │   │
-│   │  מקרא: ⬛ הסתיים (100%)  ▓ בעבודה  ⬜ לא התחיל      │   │
-│   └───────────────────────────────────────────────────────┘   │
-│                                                                │
-│   ┌─────────────── Class Grid ──────────────────────────────┐ │
-│   │  ┌────────────────────────────────────────────────┐    │ │
-│   │  │ 🔴 כיתה הרב יעקב            ■■■■■■■■░░ 21/25  │    │ │
-│   │  │ ✅ 19  🔵 1  🔴 1  ⚪ 0                        │    │ │
-│   │  │ ⚠ אזעקה: יוסי כהן — בחוץ בלי אישור            │    │ │
-│   │  └────────────────────────────────────────────────┘    │ │
-│   │  ┌────────────────────────────────────────────────┐    │ │
-│   │  │ ✓ כיתה הרב הלל              ■■■■■■■■■■ 16/16  │    │ │
-│   │  │ ✅ 16  🔵 0  🔴 0  ⚪ 0    [פתח →]             │    │ │
-│   │  └────────────────────────────────────────────────┘    │ │
-│   │  ┌────────────────────────────────────────────────┐    │ │
-│   │  │ ⏳ כיתה הרב משה             ░░░░░░░░░░ 0/20   │    │ │
-│   │  │ הרכז עוד לא נכנס. שולח push חוזר? [שלח]      │    │ │
-│   │  └────────────────────────────────────────────────┘    │ │
-│   │  ... (16 כיתות)                                          │ │
-│   └─────────────────────────────────────────────────────────┘ │
-│                                                                │
-│                                                                │
-│                                          [סיים ביקורת ➜]      │
-└────────────────────────────────────────────────────────────────┘
-```
+- Counters in the KPI strip use **CountUp** — they tick smoothly from old value to new over ~600 ms. They do not flip-card or scramble.
+- Activity feed items slide in from the top in 200 ms; the rest of the feed shifts down in 300 ms. The most recent item carries a subtle highlight that fades over 2 seconds.
+- Class cards re-sort gracefully using a Framer Motion layout animation. A card moving from position 7 to position 1 does so over 400 ms; the cards in between shift to make room.
+- The map plays a single dot-drop animation when a new point appears, then settles into a steady-state pulse only for `RED` dots. Steady-state pulsing on every dot would create cognitive load; pulsing only on critical dots creates a *signal*.
 
-### 15.2 התנהגויות
+The aggregate effect should feel like **water filling a glass**, not like **a slot machine**.
 
-- **Heatmap** מתעדכן בכל שינוי. כל ריבוע = כיתה אחת. צבע: גרדיאנט מאפור (0%) → ירוק (100%).
-- **Class Grid** ממוין כך:
-  1. כיתות עם 🔴 (אזעקות) — למעלה.
-  2. כיתות שעוד לא התחילו (PENDING > 50%) — אחר כך.
-  3. כיתות בעבודה.
-  4. כיתות שסיימו — בסוף.
-  כל שינוי במיון מלווה באנימציית layout עדינה (FLIP, framer-motion).
-- **התראת אזעקה** — כשנוצר OUT_NO_PERMIT, האזור של אותה כיתה מהבהב 3 פעמים באדום, ונשמע "ding" קל.
-- **כפתור "שלח push חוזר"** — שולח push יחודי לרכז הזה ("הזכרה: ביקורת ממתינה").
-- **כפתור "סיים ביקורת"** — Modal אישור: "האם לסיים? כל מי שעוד PENDING יסומן כ־UNKNOWN. [ביטול] [סיים]".
+## 9.10 Density and whitespace
 
-### 15.3 לחיצה על כרטיס כיתה → פירוט
+Whitespace is not empty; it is structure. The product reserves whitespace for:
 
-מודאל drawer צד שמראה את 25 התלמידים. המנהל יכול:
-- לראות מי בחר מה.
-- לראות מי הרכז שסימן (audit_response_log).
-- לסמן ידנית (override) — מקטגוריה אחת לאחרת.
-- לראות הערות.
+- The vertical space above and below the KPI strip (24 px) — visual confirmation that the strip is its own region.
+- The internal padding of cards (16 px) — readable spacing from edges.
+- The gap between cards in the grid (12 px) — readable separation without visual fragmentation.
 
-### 15.4 Activity Feed במצב MANUAL — granularity ברמת התלמיד
+Whitespace is **not** used to give every element generous breathing room. The product is information-dense by intent. Generous whitespace at the cost of fitting one class card per screen on mobile is a design regression.
 
-**החלטה חשובה:** במצב MANUAL, המנהל לא רואה רק "16 כיתות + פס התקדמות". הוא רואה **כל פעולה של רכז ברגע שהיא קורית**, כדי שיהיה לו תחושת שליטה מלאה ("מעליה הרכז סימן את דוד את התקדמות").
+## 9.11 Accessibility
 
-Activity Feed קבוע למטה במסך, מציג stream של 20 הסימונים האחרונים:
+WCAG 2.1 AA is the minimum target. Specific requirements appear in §18. Three accessibility principles shape design:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Activity Feed — מי סימן את מי                              │
-├─────────────────────────────────────────────────────────────┤
-│  ✅ 09:17:42  הרב יעקב (רכז) → אברהם כהן: נוכח              │
-│  ✅ 09:17:40  הרב יעקב (רכז) → דוד לוי: נוכח                │
-│  🔴 09:17:38  הרב יעקב (רכז) → יוסי כהן: בחוץ בלי אישור     │
-│  🔵 09:17:35  אוטומטי → נחמן ברגר: בחוץ עם אישור (departure)│
-│  ✅ 09:17:34  הרב הלל (רכז) → משה רוזנברג: נוכח             │
-│  ...                                                         │
-└─────────────────────────────────────────────────────────────┘
-```
+- **Color is never the only signal.** Every colored chip has a label and an icon. Color-blind users see everything.
+- **Focus order matches reading order.** Hebrew RTL means focus moves right-to-left along a row, then to the next row. Test with Tab key, not just mouse.
+- **Live regions are polite, not assertive.** Realtime updates use `aria-live="polite"` so screen readers announce them at sentence boundaries, not mid-word.
 
-- כל שורה נכנסת מלמעלה באנימציה (slide-in 200ms).
-- צבע אייקון לפי קטגוריה: ירוק=נוכח, כחול=עם אישור, אדום=בלי אישור.
-- לחיצה על שורה → פותחת drawer של אותו תלמיד.
-- כפתור "📜 פתח לוג מלא" → מסך שמראה את כל ה־audit_response_log לסשן.
+## 9.12 What the design explicitly avoids
 
-### 15.5 מסך פירוט מלא של תלמידים — Tab נוסף "טבלה"
+- **Gradient backgrounds with movement.** Gimmick.
+- **Glassmorphism / blur effects.** Bad on low-end Android.
+- **Particle effects.** Distracting; communicate nothing.
+- **Achievement-style badges or streaks.** This is not a game.
+- **Avatars.** No student photos in the UI. Names and class identifiers suffice.
+- **Dark patterns of any kind.** The "I cannot now" student refusal must be exactly as prominent as "approve".
 
-במצב MANUAL נוסיף Tab שמראה את **כל 381 התלמידים בטבלה אחת**, ממוינת:
-- עמודות: שם, כיתה, סטטוס נוכחי, סומן ע"י, זמן סימון, הערה.
-- פילטרים: כיתה, סטטוס, "רק שעדיין לא סומנו".
-- חיפוש מהיר בשם.
-- לחיצה על תלמיד → drawer עם היסטוריה + override option.
+---
 
-כך המנהל יכול גם לעקוב per-class (Grid) וגם per-student (Table) — לפי הצורך.
+# Part 10 — System Architecture
 
----
+## 10.1 Architecture goals
 
-## 16. דשבורד רכז כיתה — מצב 1
+The architecture is judged on five axes:
 
-ברגע שהרכז פותח את האפליקציה (או אחרי push):
+1. **Replay-safety.** Any screen, after any disturbance, renders correct state on reload.
+2. **Single source of truth.** No state lives only on the client.
+3. **Concurrency-correctness.** Two admins, two devices, identical view.
+4. **Failure isolation.** Realtime down does not make the product unusable; just less live.
+5. **Operational simplicity.** One team can run it.
 
-### 16.1 Header
+## 10.2 The architecture in one sentence
 
-```
-┌────────────────────────────────────────────────────────────┐
-│  🔔 ביקורת מהירה פעילה — כיתה הרב יעקב                    │
-│  סמן כל תלמיד. נשארו: 9 מתוך 25                            │
-├────────────────────────────────────────────────────────────┤
-```
+The system is a **server-state-of-the-truth, RPC-driven, realtime-pushed, persistent-history** subsystem inside the existing Supabase + React + Vite + Vercel stack.
 
-### 16.2 רשימת תלמידים
+## 10.3 Layer breakdown
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│ 🟢 אברהם כהן                       ✅ נוכח  ← נסמן       │
-├──────────────────────────────────────────────────────────┤
-│ 🟢 דוד לוי                          ✅ נוכח              │
-├──────────────────────────────────────────────────────────┤
-│ 🔵 יוסי גולדמן                      🔵 בחוץ עם אישור     │
-│    יציאה: בית — עד 11:00 ✓ אוטומטי                       │
-├──────────────────────────────────────────────────────────┤
-│ ⚪ נחמן ברגר                                              │
-│    [✅ נוכח]  [🔵 בחוץ עם אישור]  [🔴 בחוץ בלי אישור]    │
-├──────────────────────────────────────────────────────────┤
-│ ⚪ אלון פדידה                                             │
-│    [✅ נוכח]  [🔵 בחוץ עם אישור]  [🔴 בחוץ בלי אישור]    │
-├──────────────────────────────────────────────────────────┤
+┌───────────────────────────────────────────────────────────────────┐
+│ Layer 7 — Browser UI (React, RTL, Tailwind, framer-motion)        │
+│   - Admin dashboard, supervisor panel, student sheet               │
+│   - Replay-safe, idempotent on refresh                             │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 6 — Browser State (Zustand)                                  │
+│   - Mirrors DB state, never overrides it                           │
+│   - Optimistic UI permitted; reconciled with realtime events       │
+│   - One persisted store (audit-ui-store) for tab/preferences only  │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 5 — Client Realtime (Supabase JS)                            │
+│   - postgres_changes subscription per active session               │
+│   - Polling fallback at 30s when no events seen                    │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 4 — Client API Wrapper                                       │
+│   - Thin module wrapping supabase.rpc(...) calls                   │
+│   - Converts snake_case rows to camelCase types at the boundary    │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 3 — Supabase Edge Functions                                  │
+│   - send-audit-push: fan out web push to N students                │
+│   - notify-audit-alert: optional Slack/email on CRITICAL           │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 2 — Postgres RPCs (the contract)                             │
+│   - open_audit, submit_audit_response, close_audit, abort_audit    │
+│   - get_active_audit, get_audit_full, list_past_audits             │
+│   - acknowledge_audit_alert, compute_audit_kpis                    │
+│   - tick_audit_timeout (cron, every 5 minutes)                     │
+├───────────────────────────────────────────────────────────────────┤
+│ Layer 1 — Postgres Tables                                          │
+│   - audit_sessions, audit_responses, audit_alerts                  │
+│   - audit_response_log, audit_push_log                             │
+│   - Realtime publication includes the first three                  │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-**3 קטגוריות בלבד.** הרכז רואה 3 כפתורים גדולים. אם צריך להוסיף הקשר (חולה, בהלוויה) — נוסף "✏️ הוסף הערה" מתחת לכל תלמיד שכבר סומן.
+The layering is strict. Layer 7 talks only to Layer 6. Layer 6 talks only to Layers 4 and 5. Layer 4 talks only to Layer 2 (and to Layer 3 for push). Layer 2 mutates Layer 1. Skipping layers — e.g. a React component directly calling `supabase.rpc` — is a code-review block.
 
-### 16.3 התנהגויות
+## 10.4 Why this architecture
 
-- **לחיצה אחת = שמירה**. אין "save" — RPC `submit_audit_response(session_id, student_id, category)` נשלח מיד.
-- **בלוקים אופטימיים** — UI מתעדכן מיד, ה־RPC רץ ברקע. אם RPC נכשל — toast אדום + rollback.
-- **התקדמות** — מד מתעדכן: "9 מתוך 25".
-- **כפתור "סיים סימון"** מופיע למטה רק כשכולם סומנו. לוחץ → toast "✓ נשלח למנהל" + חוזר לדשבורד הרגיל.
+**Why RPCs instead of REST endpoints.** Supabase exposes RPCs natively, with type-safe generated clients. Building REST endpoints would require a separate service. The complexity isn't warranted; RPCs are sufficient.
 
-### 16.4 בריא להוסיף
+**Why one RPC per logical operation, atomic.** Each RPC wraps its mutation in a transaction. `open_audit` creates the session row *and* the 381 response rows in one transaction; either all of it commits or none does. This makes "partial state" — a session with no responses — impossible.
 
-- **Bulk action** — "סמן את כל מי שלא סומן כ־בישיבה" — כפתור מהיר. רק אחרי אישור (Modal).
-- **חיפוש** — שדה חיפוש לכיתה עם 25+ תלמידים.
-- **Sticky header** — תמיד רואים כמה נשאר.
+**Why a single active session mutex enforced at the DB level.** Application-level mutex would require a distributed lock; with one Postgres instance, the simplest correct mechanism is a partial unique index. Application code cannot bypass it.
 
----
-
-## 17. סיום ושימור
-
-לחיצה של המנהל על "סיים ביקורת":
-1. RPC `close_audit(session_id, note)` נקרא.
-2. כל ה־PENDING הופך ל־UNKNOWN.
-3. status מתעדכן ל־CLOSED.
-4. closed_at נכתב.
-5. ה־UI עובר ל־`/admin/audit/{id}/summary`.
-
-מסך הסיכום מתואר ב־**חלק ט׳**.
-
----
-
-## 18. תקלות במצב 1 ופתרונן
-
-| בעיה | פתרון |
-|------|--------|
-| רכז לא קיבל push | המנהל רואה זאת (PENDING > 50% אחרי 2 דק). יש כפתור "שלח שוב". |
-| רכז במצב offline | האפליקציה תסנכרן ברגע שמתחבר; sync engine. UI מסמן "נשמר offline — ימתין לסנכרון". |
-| ריענון דף — רכז | RPC `get_active_audit_for_class(class_id)` — מחזיר session_id + responses. UI נטען מחדש. |
-| ריענון דף — מנהל | אותה RPC הפוכה: `get_active_audit()`. UI נטען מחדש עם כל הנתונים. |
-| שני מנהלים פותחים בו זמנית | RPC `open_audit` בודק שאין ACTIVE אחר — מחזיר שגיאה אם יש; UI מציע "כבר יש ביקורת פעילה — האם להמשיך?" |
-| רכז שכח לסמן | Cron אחרי 24h סוגר אוטומטית (TIMED_OUT). מנהל מקבל הודעה. |
-
----
-
-# חלק ה׳ — מצב 2: ביקורת מיקום חי (LOCATION)
-
-## 19. תרחיש שימוש
-
-> **שעה 9:15.** ראש הישיבה רוצה לוודא שיהושע — תלמיד מסוים — נמצא בכיתה ולא חזר הביתה. במקום לקרוא לו, פותח "ביקורת מיקום" על כיתתו. תוך 20 שניות:
->
-> Push נשלח ל־381 הסלולרים שמחוברים לאפליקציה. אפליקציות נפתחות אוטומטית. מבקשות הרשאת מיקום. שולחות ל־DB.
->
-> המנהל רואה Heatmap של ישראל (בעצם של אזור חברון) — נקודות מתחילות לקפוץ. ירוקות, ירוקות, ירוקות. אחת כחולה (תלמיד יושב בכניסה). אחת כתומה — תלמיד באזור חברון אבל לא בישיבה. אחת **אדומה מהבהבת בבית שמש**.
->
-> Modal צץ אוטומטית: "⚠ יהושע ברק — נמצא מחוץ לטווח. מרחק: 38 ק"מ. [פתח כיתה] [שלח SMS להורים] [סמן 'אישור חרום']".
->
-> תוך 90 שניות 92% מהתלמידים שלחו מיקום. נשארים 8% — תלמידים שהדפדפן שלהם דחה GPS / Offline. הרכזים מקבלים רשימה: "6 תלמידים ללא מיקום בכיתה שלך — האם הם בישיבה?". הרכז עונה ידנית.
->
-> המנהל סוגר את הביקורת. מקבל סיכום + יהושע ברק עולה לרשימת אזעקות לטיפול.
+**Why realtime via postgres_changes, not a custom broadcast channel.** Because postgres_changes is rooted in the table. Refreshing the page does not lose subscription state. Two admins watching the same session see the same events. Broadcast channels are subscriber-local; postgres_changes is table-scoped. The choice is structural.
 
----
-
-## 20. תהליך ההפעלה — מצב 2
-
-### 20.1 ממשק המנהל
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  ←  ביקורת מיקום — בחר כיתות + הגדרות                       │
-├──────────────────────────────────────────────────────────────┤
-│  ☑ בחר את כל הכיתות (16 / 381)                                │
-│  ... (זהה למצב 1)                                            │
-│                                                              │
-│  ⏱ כמה זמן להמתין לתגובות מסלולרים?                          │
-│   ○ 60 שניות     ●  120 שניות     ○ 5 דקות                  │
-│                                                              │
-│  🔔 שלח push לתלמידים?                                       │
-│   ● כן, לכל הסלולרים     ○ רק לרכזים                       │
-│                                                              │
-│  📊 הצג מפה כשמתחיל?                                         │
-│   ● כן     ○ לא — רק Heatmap                                 │
-│                                                              │
-│  🚨 רגישות לאזעקות:                                          │
-│   ○ נמוכה (רק > 5 ק"מ)                                      │
-│   ● בינונית (גם > 1 ק"מ)                                    │
-│   ○ גבוהה (כל מי שלא ≤ 300m)                                │
-│                                                              │
-│                       [ביטול]   [פתח ביקורת מיקום ➜]        │
-└──────────────────────────────────────────────────────────────┘
-```
+**Why Edge Functions for push and not from the client.** Privacy of VAPID keys, rate limiting, scalability, and not requiring the admin's browser to stay open during fan-out. See §5.12.
 
-### 20.2 השרשרת מאחורי הקלעים
+**Why no separate cache layer.** Premature optimization. Postgres can serve `get_active_audit` to one admin every 30 seconds without breaking a sweat. If the audit feature ever reaches 100 concurrent admins, a Redis cache becomes worthwhile; not before.
 
-1. **RPC `open_audit('LOCATION', class_ids, settings)`** — יוצר session + responses (כמו במצב 1, אבל category=PENDING לכולם, כולל מי שיש לו departure ACTIVE — אלה יוזנו עם OUT_PERMIT).
-2. **Edge Function `send-audit-location-push`**:
-   - שולח Web Push לכל push_token של תלמידים בכיתות הנבחרות.
-   - Payload: `{ kind: 'AUDIT_LOCATION', session_id, deadline_ts }`.
-   - מטרת ה־payload: לגרום לאפליקציה (אם רצה ב־background) לפתוח את עצמה ולשלוח מיקום.
-3. **Realtime Broadcast** — ערוץ `audit:{session_id}` משדר `start` אירוע לכל לקוח שמחובר עכשיו (לאפליקציות פתוחות).
-4. **המנהל** מועבר אוטומטית ל־`/admin/audit/{id}/live`.
+## 10.5 Data flow — happy path
 
----
-
-## 21. צד התלמיד — איסוף מיקום
-
-### 21.1 Service Worker — האזנה ל־Push
-
-`public/sw.js` (קיים, נצטרך לעדכן):
-- מאזין ל־`push` event.
-- אם kind=AUDIT_LOCATION:
-  - מציג notification: "📍 בקשת מיקום — בדיקה פנימית. הקש לפתיחה."
-  - שומר session_id ב־IndexedDB.
-  - **אינו** קורא ל־GPS כאן (Service Worker לא יכול לקרוא ל־geolocation API).
-
-### 21.2 הלקוח (React App)
-
-ברגע שהאפליקציה נפתחת (push tap או כבר פתוחה ב־background):
-1. **Hook `useAuditListener`** מאזין ל־:
-   - Broadcast `audit:{session_id}` (כשהאפליקציה הייתה פתוחה כבר).
-   - localStorage / IndexedDB אירוע מ־SW (כשהאפליקציה נפתחה מ־push).
-2. **אם התלמיד ב־OFF_CAMPUS עם departure ACTIVE** — לא דורש GPS, רק שולח `submit_audit_response` עם category=OUT_PERMIT ו־marked_by=AUTO_DEPARTURE.
-3. **אחרת:**
-   - מציג Sheet עוטף: "📍 בקרת מיקום — נא לאשר".
-   - לוחץ "אשר" → קורא ל־`navigator.geolocation.getCurrentPosition` עם:
-     - `enableHighAccuracy: true`
-     - `timeout: 15000`
-     - `maximumAge: 0` — תמיד טריים, לא cache
-   - מציג ספינר: "מתבצע איסוף מיקום..."
-   - מצליח → `submit_audit_response(session_id, lat, lng, accuracy)`.
-   - נכשל → `submit_audit_response(session_id, gps_status='DENIED'|'TIMEOUT'|'UNAVAILABLE')`.
-
-### 21.3 UI התלמיד
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                                                          │
-│                       📍                                  │
-│                                                          │
-│            בדיקת נוכחות מהירה                            │
-│                                                          │
-│       ההנהלה מבקשת לוודא שאתה בישיבה.                   │
-│       האפליקציה תשלח את מיקומך הנוכחי.                  │
-│                                                          │
-│            [ אשר ושלח ] (ירוק גדול)                      │
-│                                                          │
-│            [ אני לא בישיבה ]                             │
-│                                                          │
-│       הקליק "אני לא בישיבה" שולח הודעה לרכז              │
-│       לבדוק את מצבך — לא נדרש מיקום.                    │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
-```
+1. **Open.** Admin's browser calls `open_audit(MANUAL, [16 classes], 'ADMIN', settings, notes)`. RPC executes: validates input, acquires advisory lock, inserts session row, bulk-inserts 381 response rows (pre-classifying any with active departures as `OUT_PERMIT`). Returns `{session_id, total_students, mode, started_at}`. Browser navigates to `/admin/audit/<id>/live`.
+2. **Subscribe.** Live page mounts. Calls `get_active_audit` for full initial state. Receives session + 381 responses + 0 alerts + KPIs. Renders. Concurrently, subscribes to `postgres_changes` on `audit_responses`, `audit_alerts`, `audit_sessions` filtered by session_id.
+3. **Fan out.** Browser invokes `send-audit-push` Edge Function with session_id and target. Edge Function queries `students` for push_tokens, sends Web Push to each, logs successes/failures into `audit_push_log`. Returns aggregate counts.
+4. **Receive.** Student device receives push. Service worker shows notification. On tap, app opens to a bottom sheet. Student approves. Browser calls `submit_audit_response(session_id, student_id, gpsLat, gpsLng, accuracy, status, 'AUTO_GPS')`. RPC executes: validates session is ACTIVE, computes distance, computes bucket, derives category, updates response row.
+5. **Propagate.** Postgres emits a logical-replication event. Supabase Realtime captures it. Pushes it to subscribed admin and supervisor clients. Their UIs update.
+6. **Trigger alert.** If the new bucket is `ORANGE` or `RED` and it's a transition, the `tg_audit_responses_alert` trigger inserts a row in `audit_alerts`. Realtime emits an INSERT event on alerts. Admin's UI plays the alert sound, shows the alert modal.
+7. **Close.** Admin calls `close_audit(session_id, 'ADMIN', notes)`. RPC executes: updates any remaining `PENDING` rows to `UNKNOWN` (audit log captures the transition), updates session to `CLOSED`, computes summary. Realtime emits a session UPDATE. Admin's UI navigates to the summary page.
 
-**אם דחה את ההרשאה:**
-- toast: "✗ לא סופק מיקום. הרכז יבדוק."
-- שולח `submit_audit_response(..., gps_status='DENIED')`.
-- האפליקציה חוזרת למסך הביתי.
+## 10.6 Failure modes and recovery
 
----
+**Realtime websocket drops.** Client sees no events for >30 s. Polling fallback fires `get_active_audit` every 30 s. State stays correct, slower. When realtime reconnects, the polling continues until websocket events resume.
 
-## 22. הזרמת נתונים בזמן אמת
+**RPC fails mid-call (network).** Client retries up to 3× with backoff. If still failing, presents an error with retry button. No partial state in DB (RPCs are transactional).
 
-### 22.1 Realtime Channel Architecture
+**Edge function fan-out partially fails.** Some students didn't get a push. The session is still active. The `audit_push_log` records the failures. The admin can see in the UI "297 of 381 pushes sent successfully" — they decide whether to also do a manual mode follow-up.
 
-```
-   ┌────────────────────────────────────────────────────────┐
-   │  Channel: 'audit:{session_id}'                         │
-   │                                                        │
-   │  Events:                                               │
-   │   - 'start' (broadcast)  — סשן התחיל                  │
-   │   - 'response' (postgres_changes on audit_responses)   │
-   │   - 'alert' (broadcast)  — אזעקה חדשה                 │
-   │   - 'close' (broadcast)  — סשן הסתיים                 │
-   │                                                        │
-   │  Subscribers:                                          │
-   │   - Manager dashboard (all events)                     │
-   │   - Class supervisors (filtered to their class)        │
-   │   - Students (only 'start' event)                      │
-   └────────────────────────────────────────────────────────┘
-```
+**Postgres goes down.** The product is offline. Nothing the application can do. Supabase's SLA kicks in.
 
-### 22.2 קצב עדכון
+**The admin's device dies during an audit.** Session is still active in DB. Admin opens phone, app, sees the active-session banner. Replay-safe.
 
-- כשמגיע מיקום: לקוח שולח RPC. RPC מבצע UPDATE על השורה ב־audit_responses. **Postgres trigger** משדר ל־Realtime. **המנהל רואה בתוך < 800ms**.
-- אנימציה: הכרטיס המתאים בכיתה ב־Grid **קופץ** מ־PENDING (אפור) לצבע המתאים (ירוק/כחול/כתום/אדום) באנימציה של 300ms.
-- אם זה אזעקה (אדום) — קוביית הכיתה מהבהבת 3 פעמים, נשמע "ding".
+**The session is forgotten and runs past 24 hours.** Cron transitions it to `TIMED_OUT`. Admin can still view it as a closed session in history. No data is lost; only the operation is closed.
 
-### 22.3 batching / dedup
+## 10.7 What this architecture explicitly does not include
 
-- אם שני אירועים מגיעים תוך 100ms (תלמיד שלח מיקום פעמיים, חיבור איטי) — UI מסנן duplicates לפי `id`.
-- אנימציות מוגבלות ל־30fps — אם 50 אירועים בבת אחת, queue פנימי.
+- **No Redis.** Postgres is enough.
+- **No message queue (RabbitMQ, SQS, etc.).** Postgres + pg_cron is enough.
+- **No separate analytics warehouse.** Postgres queries against `audit_*` tables are enough.
+- **No microservices.** One Postgres, a few Edge Functions, one frontend. Monorepo-ish.
+- **No GraphQL.** RPCs are sufficient and simpler.
+- **No event sourcing.** The `audit_response_log` provides the audit trail; full event sourcing is overkill for the volume.
 
 ---
 
-## 23. דשבורד מנהל — מצב 2 (Live)
+# Part 11 — Data Model
 
-### 23.1 Layout
+## 11.1 Modeling philosophy
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  ← ביקורת מיקום פעילה          ⏱ 01:23 / 02:00  [📺 הקרנה]   │
-├───────────────────────────────────────────────────────────────┤
-│  ┌─── KPI ───────────────────────────────────────────────┐   │
-│  │ 🟢 312     🔵 18     🟠 11    🔴 3     ⚪ 37          │   │
-│  │ בישיבה    בחוץ       בחוץ    מחוץ     לא ידוע        │   │
-│  │ (≤300m)   (≤1km)    (1-5km) לטווח     (GPS off)      │   │
-│  │                                                       │   │
-│  │ ⚠ אזעקות פתוחות: 3   [פתח רשימה]                     │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌─── Tabs ──────────────────────────────────────────────┐   │
-│  │  [🗺 מפה]  [🔥 Heatmap]  [📊 Grid]  [📋 טבלה]         │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌─── Main Content (לפי Tab) ────────────────────────────┐   │
-│  │                                                       │   │
-│  │  [תוכן דינמי — ראה למטה]                              │   │
-│  │                                                       │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌─── Activity Feed ─────────────────────────────────────┐   │
-│  │  🟢 09:15:23 אברהם כהן (הרב יעקב) — בישיבה (218m)    │   │
-│  │  🟢 09:15:24 דוד לוי (הרב הלל) — בישיבה (45m)        │   │
-│  │  🔴 09:15:25 ⚠ יהושע ברק (הרב משה) — 38 ק"מ          │   │
-│  │  🟢 09:15:26 משה רוזנברג (הרב אבישי) — בישיבה        │   │
-│  │  ...                                                  │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                               │
-│                                       [סיים ביקורת ➜]        │
-└───────────────────────────────────────────────────────────────┘
-```
+The data model is **the product**. Every UI behavior is a query against this model. If the model can't express a question, no amount of frontend cleverness can answer it. So the model is designed first, and over-designed deliberately for future questions, within reason.
 
-### 23.2 Tab "מפה"
+The model uses **denormalized hot paths** where the alternative — joining at query time — would slow the live dashboard. Specifically, `audit_responses.class_id` is denormalized from `students.classId` so the dashboard can group responses by class without joining 381 rows × 16 classes on every realtime update.
 
-- Leaflet + OpenStreetMap tiles (חינמי).
-- Center: campus (31.5253, 35.1056), zoom 14.
-- **שכבת מעגלים**: 300m ירוק, 1km כחול, 5km כתום, מעבר אדום.
-- **Markers**: כל תלמיד נקודה צבעונית. Pulse animation על Markers חדשים.
-- **Tooltip** בצבע: "אברהם כהן, הרב יעקב, 218m".
-- **Marker אדום** עם פולסציה אדומה גדולה (אזעקה).
-- **Cluster** — אם > 50 נקודות באותו אזור, מציג Cluster (CountBubble).
-- **Filter** — שכבת kpi מאפשרת לסנן: "הצג רק אדומים", "הצג רק שיעור א".
-- **Recenter** — לחיצה על אזעקה ב־Feed → מפה מתמקדת.
+The model uses **immutable history tables** for the auditable trail. `audit_response_log` is INSERT-only; nothing ever modifies a log row.
 
-### 23.3 Tab "Heatmap"
+## 11.2 Entity descriptions
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  Heatmap לפי כיתה                                        │
-│                                                          │
-│  שיעור א:                                                │
-│  ┌────┐┌────┐┌────┐┌────┐┌────┐┌────┐                  │
-│  │ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 │  ← הכל הגיב     │
-│  │100%││ 96%││100%││ 88%││100%││100%│                   │
-│  │אבישי│בועז│הלל │יעקב│משה │תמיר│                       │
-│  └────┘└────┘└────┘└────┘└────┘└────┘                  │
-│                                                          │
-│  שיעור ב:                                                │
-│  ┌────┐┌────┐┌────┐┌────┐                              │
-│  │ 🟠 ││ 🟢 ││ 🔴 ││ 🟢 │                              │
-│  │ 65%││ 95%││ 30%││ 90%│                              │
-│  │אהרלה│ד.לנדאו│דודו│מוטי│                              │
-│  └────┘└────┘└────┘└────┘                              │
-│                                                          │
-│  ... (כל הכיתות)                                         │
-│                                                          │
-│  מקרא:                                                   │
-│  🟢 > 80% הגיבו  🟠 50-80%  🔴 < 50%                    │
-│  (אחוז ההגבה כולל בישיבה+בחוץ+UNKNOWN)                  │
-└──────────────────────────────────────────────────────────┘
-```
+This subsection describes each table in plain language. Field-level SQL appears in the implementation reference.
 
-### 23.4 Tab "Grid"
+### `audit_sessions` — the audits themselves
 
-(זהה ל־Class Grid במצב 1, אבל בכל כרטיס:
-- מציג גם distance distribution: "≤300m: 22, 300m-1km: 1, 1-5km: 1"
-- לחיצה על כרטיס → drawer של תלמידי הכיתה עם מיקומיהם.)
+One row per audit ever run. Lives forever. A session is the unit of the user-facing "ביקורת" concept.
 
-### 23.5 Tab "טבלה"
+Important fields:
 
-- כל התלמידים בטבלה ממוינת.
-- עמודות: שם, כיתה, סטטוס, מרחק, זמן עדכון, marked_by.
-- פילטרים מעל הטבלה: כיתה, סטטוס, מרחק, search.
-- סטטיסטיקה בולטת: avg distance, median, max.
+- **`id`** — UUID primary key. Used in URLs (`/admin/audit/<id>/live`).
+- **`mode`** — `MANUAL` or `LOCATION`. Immutable after insert.
+- **`status`** — One of `ACTIVE`, `CLOSED`, `ABORTED`, `TIMED_OUT`. State machine in §12.
+- **`class_ids`** — Array of class identifiers included in this audit. Snapshotted at open time; if a student moves class after the audit opens, the audit retains the old class assignment.
+- **`total_students`** — Count at open time. Snapshotted.
+- **`started_by`** — The actor who opened the session. Free-form text (currently `'ADMIN'` or a more specific identifier). The schema does not enforce a foreign key here because admin identity is currently PIN-based; when proper auth is introduced this becomes a UUID FK.
+- **`started_at`** / **`closed_at`** — Timestamps.
+- **`closed_by`** — The actor who closed it. Used for the auditable record.
+- **`notes`** — Free-text from the closer (e.g. "morning seder").
+- **`settings`** — JSONB. Stores mode-specific settings: `timeoutSec`, `sensitivity`, `pushTarget`, `showMap`.
 
-### 23.6 Activity Feed (קבוע למטה)
+### `audit_responses` — the per-student outcomes
 
-- streaming של 20 האירועים האחרונים.
-- כל אירוע: שעה, אייקון צבעוני, שם, כיתה, מרחק.
-- אזעקות מודגשות (background אדום עדין).
-- לחיצה על אירוע → drawer פרטים.
+One row per (session, student). Created at session open. Mutated during session. Final at session close.
 
----
+Important fields:
 
-## 24. דשבורד רכז כיתה — מצב 2
+- **`id`** — UUID.
+- **`session_id`** — FK to `audit_sessions`. CASCADE on delete (sessions almost never delete, but if they do, responses go with them).
+- **`student_id`** — FK to `students`. CASCADE.
+- **`class_id`** — Denormalized snapshot of student's class at session open.
+- **`category`** — `PENDING`, `IN_YESHIVA`, `OUT_PERMIT`, `OUT_NO_PERMIT`, `UNKNOWN`. Default `PENDING`.
+- **`marked_by`** — Who/what set the current category. Free-form. Common values: `AUTO_DEPARTURE`, `AUTO_GPS`, `AUTO_CLOSE`, `ADMIN`, `SUPERVISOR:<class_id>`.
+- **`marked_at`** — Timestamp of the most recent marking. Null while `PENDING`.
+- **`gps_lat`** / **`gps_lng`** / **`gps_accuracy_m`** — Raw GPS. Nulled by retention cron after 90 days.
+- **`distance_from_campus_m`** — Computed from GPS. Survives the 90-day GPS nulling.
+- **`distance_bucket`** — `GREEN` / `BLUE` / `ORANGE` / `RED`. Computed at submission time. Survives 90-day nulling.
+- **`gps_status`** — Why GPS was or wasn't useful: `OK`, `DENIED`, `TIMEOUT`, `OFFLINE`, `UNAVAILABLE`, `LOW_ACCURACY`.
+- **`departure_id`** — FK to `departures` if this student had an `ACTIVE` departure at session open. Snapshotted.
+- **`note`** — Free-text from whoever marked.
 
-### 24.1 View Only על הכיתה שלו
+### `audit_response_log` — the immutable trail
 
-הרכז רואה גרסה מצומצמת של Tab "Grid" אבל רק לכיתה שלו:
+One row per category change. INSERT-only. Trigger-driven from `audit_responses` updates.
 
-```
-┌───────────────────────────────────────────────────────────┐
-│  📍 ביקורת מיקום פעילה — כיתה הרב יעקב                   │
-│  הגיבו: 23/25                                             │
-├───────────────────────────────────────────────────────────┤
-│  🟢 21 בישיבה  🔵 1 ביציאה  🟠 1 קרוב  🔴 0 רחוק  ⚪ 2  │
-├───────────────────────────────────────────────────────────┤
-│                                                           │
-│  תלמידים ללא תגובה — נא לבדוק ידנית:                     │
-│                                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ ⚪ נחמן ברגר — דחה הרשאת מיקום                     │  │
-│  │ [✅ בישיבה]  [🔵 עם אישור]  [🔴 בלי אישור]         │  │
-│  └────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ ⚪ אלון פדידה — הסלולרי כבוי / Offline             │  │
-│  │ [✅ בישיבה]  [🔵 עם אישור]  [🔴 בלי אישור]         │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                           │
-│                                                           │
-│  תלמידים שנמצאו מחוץ לטווח (לבדיקת המנהל):              │
-│                                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ 🟠 שלמה לוי — 1.2 ק"מ מהישיבה                     │  │
-│  │ זמן: 09:16  קונטקסט: ל־45min                       │  │
-│  │ [סמן 'בחוץ עם אישור']  [הוסף הערה]                  │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
-```
+Important fields:
 
-### 24.2 פעולות לרכז
+- **`response_id`** / **`session_id`** / **`student_id`** — Convenience keys.
+- **`from_category`** / **`to_category`** — The transition.
+- **`actor`** — Who caused the change. Echoed from `audit_responses.marked_by`.
+- **`changed_at`** — Timestamp.
 
-- **לסמן ידנית** את UNKNOWN-im.
-- **להוסיף הערה** לכל תלמיד (סיכון בטחוני, מצב מיוחד).
-- **לראות מיקום ספציפי** של תלמיד בכיתה (לחיצה → mini-map).
-- **לא יכול** לסיים את הביקורת. רק המנהל סוגר.
+This table is the answer to "who marked student X as out-without-permit, and when, and what did they change from?". It is the institutional audit trail.
 
----
+### `audit_alerts` — the persistent warnings
 
-## 25. הקרנה (Projection Mode) ורוטציה אוטומטית
+One row per distance-bucket transition into `ORANGE` or `RED`. Trigger-driven. Acknowledgeable.
 
-### 25.1 הפעלה
+Important fields:
 
-- כפתור "📺 הקרנה" בפינה הימנית של דשבורד המנהל.
-- לחיצה → full-screen mode (`element.requestFullscreen()`).
+- **`session_id`** / **`student_id`** / **`triggered_at`** — Identification.
+- **`distance_m`** — Snapshot of the distance that caused the alert.
+- **`severity`** — `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`. Currently: `ORANGE` → `MEDIUM`, `RED` → `CRITICAL`.
+- **`acknowledged_by`** / **`acknowledged_at`** / **`note`** — Resolution record.
 
-### 25.2 Layout שונה
+Alerts persist forever. They are part of the audit history.
 
-- טיפוגרפיה: 32-48pt למספרים, 24pt לטקסט.
-- צבעים: רקע שחור (יותר טוב לצג גדול), טקסט לבן/צהוב/אדום.
-- 6 שניות לכל view, ואז rotation אוטומטי:
-  1. **KPI Grid** (12 שניות) — מספרים גדולים, מרשימים.
-  2. **Heatmap** (8 שניות) — overview כיתות.
-  3. **מפה** (10 שניות) — נקודות נעות.
-  4. **Alerts** (אם יש) — מסך אדום, פרטי האזעקות.
-  5. **Grid כיתות** (10 שניות).
+### `audit_push_log` — operational telemetry
 
-### 25.3 בקרה
+One row per push notification attempted. Used for debugging push reliability. 30-day retention.
 
-- ESC או לחיצה על "✕" — יציאה ממצב הקרנה.
-- לחיצה על KPI מסוים — עצירת הרוטציה על אותו tab.
+Important fields:
 
----
+- **`session_id`** / **`target_kind`** (`STUDENT`, `SUPERVISOR`) / **`target_id`** — Who was the push for.
+- **`success`** / **`error_message`** — Outcome.
+- **`sent_at`** — Timestamp.
 
-## 26. טיפול בקצוות (Edge Cases)
-
-| תרחיש | פתרון |
-|--------|--------|
-| תלמיד פתח אפליקציה אחרי שהביקורת התחילה | Hook `useAuditListener` שואל DB `SELECT * FROM audit_sessions WHERE status='ACTIVE'`. אם יש — מציג sheet GPS. |
-| תלמיד שלח 2 מיקומים בטעות | RPC עם UPSERT — האחרון מנצח. log רושם את שניהם. |
-| GPS מחזיר מיקום עם accuracy > 200m | נשמר כ־OK אבל מסומן בדגל `low_accuracy=true`. מנהל רואה ייצוג קטן. |
-| אינטרנט נופל באמצע | sync engine שומר ב־IndexedDB. ברגע שחוזר — שולח. |
-| תלמיד עם 2 מכשירים | האחרון שעודכן מנצח (UPSERT לפי student_id+session_id). |
-| מנהל סוגר את הביקורת — תלמיד שלח אחרי | RPC `submit_audit_response` בודק `session.status='ACTIVE'`. אם לא — מחזיר שגיאה, ה־UI מציג "הסשן הסתיים, ההודעה לא נשמרה". |
-| 2 רכזים מסמנים את אותו תלמיד | האחרון מנצח. log שומר שניהם. |
-| מנהל פותח 2 ביקורות במקביל | RPC לא מאפשר. |
-| Network slow → GPS מחזיר 30 שניות מאוחר | מתקבל ושוב מעדכן UI. |
+### Reused — `students` and `departures`
 
----
+Audit reads from `students` (for fan-out, name resolution, push tokens) and `departures` (for pre-classification of `OUT_PERMIT`). Audit never writes to either. The Iron Rule of Departures from CLAUDE.md is preserved.
 
-# חלק ו׳ — Backend Architecture
-
-## 27. Supabase Tables — DDL מלא
-
-המיגרציה (כשתיכתב בעתיד): `supabase/migrations/20260516_internal_audit_v2.sql`
-
-```sql
--- audit_sessions
-CREATE TABLE IF NOT EXISTS audit_sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  mode TEXT NOT NULL CHECK (mode IN ('MANUAL', 'LOCATION')),
-  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CLOSED','ABORTED','TIMED_OUT')),
-  class_ids TEXT[] NOT NULL,
-  total_students INT NOT NULL,
-  started_by TEXT NOT NULL,
-  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  closed_at TIMESTAMPTZ,
-  notes TEXT,
-  settings JSONB DEFAULT '{}'::jsonb, -- timeout_sec, sensitivity, etc.
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX uq_audit_sessions_one_active
-  ON audit_sessions ((1)) WHERE status='ACTIVE';
-
-CREATE INDEX ix_audit_sessions_started_at ON audit_sessions (started_at DESC);
-
--- audit_responses
-CREATE TABLE IF NOT EXISTS audit_responses (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
-  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  class_id TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT 'PENDING'
-    CHECK (category IN ('PENDING','IN_YESHIVA','OUT_PERMIT','OUT_NO_PERMIT','UNKNOWN','EXCUSED_SICK')),
-  marked_by TEXT,
-  marked_at TIMESTAMPTZ,
-  gps_lat FLOAT8,
-  gps_lng FLOAT8,
-  gps_accuracy_m FLOAT8,
-  distance_from_campus_m FLOAT8,
-  distance_bucket TEXT CHECK (distance_bucket IN ('GREEN','BLUE','ORANGE','RED')),
-  gps_status TEXT CHECK (gps_status IN ('OK','DENIED','TIMEOUT','OFFLINE','UNAVAILABLE')),
-  departure_id UUID REFERENCES departures(id),
-  note TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(session_id, student_id)
-);
-
-CREATE INDEX ix_audit_responses_session_category ON audit_responses (session_id, category);
-CREATE INDEX ix_audit_responses_session_class ON audit_responses (session_id, class_id, category);
-CREATE INDEX ix_audit_responses_student ON audit_responses (student_id, marked_at DESC);
-
--- audit_response_log
-CREATE TABLE IF NOT EXISTS audit_response_log (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  response_id UUID NOT NULL REFERENCES audit_responses(id) ON DELETE CASCADE,
-  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
-  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  from_category TEXT,
-  to_category TEXT NOT NULL,
-  actor TEXT NOT NULL,
-  changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX ix_audit_response_log_session ON audit_response_log (session_id, changed_at DESC);
-
--- audit_alerts
-CREATE TABLE IF NOT EXISTS audit_alerts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
-  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  distance_m FLOAT8 NOT NULL,
-  gps_lat FLOAT8,
-  gps_lng FLOAT8,
-  acknowledged_by TEXT,
-  acknowledged_at TIMESTAMPTZ,
-  note TEXT
-);
-
-CREATE INDEX ix_audit_alerts_session ON audit_alerts (session_id, triggered_at DESC);
-
--- Trigger: על UPDATE category, INSERT log
-CREATE OR REPLACE FUNCTION log_audit_response_change() RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.category IS DISTINCT FROM OLD.category THEN
-    INSERT INTO audit_response_log (response_id, session_id, student_id, from_category, to_category, actor)
-    VALUES (NEW.id, NEW.session_id, NEW.student_id, OLD.category, NEW.category, COALESCE(NEW.marked_by, 'SYSTEM'));
-  END IF;
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END $$ LANGUAGE plpgsql;
-
-CREATE TRIGGER tr_audit_response_log
-BEFORE UPDATE ON audit_responses
-FOR EACH ROW EXECUTE FUNCTION log_audit_response_change();
-
--- Trigger: על distance_bucket=RED או ORANGE, INSERT alert
-CREATE OR REPLACE FUNCTION trigger_audit_alert() RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.distance_bucket IN ('ORANGE','RED') AND OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket THEN
-    INSERT INTO audit_alerts (session_id, student_id, distance_m, gps_lat, gps_lng)
-    VALUES (NEW.session_id, NEW.student_id, NEW.distance_from_campus_m, NEW.gps_lat, NEW.gps_lng);
-  END IF;
-  RETURN NEW;
-END $$ LANGUAGE plpgsql;
-
-CREATE TRIGGER tr_audit_alert
-AFTER UPDATE ON audit_responses
-FOR EACH ROW EXECUTE FUNCTION trigger_audit_alert();
-
--- Publication ל־Realtime
-ALTER PUBLICATION supabase_realtime ADD TABLE audit_sessions;
-ALTER PUBLICATION supabase_realtime ADD TABLE audit_responses;
-ALTER PUBLICATION supabase_realtime ADD TABLE audit_alerts;
-```
+## 11.3 The five queries the model must answer fast
 
----
+If these queries are slow, the live dashboard is broken. Each must complete in <50 ms at production scale (381 students × ~30 audits/month).
 
-## 28. RPC Functions — חתימות מלאות
-
-### 28.1 `open_audit`
-
-```sql
-CREATE OR REPLACE FUNCTION open_audit(
-  p_mode TEXT,
-  p_class_ids TEXT[],
-  p_started_by TEXT,
-  p_settings JSONB DEFAULT '{}'::jsonb,
-  p_notes TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  v_session_id UUID;
-  v_existing UUID;
-  v_total INT;
-BEGIN
-  -- 1. בדוק אם יש סשן ACTIVE קיים
-  SELECT id INTO v_existing FROM audit_sessions WHERE status='ACTIVE';
-  IF v_existing IS NOT NULL THEN
-    RETURN jsonb_build_object('error', 'AUDIT_ACTIVE', 'session_id', v_existing);
-  END IF;
-
-  -- 2. INSERT סשן חדש
-  INSERT INTO audit_sessions (mode, class_ids, total_students, started_by, settings, notes)
-  SELECT
-    p_mode,
-    p_class_ids,
-    (SELECT COUNT(*) FROM students WHERE "classId" = ANY(p_class_ids)),
-    p_started_by,
-    p_settings,
-    p_notes
-  RETURNING id, total_students INTO v_session_id, v_total;
-
-  -- 3. INSERT responses לכל תלמיד
-  INSERT INTO audit_responses (session_id, student_id, class_id, category, marked_by, marked_at, departure_id)
-  SELECT
-    v_session_id,
-    s.id,
-    s."classId",
-    CASE
-      WHEN d.id IS NOT NULL THEN 'OUT_PERMIT'
-      ELSE 'PENDING'
-    END,
-    CASE WHEN d.id IS NOT NULL THEN 'AUTO_DEPARTURE' ELSE NULL END,
-    CASE WHEN d.id IS NOT NULL THEN NOW() ELSE NULL END,
-    d.id
-  FROM students s
-  LEFT JOIN departures d ON d.student_id = s.id AND d.status='ACTIVE'
-  WHERE s."classId" = ANY(p_class_ids);
-
-  -- 4. החזר תוצאה
-  RETURN jsonb_build_object(
-    'session_id', v_session_id,
-    'total_students', v_total,
-    'mode', p_mode
-  );
-END $$;
-```
+1. **"Give me the current active session, all responses, all alerts."** Answered by `get_active_audit` — single query plan with three index lookups.
+2. **"How many in each category, by class?"** Answered by `compute_audit_kpis` — covered by the `(session_id, class_id, category)` index.
+3. **"Who marked student X in session Y?"** Answered by a primary-key lookup on `audit_responses` followed by a single read of the response.
+4. **"What was the full transition history for response R?"** Answered by a single-key lookup on `audit_response_log (response_id)`.
+5. **"All sessions in the past 30 days for mode M."** Answered by `list_past_audits` — uses the `(started_at DESC)` index.
 
-### 28.2 `submit_audit_response`
-
-```sql
-CREATE OR REPLACE FUNCTION submit_audit_response(
-  p_session_id UUID,
-  p_student_id UUID,
-  p_category TEXT DEFAULT NULL,        -- אם NULL, מחושב מ־GPS
-  p_gps_lat FLOAT8 DEFAULT NULL,
-  p_gps_lng FLOAT8 DEFAULT NULL,
-  p_gps_accuracy_m FLOAT8 DEFAULT NULL,
-  p_gps_status TEXT DEFAULT NULL,
-  p_marked_by TEXT DEFAULT NULL,
-  p_note TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  v_distance FLOAT8;
-  v_bucket TEXT;
-  v_final_category TEXT;
-  v_response_id UUID;
-BEGIN
-  -- 1. ודא שהסשן ACTIVE
-  IF NOT EXISTS (SELECT 1 FROM audit_sessions WHERE id=p_session_id AND status='ACTIVE') THEN
-    RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE');
-  END IF;
-
-  -- 2. חישוב מרחק (Haversine)
-  IF p_gps_lat IS NOT NULL AND p_gps_lng IS NOT NULL THEN
-    v_distance := 6371000 * 2 * asin(sqrt(
-      sin(radians((p_gps_lat - 31.5253)/2))^2 +
-      cos(radians(31.5253)) * cos(radians(p_gps_lat)) *
-      sin(radians((p_gps_lng - 35.1056)/2))^2
-    ));
-
-    v_bucket := CASE
-      WHEN v_distance <= 300 THEN 'GREEN'
-      WHEN v_distance <= 1000 THEN 'BLUE'
-      WHEN v_distance <= 5000 THEN 'ORANGE'
-      ELSE 'RED'
-    END;
-  END IF;
-
-  -- 3. קביעת קטגוריה סופית
-  v_final_category := COALESCE(p_category,
-    CASE
-      WHEN p_gps_status IN ('DENIED','TIMEOUT','OFFLINE','UNAVAILABLE') THEN 'UNKNOWN'
-      WHEN v_bucket = 'GREEN' THEN 'IN_YESHIVA'
-      WHEN v_bucket IN ('BLUE','ORANGE','RED') THEN 'OUT_NO_PERMIT'
-      ELSE 'PENDING'
-    END);
-
-  -- 4. UPDATE השורה
-  UPDATE audit_responses SET
-    category = v_final_category,
-    marked_by = COALESCE(p_marked_by, marked_by, 'AUTO_GPS'),
-    marked_at = NOW(),
-    gps_lat = COALESCE(p_gps_lat, gps_lat),
-    gps_lng = COALESCE(p_gps_lng, gps_lng),
-    gps_accuracy_m = COALESCE(p_gps_accuracy_m, gps_accuracy_m),
-    distance_from_campus_m = COALESCE(v_distance, distance_from_campus_m),
-    distance_bucket = COALESCE(v_bucket, distance_bucket),
-    gps_status = COALESCE(p_gps_status, gps_status),
-    note = COALESCE(p_note, note)
-  WHERE session_id = p_session_id AND student_id = p_student_id
-  RETURNING id INTO v_response_id;
-
-  RETURN jsonb_build_object(
-    'response_id', v_response_id,
-    'category', v_final_category,
-    'distance_m', v_distance,
-    'distance_bucket', v_bucket
-  );
-END $$;
-```
+Indexes are designed to serve these queries, not to be comprehensive.
 
-### 28.3 `close_audit`
-
-```sql
-CREATE OR REPLACE FUNCTION close_audit(
-  p_session_id UUID,
-  p_closed_by TEXT,
-  p_notes TEXT DEFAULT NULL
-) RETURNS JSONB ...
--- מבצע:
--- 1. UPDATE כל PENDING ל־UNKNOWN.
--- 2. UPDATE session: status='CLOSED', closed_at=NOW(), notes=note.
--- 3. מחזיר סטטיסטיקה סופית.
-```
+## 11.4 What the model does not include and why
 
-### 28.4 `get_active_audit`
-
-```sql
-CREATE OR REPLACE FUNCTION get_active_audit() RETURNS JSONB
--- מחזיר את הסשן ACTIVE (אם יש) עם:
--- - session metadata
--- - sumstats לפי category
--- - sumstats לפי class
--- מטרת השאילתה: רענון UI אחרי refresh
-```
+- **No `student_audit_score`** or running attendance percentage. Computed on demand from `audit_responses` when needed; storing a denormalized score would create consistency risk.
+- **No `class_audit_stats`** aggregate table. Same reasoning.
+- **No `audit_notifications`** queue table. The Edge Function writes to `audit_push_log` directly; we don't need a queue.
+- **No `audit_subscribers`**. Realtime handles fan-out at the database level.
+- **No `audit_lock`** explicit table. The partial unique index serves the purpose.
 
-### 28.5 `get_audit_full`
+## 11.5 Privacy fields and retention
 
-```sql
-CREATE OR REPLACE FUNCTION get_audit_full(p_session_id UUID) RETURNS JSONB
--- מחזיר את כל ה־responses + alerts לסשן נתון.
--- שימוש: רענון של דשבורד / טעינת ביקורת מהיסטוריה.
-```
+The retention policy from §5.7 is enforced by a `pg_cron`-driven job:
 
-### 28.6 `acknowledge_audit_alert`
-
-```sql
-CREATE OR REPLACE FUNCTION acknowledge_audit_alert(
-  p_alert_id UUID,
-  p_actor TEXT,
-  p_note TEXT DEFAULT NULL
-) RETURNS JSONB
--- מסמן אזעקה כ"נצפתה" — לא נעלמת, רק מסומנת.
 ```
-
-### 28.7 `tick_audit_timeout`
+Every day at 03:00 UTC:
+  UPDATE audit_responses
+     SET gps_lat = NULL,
+         gps_lng = NULL,
+         gps_accuracy_m = NULL
+   WHERE marked_at < NOW() - INTERVAL '90 days'
+     AND (gps_lat IS NOT NULL OR gps_lng IS NOT NULL);
 
-```sql
-CREATE OR REPLACE FUNCTION tick_audit_timeout() RETURNS INT
--- cron: כל 5 דק'.
--- בודק audit_sessions עם status='ACTIVE' AND started_at < NOW() - INTERVAL '24 hours'.
--- מעדכן ל־TIMED_OUT.
+Every day at 03:05 UTC:
+  DELETE FROM audit_push_log
+   WHERE sent_at < NOW() - INTERVAL '30 days';
 ```
-
----
-
-## 29. Edge Functions
 
-### 29.1 `send-audit-push`
+The retention job is **idempotent and reversible-with-a-restore**: if it runs incorrectly, the only loss is GPS coordinates older than 90 days, which were going to be nulled in any case. The job logs its row counts so anomalies are visible.
 
-`supabase/functions/send-audit-push/index.ts`:
-- Input: `{ session_id, target: 'STUDENTS' | 'SUPERVISORS' | 'BOTH', class_ids: string[] }`.
-- מבצע:
-  1. שואב את כל ה־`push_token` של הקבוצה הרלוונטית.
-  2. שולח לכל אחד Web Push (VAPID + AES-128-GCM) — קוד דומה ל־`send-push` הקיים.
-  3. Payload: `{ kind: 'AUDIT_LOCATION', session_id, deadline_ts, mode }`.
-  4. אם push נכשל (HTTP 410) — מוחק את ה־push_token.
-- Output: `{ sent: int, failed: int, removed: int }`.
-
-### 29.2 `send-audit-reminder`
-
-לחיצה של המנהל על "שלח push חוזר" לרכז מסוים → קורא ל־`send-audit-reminder` עם class_id.
-
----
-
-## 30. Realtime Channels — תכנון מלא
-
-| ערוץ | סוג | יוצר/משדר | מאזין | אירועים |
-|-------|-----|------------|--------|----------|
-| `audit:{session_id}` | broadcast + postgres_changes | DB triggers | Manager dashboard | `start`, `response`, `alert`, `close` |
-| `audit:{session_id}:class:{class_id}` | filtered postgres_changes | DB | Supervisor | `response` (filtered) |
-| `audit:notify` | broadcast | Edge function `open_audit` | Students, supervisors | `audit_open` (UI prompt) |
-
-> הערה: Supabase Realtime היום תומך ב־postgres_changes עם filter, ז.א. אנחנו לא בונים ערוץ ייעודי לכל כיתה. אנחנו subscribe-im עם filter `class_id=eq.{X}` על audit_responses.
-
----
-
-## 31. cron jobs ו־cleanup
-
-### 31.1 `tick_audit_timeout` — כל 5 דק'
-- מסגירת סשנים ישנים (ABANDONED).
-
-### 31.2 `purge_audit_response_log` — יום
-- מחיקת לוגי שינוי ישנים מ־90 ימים.
-
-### 31.3 `purge_old_alerts` — חודש
-- מחיקת אזעקות acknowledged מעל שנה. (אופציונלי, אפשר לשמור.)
-
 ---
 
-# חלק ז׳ — Frontend Architecture
+# Part 12 — Workflow Design
 
-## 32. מבנה תיקיות חדש
+## 12.1 State machines
 
-```
-src/
-├── pages/
-│   ├── admin/
-│   │   ├── AuditLandingPage.tsx        ← רשימת ביקורות (היסטוריה) + כפתור פתיחה
-│   │   ├── AuditNewPage.tsx            ← בחירת מצב + כיתות
-│   │   ├── AuditLivePage.tsx           ← דשבורד חי (מנהל)
-│   │   ├── AuditSummaryPage.tsx        ← סיכום אחרי סיום
-│   │   └── AuditCompareePage.tsx       ← השוואה בין ביקורות
-│   ├── class-supervisor/
-│   │   ├── SupervisorAuditPage.tsx     ← תצוגת רכז (מצב 1 + 2)
-│   │   └── ...
-│   └── student/
-│       └── StudentAuditSheetPage.tsx   ← Sheet שמופיע ברגע ביקורת מיקום
-├── components/
-│   ├── audit/
-│   │   ├── AuditKpiRow.tsx
-│   │   ├── AuditHeatmap.tsx
-│   │   ├── AuditClassGrid.tsx
-│   │   ├── AuditClassCard.tsx
-│   │   ├── AuditMap.tsx                ← Leaflet
-│   │   ├── AuditMapMarker.tsx
-│   │   ├── AuditActivityFeed.tsx
-│   │   ├── AuditAlertList.tsx
-│   │   ├── AuditAlertModal.tsx
-│   │   ├── AuditProjectionMode.tsx
-│   │   ├── AuditStudentRow.tsx
-│   │   ├── AuditCategoryChip.tsx
-│   │   ├── AuditDistanceBadge.tsx
-│   │   ├── AuditModeSelector.tsx
-│   │   ├── AuditClassSelector.tsx
-│   │   ├── AuditCloseConfirmModal.tsx
-│   │   └── AuditSummaryStats.tsx
-│   └── ...
-├── hooks/
-│   ├── useActiveAudit.ts               ← ת"א — שולף סשן ACTIVE, polling fallback
-│   ├── useAuditResponses.ts            ← Realtime subscription לresponses
-│   ├── useAuditAlerts.ts               ← Realtime subscription לalerts
-│   ├── useAuditStats.ts                ← memoized aggregations
-│   ├── useAuditLocationCollector.ts    ← לתלמיד: מאזין + אוסף GPS
-│   ├── useProjectionRotation.ts        ← רוטציה אוטומטית במצב הקרנה
-│   └── ...
-├── store/
-│   ├── auditStore.ts                   ← Zustand: סשן הנוכחי, KPIs
-│   ├── auditUiStore.ts                 ← Zustand: tab נבחר, פילטרים, מצב הקרנה
-│   └── ...
-├── lib/
-│   ├── audit/
-│   │   ├── categories.ts               ← enum + תרגומים
-│   │   ├── distanceBuckets.ts          ← ספים + צבעים
-│   │   ├── haversine.ts                ← פונקציית חישוב מרחק
-│   │   ├── auditApi.ts                 ← רובד IApiClient לביקורת
-│   │   └── gpsCollector.ts             ← navigator.geolocation wrapper משופר
-│   └── ...
-├── types/
-│   └── audit.ts                        ← TypeScript types
-└── ...
-```
+The product has two interacting state machines: the session-level state machine and the response-level state machine.
 
----
+### 12.1.1 Session state machine
 
-## 33. Zustand Stores חדשים
-
-### 33.1 `auditStore.ts`
-
-```ts
-type AuditState = {
-  // session
-  session: AuditSession | null
-  responses: Map<string, AuditResponse>  // key: student_id
-  alerts: AuditAlert[]
-  loading: boolean
-  error: string | null
-
-  // actions
-  loadActive: () => Promise<void>
-  open: (mode: 'MANUAL'|'LOCATION', classIds: string[], settings?: any) => Promise<string>
-  close: (note?: string) => Promise<void>
-  submitResponse: (studentId: string, payload: Partial<AuditResponse>) => Promise<void>
-  acknowledgeAlert: (alertId: string, note?: string) => Promise<void>
-
-  // realtime
-  handleResponseUpdate: (response: AuditResponse) => void
-  handleAlertInsert: (alert: AuditAlert) => void
-  handleSessionUpdate: (session: AuditSession) => void
-}
 ```
-
-**אל תאחסן ב־localStorage** — ה־source of truth הוא ה־DB. ה־Store מסונכרן ע"י Hook שמושך מ־DB ב־mount.
-
-### 33.2 `auditUiStore.ts`
-
-```ts
-type AuditUiState = {
-  activeTab: 'map' | 'heatmap' | 'grid' | 'table'
-  filters: { class_ids: string[]; categories: AuditCategory[]; min_distance?: number }
-  projectionMode: boolean
-  projectionTabRotation: { paused: boolean; currentIndex: number }
-
-  setTab: (t: AuditUiState['activeTab']) => void
-  setFilters: (f: Partial<AuditUiState['filters']>) => void
-  enterProjection: () => void
-  exitProjection: () => void
-}
+                  open_audit()
+                       │
+                       ▼
+                  ┌─────────┐  close_audit()      ┌─────────┐
+       (initial)─►│ ACTIVE  │ ─────────────────► │ CLOSED  │  (terminal)
+                  └────┬────┘                     └─────────┘
+                       │
+                       │  abort_audit()           ┌─────────┐
+                       ├────────────────────────► │ ABORTED │  (terminal)
+                       │                          └─────────┘
+                       │
+                       │  cron after 24h          ┌──────────┐
+                       └────────────────────────► │TIMED_OUT │  (terminal)
+                                                  └──────────┘
 ```
-
-**persist:** ה־store הזה מותר ל־persist (מצב tab, פילטרים, projection) — אבל לא ה־data.
-
----
-
-## 34. Hooks
-
-### 34.1 `useActiveAudit`
-- Mount → קורא ל־RPC `get_active_audit()`.
-- מעדכן `auditStore`.
-- מנוי ל־Realtime channel `audit:{session_id}` ברגע שמצא session.
-- Polling fallback כל 30 שניות (אם Realtime ניתק).
-- Cleanup: unsubscribe.
-
-### 34.2 `useAuditResponses(sessionId)`
-- Realtime subscription על `audit_responses` עם filter session_id.
-- כל UPDATE → `auditStore.handleResponseUpdate(...)`.
-- מחזיר את ה־Map.
-
-### 34.3 `useAuditAlerts(sessionId)`
-- Realtime subscription על `audit_alerts`.
-- כל INSERT → toast + sound + `auditStore.handleAlertInsert(...)`.
-
-### 34.4 `useAuditStats`
-- memoized aggregations:
-  - by class: counts per category.
-  - by category: total counts.
-  - by distance_bucket: counts.
-
-### 34.5 `useAuditLocationCollector(sessionId)`
-- בצד התלמיד.
-- בודק האם זה תלמיד שכבר ב־OUT_PERMIT (אם כן, שולח מיד ולא דורש GPS).
-- אחרת, מציג Sheet עם כפתור "אשר".
-- ברגע אישור — `navigator.geolocation.getCurrentPosition` עם:
-  - `enableHighAccuracy: true`
-  - `timeout: 15000`
-  - `maximumAge: 0`
-- שולח RPC `submit_audit_response`.
-
-### 34.6 `useProjectionRotation`
-- timer של 6-12 שניות לכל tab.
-- מבטל כשהמשתמש לוחץ.
 
----
+A session is in exactly one state at any time. Transitions are one-way. There is no resurrection — a CLOSED session cannot be reopened. If the admin needs to "redo" an audit, they open a new one; sessions are cheap.
 
-## 35. עץ רכיבים (Component Tree)
+### 12.1.2 Response state machine
 
 ```
-<AdminLayout>
-  └─ <Routes>
-      ├─ /admin/audit → <AuditLandingPage>
-      │                   ├─ <PastAuditList>
-      │                   └─ <OpenAuditCta>
-      ├─ /admin/audit/new → <AuditNewPage>
-      │                       ├─ <AuditModeSelector>
-      │                       ├─ <AuditClassSelector>
-      │                       └─ <AuditLocationSettings>
-      ├─ /admin/audit/:id/live → <AuditLivePage>
-      │                            ├─ <AuditHeader>
-      │                            ├─ <AuditKpiRow>
-      │                            ├─ <AuditTabs>
-      │                            │    ├─ <AuditMap> (when mode=LOCATION)
-      │                            │    ├─ <AuditHeatmap>
-      │                            │    ├─ <AuditClassGrid>
-      │                            │    │    └─ <AuditClassCard> (× N)
-      │                            │    └─ <AuditTable>
-      │                            ├─ <AuditActivityFeed>
-      │                            ├─ <AuditAlertList>
-      │                            ├─ <AuditCloseButton>
-      │                            └─ <AuditProjectionMode> (overlay)
-      ├─ /admin/audit/:id/summary → <AuditSummaryPage>
-      └─ /admin/audit/compare → <AuditComparePage>
-
-<ClassSupervisorLayout>
-  └─ <Routes>
-      └─ /class-supervisor → <SupervisorDashboard>
-                              └─ <SupervisorAuditPanel> (כשיש audit ACTIVE)
-                                  ├─ <SupervisorAuditHeader>
-                                  ├─ <SupervisorStudentList>
-                                  │   └─ <SupervisorStudentRow> (× N)
-                                  └─ <SupervisorAuditAlerts>
-
-<StudentLayout>
-  └─ <StudentHomePage>
-      └─ <StudentAuditSheet> (Bottom Sheet, opens when audit active + GPS needed)
+                   open_audit() inserts
+                          │
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+        ▼                 ▼                 ▼
+   ┌─────────┐      ┌──────────┐     (initial state for everyone else)
+   │PENDING  │ ◄────│OUT_PERMIT│     ┌─────────┐
+   └────┬────┘      │(auto from│     │PENDING  │
+        │           │departure)│     └────┬────┘
+        │           └──────────┘          │
+        │                                 │
+        ├──── mark/auto-gps ──► IN_YESHIVA│
+        ├──── mark/auto-gps ──► OUT_PERMIT│   (these arrows
+        ├──── mark/auto-gps ──► OUT_NO_PERMIT  apply to any
+        ├──── auto-gps ──────► UNKNOWN    │   non-terminal state)
+        │                                 │
+        └──── close_audit ──► UNKNOWN─────┘
+              (if still PENDING at close)
 ```
-
----
-
-## 36. שימור State מול Refresh — אסטרטגיה
-
-**העיקרון:** ה־DB הוא תמיד source of truth. UI = שיקוף.
-
-**זרימה אחרי refresh:**
-1. ה־App עולה.
-2. `useActiveAudit` mount → קורא `get_active_audit()`.
-3. אם יש session ACTIVE:
-   - `auditStore.session = ...`
-   - `useAuditResponses(sessionId)` mount → subscribe לrealtime, מטעין initial data מ־`get_audit_full(session_id)`.
-   - Routing: אם המנהל היה ב־`/admin/audit/...` → ממשיך באותו דף. אחרת — מציג banner "ביקורת פעילה — [פתח]".
-4. אם אין session — UI רגיל.
-
-**רכז כיתה (אחרי refresh):**
-- אותה זרימה. `get_active_audit()` מחזיר גם את הסשן.
-- אם הסשן ACTIVE וכיתת הרכז כלולה — `SupervisorAuditPanel` נפתח אוטומטית.
-- כל הסימונים שהרכז עשה לפני הריענון — נטענים מ־`audit_responses`.
-
-**תלמיד (אחרי refresh):**
-- אם יש session ACTIVE עם mode=LOCATION ו־response שלו עדיין PENDING — Sheet GPS נפתח אוטומטית.
-- אם כבר שלח — toast קצר "✓ נשלח" ואז סגירה.
-
----
-
-## 37. ספריות חיצוניות שיתווספו
 
-| ספרייה | ייעוד | מקור | רישיון |
-|---------|-------|-------|---------|
-| `leaflet` | מפה | npm | BSD |
-| `react-leaflet` | wrapper React | npm | Hippocratic |
-| `leaflet.markercluster` | קלסטרים | npm | MIT |
-| `framer-motion` (קיים?) | אנימציות | npm | MIT |
-| `howler` | סאונדים קלים (ding) | npm | MIT |
-| `jspdf` + `jspdf-autotable` | ייצוא PDF | npm | MIT |
-| `xlsx` (קיים?) | ייצוא Excel | npm | Apache-2 |
-| `clsx` (קיים) | utility | — | MIT |
+**Important properties:**
 
-> השאר משתמשים בקיים: Zustand, shadcn/ui, Tailwind, lucide-react, Sonner (toast), Recharts.
+- All response states are non-terminal during an active session. A response that is `IN_YESHIVA` can be reclassified to `OUT_NO_PERMIT` if the admin overrides.
+- Once the session closes, the response state becomes effectively immutable. (We do not technically lock it in SQL — there are theoretical post-close override use cases — but the UI does not expose any way to change a closed session's responses. If we discover such a need we'll add an explicit override flow.)
+- Every transition produces a `audit_response_log` row.
 
----
-
-# חלק ח׳ — Design System
-
-## 38. עקרונות עיצוב
-
-1. **Calm by default** — 90% מהזמן הדשבורד שקט וירוק. רק חריגות מקפיצות.
-2. **Information density gradient** — KPI Row למעלה (תמצית), Activity Feed למטה (פירוט), Tabs באמצע (מסך מלא).
-3. **Motion meaningful** — אנימציה רק כשמשמעותית. לא יותר מ־300ms.
-4. **Color = semantic** — לעולם לא דקורטיבי. ירוק = OK, אדום = בעיה.
-5. **Whitespace generous** — לא דחוס. רווח אוויר.
-6. **Mobile parity** — כל מסך עובד גם בנייד. גריד 1 עמודה ב־< 768px.
-
-## 39. פלטת צבעים מורחבת
-
-```css
-:root {
-  /* Status colors */
-  --audit-green:   #10b981;  /* IN_YESHIVA, distance GREEN */
-  --audit-green-bg: #d1fae5;
-  --audit-blue:    #3b82f6;  /* OUT_PERMIT, distance BLUE */
-  --audit-blue-bg: #dbeafe;
-  --audit-orange:  #f59e0b;  /* distance ORANGE, partial alert */
-  --audit-orange-bg: #fef3c7;
-  --audit-red:     #ef4444;  /* OUT_NO_PERMIT, distance RED */
-  --audit-red-bg:  #fee2e2;
-  --audit-purple:  #a855f7;  /* EXCUSED_SICK */
-  --audit-purple-bg: #f3e8ff;
-  --audit-gray:    #6b7280;  /* PENDING, UNKNOWN */
-  --audit-gray-bg: #f3f4f6;
-
-  /* Projection mode */
-  --proj-bg: #000;
-  --proj-text: #fff;
-  --proj-accent: #fbbf24;
-  --proj-red: #ff3838;
-  --proj-green: #4ade80;
-}
-```
+## 12.2 The "open an audit" workflow, step by step
 
-## 40. טיפוגרפיה ומצב הקרנה
+The most important workflow. The admin is in motion. Every step is timed.
 
-| הקשר | פונט | גודל | משקל |
-|------|------|------|------|
-| Body (regular) | Inter / system | 14-16px | 400 |
-| KPI numbers (regular) | Inter | 32-40px | 700 |
-| KPI numbers (projection) | Inter | 72-96px | 900 |
-| H1 (regular) | Inter | 24-28px | 600 |
-| H1 (projection) | Inter | 64-80px | 700 |
-| Hebrew (regular) | "Rubik", Inter, system | קצת יותר גדול | — |
-| Numbers (latin) | "JetBrains Mono", Inter | — | — |
+1. **Tap audit tile** — 1 tap. Navigates to `/admin/audit` (landing).
+2. **Tap "new audit"** — 1 tap. Navigates to `/admin/audit/new`.
+3. **Pick mode** — 1 tap. Confirms with a "next" button (1 more tap, deliberate friction to avoid accidental mode-pick).
+4. **Confirm class selection** — Default is all classes pre-checked. 1 tap on "next" if no change. Total taps so far: 5.
+5. **For LOCATION mode, confirm settings** — Default settings are usually fine. 1 tap on "next". For MANUAL mode, this step is skipped.
+6. **Confirm-and-open screen** — Shows summary. 1 final tap on "פתח". Total taps: 6 (MANUAL) or 7 (LOCATION).
+7. **Spinner for 1–3 seconds** while RPC runs and push fans out.
+8. **Land on live dashboard.**
 
-## 41. אנימציות — "Data Jumping"
+End-to-end time, from intent to live dashboard: **8–12 seconds**. This is the budget.
 
-### 41.1 כרטיס כיתה — תלמיד מקבל סטטוס חדש
+## 12.3 The "mark a student" workflow, supervisor side
 
-```
-מצב התחלתי:  אפור, scale 1.0, opacity 1.0
-              ↓ (אירוע: response category changed)
-שלב 1 (0ms):  scale 0.92, opacity 0.6, color = new color
-שלב 2 (120ms): scale 1.08, opacity 1.0
-שלב 3 (240ms): scale 1.0
-```
+1. **Receive push, tap notification** — 1 tap. Opens the app deep-linked to supervisor panel.
+2. **Tap category button on a student** — 1 tap. Optimistic UI; the button shows the new color immediately; the network call runs in background.
+3. **Confirmation appears** — 0 taps. A subtle color change confirms.
+4. **Next student** — Scroll, repeat.
 
-framer-motion:
-```tsx
-<motion.div
-  layout
-  initial={false}
-  animate={{ scale: justChanged ? [1, 0.92, 1.08, 1] : 1 }}
-  transition={{ duration: 0.3 }}
-  style={{ backgroundColor: categoryColor }}
-/>
-```
+Per-student time: 0.5–2 seconds. For 23 students: 30–60 seconds is the budget.
 
-### 41.2 KPI Numbers — countup
+## 12.4 The "respond to location request" workflow, student side
 
-`react-countup` או custom — כל פעם שהמספר משתנה, אנימציה של 600ms.
+1. **Phone buzzes, glance at notification** — 0 taps so far. Recognition is immediate from the unique-icon.
+2. **Tap notification** — 1 tap. App opens, bottom sheet is already on screen.
+3. **Tap "אשר"** — 1 tap.
+4. **Browser permission dialog** — If first time, browser asks "allow this site to access your location?". 1 tap on "allow". (Subsequent times, this step is skipped.)
+5. **GPS acquired, RPC called, sheet dismissed** — 0 taps from student. 2-4 seconds of waiting.
+6. **Confirmation toast: "✓ נשלח, תודה"** — 0 taps. 3-second fade.
 
-### 41.3 Heatmap blocks — fill animation
+Total student time: 5-10 seconds for first audit, 3-6 seconds for subsequent.
 
-עם CSS transition: `transition: background-color 400ms ease-out`.
+## 12.5 The "close an audit" workflow
 
-### 41.4 Map markers — pulse on new
+1. **Admin notices "good enough" state on the dashboard** (e.g. 376/381 marked, the rest are known absences).
+2. **Tap "סיים"** — 1 tap. Modal opens.
+3. **Modal shows summary preview + a notes field** — 0 taps to look. Optional 1-second to type a one-word note.
+4. **Tap "אישור"** — 1 tap.
+5. **Spinner, then navigate to summary page** — 1-2 seconds.
 
-`@keyframes pulse-marker` — ring around marker, fades in 200ms.
+Total close time: 3-5 seconds.
 
-### 41.5 Activity Feed — slide in
+## 12.6 The "I missed it, let me catch up" workflow
 
-חדש נכנס מלמעלה, ישן יורד למטה — framer-motion `<AnimatePresence>`.
+This is replay. The most important architectural property.
 
-### 41.6 Alert — flash + shake
+1. **User opens the app, having missed the start of an audit** — could be any role.
+2. **The app's normal "after login" routing checks for an active session.**
+3. **If one is active and the user has a relevant role, a banner appears at the top of their landing page:** "ביקורת פעילה — לחץ להמשך".
+4. **Tap banner** — 1 tap. Lands on the appropriate live page (admin dashboard, supervisor panel, or student sheet).
+5. **All state visible** — Full state is rendered from `get_active_audit`. No "you missed N updates"; the current state *is* the truth.
 
-קוביית כיתה: animate בורדר אדום מהבהב 3 פעמים (300ms total) + screen edge flash (10ms red bar בכל הצדדים).
+This workflow exists at every layer. It is not a feature; it is a guarantee.
 
 ---
 
-## 42. צלילים / Haptic / התראות
+# Part 13 — State Management & Lifecycle
 
-### 42.1 קבצי סאונד (לאחסן ב־`public/sounds/`):
+## 13.1 The single principle
 
-| אירוע | סאונד | משך | עוצמה |
-|--------|--------|-----|--------|
-| תלמיד התווסף (response חדש) | `chime-soft.mp3` | 200ms | 30% |
-| התראת מרחק (ORANGE) | `ding.mp3` | 400ms | 50% |
-| אזעקה (RED) | `alert.mp3` | 800ms | 70% |
-| ביקורת התחילה (בצד תלמיד) | `notification.mp3` | 300ms | 60% |
-| ביקורת סגורה | `complete.mp3` | 500ms | 40% |
+State has one home: the database. The client *displays* state. The client never *holds* state that hasn't been written to the database, except for transient UI input (a half-typed note field, the local "which tab is selected" toggle). Optimistic UI is permitted as long as it reconciles within 1 second against the canonical realtime event.
 
-`howler.js` מנהל את כל הסאונדים. עם volume control גלובלי + mute switch.
+## 13.2 Replay-safety as a guarantee
 
-### 42.2 Haptic (נייד)
+Every audit-related screen must satisfy:
 
-`navigator.vibrate(...)`:
-- תלמיד מקבל בקשה: vibrate(150)
-- תלמיד שלח GPS בהצלחה: vibrate([50, 50, 50])
-- רכז מסמן: vibrate(50)
+> If I close my browser, reopen it, log in, and navigate back to this URL, I see exactly what I saw before, with no degraded data.
 
----
+This guarantee is tested explicitly for:
 
-## 43. מצב חושך/אור
+- Admin live dashboard mid-session
+- Admin live dashboard with alerts open
+- Supervisor panel mid-marking
+- Student sheet awaiting consent
+- Admin summary page after session close
+- Audit history page
+- Audit compare page
 
-כל הצבעים יש להם variants ב־CSS variables. הדשבורד עובד אוטומטית בשני המצבים.
-- מצב הקרנה תמיד חושך (גם אם המשתמש בחר light).
+If any screen fails this test, the screen is broken and ships nowhere.
 
----
+## 13.3 Realtime as notification, not state
 
-## 44. RTL ושפה
+The realtime channel does one thing: it tells subscribers that a row changed. The subscriber's job is to:
 
-- כל הטקסטים בעברית.
-- `dir="rtl"` על `<html>`.
-- Tailwind: שימוש ב־`start`/`end` במקום `left`/`right`.
-- מספרים נשארים שמאל לימין (LTR enclave): `<span dir="ltr">123</span>` במידת הצורך.
-- אייקונים: מיקום פלוס תלוי הקשר — חצי "→" הופך "←" בעברית.
+1. Acknowledge the event.
+2. **Refetch the canonical row from the database** (in practice, the realtime event carries the new row data, so this often happens implicitly).
+3. Update its local view.
 
----
+If a realtime event is dropped, the next polling refresh corrects the state. If two events arrive out of order, the latest by `updated_at` wins. There is no client-side reordering or merging logic.
 
-# חלק ט׳ — Post-Audit
+## 13.4 Optimistic UI rules
 
-## 45. מסך סיכום מיידי
+Optimistic UI is permitted for actions where the client knows the likely outcome:
 
-ברגע סגירת ביקורת, modal מודאלי מקפיץ (לא navigate):
+- **Supervisor taps "נוכח" on student X.** The button can immediately show the new state. The RPC call goes out concurrently. On RPC success, the realtime event arrives (within ~500 ms) and confirms. On RPC failure, the optimistic state is **reverted** and a toast appears.
+- **Admin acknowledges an alert.** Same pattern.
 
-```
-┌──────────────────────────────────────────────────────────┐
-│              ✅ ביקורת הסתיימה                            │
-│              משך: 04:23                                   │
-│              לפי שעון: 09:15-09:19                        │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│   ┌────────────────────────────┐                         │
-│   │       372 / 381           │                         │
-│   │       בישיבה (97.6%)       │                         │
-│   └────────────────────────────┘                         │
-│                                                          │
-│   🔵  6 בחוץ עם אישור                                    │
-│   🔴  3 בחוץ בלי אישור   [פרטים →]                       │
-│   ⚪  0 לא ידוע                                          │
-│                                                          │
-│   ⚠ 1 אזעקה — יהושע ברק (38 ק"מ)  [פתח →]                │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│        [סגור]              [פתח דוח מלא →]              │
-└──────────────────────────────────────────────────────────┘
-```
+Optimistic UI is **not** permitted for actions whose outcome is uncertain:
 
-## 46. דף "ביקורות קודמות"
+- **Admin opens an audit.** The RPC may fail (e.g. another session is active). No optimistic navigation — wait for response.
+- **Admin closes an audit.** Confirm modal first, then RPC.
 
-`/admin/audit` — דף נחיתה:
+## 13.5 Persisted client state — minimal and intentional
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  ←  ביקורות                                              │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│        [⚡ פתח ביקורת חדשה]                              │
-│                                                          │
-│  סנן: [כל המצבים ▼] [30 ימים אחרונים ▼] [חפש]            │
-│                                                          │
-│  ────── שני, 15 מאי 2026 ─────                          │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │ 📍 09:15  ביקורת מיקום  04:23  16 כיתות           │ │
-│  │ 372/381 בישיבה (97.6%)  1 אזעקה  [פתח →]           │ │
-│  └────────────────────────────────────────────────────┘ │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │ ⚡ 13:30  ביקורת מהירה  01:50  16 כיתות            │ │
-│  │ 378/381 בישיבה (99.2%)  [פתח →]                    │ │
-│  └────────────────────────────────────────────────────┘ │
-│                                                          │
-│  ────── ראשון, 14 מאי 2026 ─────                        │
-│  ...                                                     │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
-```
+One Zustand store (`audit-ui-store`) is persisted to localStorage. It contains exclusively **UI preferences**:
 
-## 47. השוואה בין ביקורות
+- `activeTab` — which of the four views is selected
+- `soundEnabled` — whether sound is on
 
-```
-/admin/audit/compare?ids=A,B,C
-```
+That is the entire list. Crucially **not** in localStorage:
 
-טבלת השוואה: כל ביקורת בעמודה. שורות = KPIs:
+- The session id
+- Any response data
+- Any partial form data (would be lost intentionally on refresh)
+- Auth tokens (existing auth store handles those)
+- Filter state — deliberately reset on refresh so the user starts fresh.
 
-```
-┌──────────────────────┬────────┬────────┬────────┐
-│  KPI                 │ 09:15  │ 13:30  │ 14/05  │
-│                      │ מיקום  │ מהיר   │ מיקום  │
-├──────────────────────┼────────┼────────┼────────┤
-│ בישיבה               │ 372    │ 378    │ 374    │
-│ בחוץ עם אישור        │ 6      │ 2      │ 5      │
-│ בחוץ בלי אישור       │ 3      │ 1      │ 2      │
-│ לא ידוע              │ 0      │ 0      │ 0      │
-│ אזעקות (>5km)        │ 1      │ —      │ 0      │
-│ אחוז הגבה (mode 2)   │ 92%    │ —      │ 95%    │
-└──────────────────────┴────────┴────────┴────────┘
-```
+## 13.6 Concurrency
 
-גרף קווי: נוכחות לפי זמן.
+Two admins, one session: both connected via realtime to the same `audit_v2:<session_id>` channel. Both see all events. If both press "close" simultaneously, the RPC has an internal advisory lock; the second call returns `SESSION_NOT_ACTIVE` and the second admin sees a toast. No partial-close.
 
-## 48. ייצוא PDF / Excel
+Two supervisors of the same class: the supervisor role-per-class is single-supervisor by design (one madrich per shi'ur), but the system tolerates two open supervisor panels on the same class. The last write wins; the `audit_response_log` captures the prior state.
 
-- **PDF** (jspdf + autoTable): דוח מלא — KPI, רשימת תלמידים, אזעקות, מפת snapshot (אם mode=LOCATION).
-- **Excel** (xlsx): גליון per category, גליון לכל הסשנים בטווח.
+A student opening the audit on two devices: the student's response is one row. Both devices submit; the second submit overwrites the first. Both `audit_response_log` rows exist.
 
 ---
-
-# חלק י׳ — הרשאות וביטחון
-
-## 49. תפקידים והרשאות
-
-| פעולה | מנהל | רכז | תלמיד |
-|--------|------|------|--------|
-| לפתוח ביקורת מהירה | ✅ | ❌ (החלטה: רק admin) | ❌ |
-| לפתוח ביקורת מיקום | ✅ | ❌ | ❌ |
-| לראות ביקורת חיה | ✅ (כולה) | ✅ (כיתה שלו) | ✅ (Sheet) |
-| לסמן תלמיד | ✅ | ✅ (כיתה שלו) | ❌ |
-| לסגור ביקורת | ✅ | ❌ | ❌ |
-| לראות היסטוריה | ✅ (כולה) | ✅ (כיתה שלו) | ❌ |
-| להשוות ביקורות | ✅ | ❌ | ❌ |
-| לאשר אזעקה | ✅ | ✅ (כיתה שלו) | ❌ |
-
-## 50. RLS Policies
-
-(לאפליקציה לאחר ש־RLS יופעל בעתיד — TODO ב־CLAUDE.md):
-
-```sql
--- audit_sessions: רק admin יכול ליצור/לעדכן/למחוק. כולם יכולים לקרוא ACTIVE.
-ALTER TABLE audit_sessions ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "audit_sessions: read all"
-  ON audit_sessions FOR SELECT
-  USING (true);
+# Part 14 — Error Handling
 
-CREATE POLICY "audit_sessions: admin write"
-  ON audit_sessions FOR INSERT
-  WITH CHECK (auth.jwt() ->> 'role' = 'admin');
+## 14.1 Error categorization
 
--- audit_responses: רכז יכול לעדכן רק תלמידים בכיתה שלו.
--- (PIN-based system, RLS not enforced yet — TODO)
-```
-
-## 51. PII והגנת פרטיות
-
-- **GPS נשמר רק במהלך ביקורת ACTIVE + 30 ימים אחרי**. cron מוחק.
-- **הסכמה מתועדת**: ה־`audit_responses.gps_status` שומר `DENIED` אם תלמיד דחה — לא הופך אותו "אשם".
-- **הצגה לרכז**: הרכז רואה מרחק של תלמיד שלו (לא קואורדינטה מדויקת ברירת מחדל).
-- **Audit log**: כל פעולה של אדמין/רכז נכנסת ל־`admin_overrides` (קיים).
-
----
-
-# חלק י"א — GPS Engineering
-
-## 52. בקשת הרשאת geolocation
-
-יותר מתחכמת מהקוד הקיים:
-
-```ts
-// פסאודו-קוד (לא ליישום עכשיו)
-async function collectAuditGPS(sessionId: string): Promise<AuditGpsResult> {
-  // 1. בדוק אם permission כבר אושר
-  const perm = await navigator.permissions.query({ name: 'geolocation' })
-  if (perm.state === 'denied') {
-    return { status: 'DENIED' }
-  }
-
-  // 2. אם prompt — הצג UI הסבר קודם
-  if (perm.state === 'prompt') {
-    const userConsents = await showExplainerDialog()
-    if (!userConsents) return { status: 'DENIED' }
-  }
-
-  // 3. אסוף עם high accuracy, no cache
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ status: 'TIMEOUT' }), 15000)
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        clearTimeout(timer)
-        resolve({
-          status: 'OK',
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          accuracy_m: pos.coords.accuracy,
-        })
-      },
-      (err) => {
-        clearTimeout(timer)
-        if (err.code === 1) resolve({ status: 'DENIED' })
-        else if (err.code === 2) resolve({ status: 'UNAVAILABLE' })
-        else resolve({ status: 'TIMEOUT' })
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    )
-  })
-}
-```
-
-## 53. בקרת איכות — accuracy filter
-
-- אם `accuracy_m > 200` (רדיוס שגיאה גדול מ־200m): מסמן בעמודה אבל ה־UI מציג ⚠ דגל קטן.
-- אם `accuracy_m > 1000` (אזור מאוד גס): מסומן כ־`UNKNOWN` ו־gps_status=`LOW_ACCURACY`.
-
-## 54. חישוב Haversine
-
-מיושם ב־DB (RPC, ראה למעלה) — גם בצד client לתצוגה מקדימה:
-
-```ts
-function haversine(lat1, lng1, lat2, lng2): number {
-  const R = 6371000
-  const toRad = (d) => d * Math.PI / 180
-  const dLat = toRad(lat2 - lat1)
-  const dLng = toRad(lng2 - lng1)
-  const a = Math.sin(dLat/2)**2 +
-            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-            Math.sin(dLng/2)**2
-  return R * 2 * Math.asin(Math.sqrt(a))
-}
-```
+Errors fall into four behavior categories. Every error encountered in the design lifecycle is sorted into one.
 
-## 55. קטגוריזציה לפי מרחק
+**Category A — User can correct now.**
+Example: typing an invalid PIN; selecting zero classes for an audit. Behavior: inline error message next to the field, explanation, no progression.
 
-תואם להגדרת המנהל:
+**Category B — User can retry.**
+Example: network blip during RPC; realtime websocket dropped. Behavior: in-place retry button; the rest of the UI remains usable; explanation visible but unobtrusive.
 
-```
-GREEN:   0   – 300m   (בישיבה)
-BLUE:    300 – 1000m  (קרוב — אזור הישיבה)
-ORANGE:  1km – 5km    (אזור חברון — חוץ מהישיבה)
-RED:     > 5km        (אזעקה — רחוק)
-```
+**Category C — User cannot fix, but the system can continue.**
+Example: a student's push notification failed to deliver. Behavior: silently logged; reported in aggregate in the admin's dashboard ("8 of 381 push sends failed"); not a per-student alert.
 
-ב־`src/lib/audit/distanceBuckets.ts`:
-```ts
-export const BUCKETS = {
-  GREEN: { max: 300, color: 'green', label: 'בישיבה' },
-  BLUE:  { max: 1000, color: 'blue', label: 'באזור הישיבה' },
-  ORANGE:{ max: 5000, color: 'orange', label: 'אזור חברון' },
-  RED:   { max: Infinity, color: 'red', label: 'מחוץ לטווח' },
-}
-```
+**Category D — Hard failure.**
+Example: Postgres unreachable; auth invalid. Behavior: full-screen error component; clear messaging; offers retry or return-to-home; logs to client telemetry.
 
-## 56. ניהול שגיאות GPS
+## 14.2 Error catalog with prescribed behavior
 
-| code | משמעות | פעולה |
-|------|---------|--------|
-| 1 PERMISSION_DENIED | תלמיד דחה | `gps_status='DENIED'` — רכז יחליט |
-| 2 POSITION_UNAVAILABLE | מכשיר ללא GPS | `gps_status='UNAVAILABLE'` |
-| 3 TIMEOUT | לא חזר בזמן | `gps_status='TIMEOUT'` |
-| custom OFFLINE | אין רשת | `gps_status='OFFLINE'` — נשמר ב־IndexedDB, ישלח כשיחזור |
+| Error | Category | UI behavior | Recovery |
+|---|---|---|---|
+| `AUDIT_ACTIVE` (open attempt fails) | A | Modal: "ביקורת פעילה כעת מ-09:15. המשך אותה או בטל." | Two buttons: Continue / Abort + Open New |
+| `INVALID_MODE` | A | Inline form error | Re-select |
+| `NO_CLASSES_SELECTED` | A | Inline form error, disable submit | Select a class |
+| `SESSION_NOT_FOUND` | D | Full screen: "סשן זה לא קיים. ייתכן שנמחק." | Return to landing |
+| `SESSION_NOT_ACTIVE` (submit attempt fails) | D | Toast + navigate to summary | Auto-redirect |
+| `RPC_NETWORK_TIMEOUT` | B | Retry button on the failed action | Retry x3 with backoff |
+| `RPC_5XX_SERVER_ERROR` | B | Retry button + telemetry breadcrumb | Retry x3 with backoff |
+| `REALTIME_DISCONNECTED` | C | Discreet banner: "מתחבר מחדש…" (top of screen) | Polling fallback continues |
+| `PUSH_PARTIAL_FAILURE` | C | KPI shows "299/381 הגיעו" + tooltip | Admin can re-send manually |
+| `GPS_DENIED` | A (for student) / C (aggregated for admin) | Student sees a "אני לא יכול" path; admin sees `UNKNOWN` count rise | None — by design |
+| `GPS_TIMEOUT` | A | Student sees retry option | Manual retry |
+| `GPS_LOW_ACCURACY` | C | Response is `UNKNOWN`; admin sees it as such | Manual marker if needed |
+| `EDGE_FUNCTION_DOWN` | B (during fan-out) | "פרסום ההתראה נכשל. נסה שוב." | Retry button |
+| `PERMISSION_DENIED` (auth fail) | D | Redirect to login | Re-authenticate |
+| `OFFLINE_NETWORK` | B | Toast "אתה במצב לא מקוון"; queue mutations | Auto-flush on reconnect |
+| `STUDENT_NOT_IN_SESSION` | D | Toast "תלמיד זה לא בביקורת" | Refresh, verify |
+| `CONCURRENT_CLOSE` | C | Toast "מישהו אחר סיים את הביקורת" | Navigate to summary |
 
----
+## 14.3 Error message principles
 
-# חלק י"ב — Push & Realtime
-
-## 57. Web Push מורחב
-
-קיים: `send-push` edge function (VAPID + AES-128-GCM). נצטרך:
-- **`send-audit-push`** (חדש) — אותו מנגנון, אבל payload ייעודי לביקורת.
-- **כשל push (HTTP 410):** ננקה את ה־push_token. תלמיד יקבל בקשה רק ברגע שייכנס לאפליקציה.
-- **Service Worker:** עדכון ל־`public/sw.js` — אם payload.kind === 'AUDIT_LOCATION', נציג notification עם ButtonAction "פתח".
-
-## 58. Channels — תכנון מלא
-
-| Channel | Pub | Sub | Filter |
-|---------|-----|-----|---------|
-| `audit:active` | DB | Manager UI | — (1 active session) |
-| `audit_responses` | DB | Manager UI | session_id=eq.X |
-| `audit_responses` | DB | Supervisor UI | session_id=eq.X AND class_id=eq.Y |
-| `audit_alerts` | DB | Manager UI | session_id=eq.X |
-
-Realtime subscription pattern:
-```ts
-const channel = supabase
-  .channel(`audit:${sessionId}`)
-  .on('postgres_changes', {
-    event: 'UPDATE',
-    schema: 'public',
-    table: 'audit_responses',
-    filter: `session_id=eq.${sessionId}`
-  }, (payload) => {
-    auditStore.handleResponseUpdate(payload.new)
-  })
-  .on('postgres_changes', {
-    event: 'INSERT',
-    schema: 'public',
-    table: 'audit_alerts',
-    filter: `session_id=eq.${sessionId}`
-  }, (payload) => {
-    auditStore.handleAlertInsert(payload.new)
-    soundManager.play('alert')
-  })
-  .subscribe()
-```
+- **No error codes in user-facing messages.** Codes are for telemetry. UI says "הסשן הסתיים", not "SESSION_NOT_ACTIVE (HTTP 410)".
+- **No technical jargon.** "GPS_TIMEOUT" becomes "המיקום לקח יותר מדי זמן".
+- **Always offer the next action.** Every error message has a button. Never a dead-end.
+- **Hebrew throughout.** Even for developer-debug errors that leak to production, the message should be Hebrew with a small technical breadcrumb hidden behind a "פרטים טכניים" disclosure.
 
-## 59. Reconnection / Heartbeat
+## 14.4 Telemetry on errors
 
-- Supabase ריאלטיים מתחבר מחדש אוטומטית.
-- אבל אם UI היה offline > 30 שניות: ה־Hook יבצע re-fetch של `get_audit_full(sessionId)` כדי לסנכרן.
-- Heartbeat: כל 30 שניות, אם realtime לא קיבל שום אירוע, fallback ל־polling.
+Every Category-B, C, and D error is sent to a telemetry endpoint with:
 
----
+- Error code
+- User role
+- Session ID (if any)
+- Browser metadata
+- Timestamp
 
-# חלק י"ג — Testing
-
-## 60. תרחישי QA
-
-| # | תרחיש | תוצאה צפויה |
-|---|--------|---------------|
-| T1 | מנהל פותח ביקורת מהירה לכל הכיתות | session ACTIVE + 381 responses PENDING |
-| T2 | רכז מסמן 5 תלמידים, ריענון | 5 הסימונים נשמרו, UI חוזר למצב המעודכן |
-| T3 | מנהל סוגר ביקורת באמצע | כל PENDING הופך UNKNOWN, session CLOSED, סיכום מוצג |
-| T4 | תלמיד 1 שולח GPS 50m, תלמיד 2 שולח 4000m | תלמיד 1 → IN_YESHIVA, תלמיד 2 → OUT_NO_PERMIT + ALERT (אם sensitivity מספקת) |
-| T5 | תלמיד דוחה GPS | gps_status=DENIED, category=UNKNOWN |
-| T6 | תלמיד ב־OFF_CAMPUS עם departure ACTIVE | category=OUT_PERMIT אוטומטית |
-| T7 | רכז עורך תלמיד שכבר GPS סימן | log רושם שינוי, ה־UI מציג שינוי לרכז |
-| T8 | 2 מנהלים פותחים בו זמנית | השני מקבל "AUDIT_ACTIVE" — חוזר לדף שלו |
-| T9 | המנהל מחליף Tab → Heatmap → Map | tab נשמר ב־uiStore (זמני) |
-| T10 | המנהל פותח projection mode | full-screen, רוטציה אחרי 12 שניות |
-| T11 | יוצא מ־projection (ESC) | חוזר לדשבורד הרגיל |
-| T12 | אזעקה RED נוצרת | קוביית הכיתה מהבהבת + ding + Modal יזום למנהל |
-| T13 | רכז מסמן EXCUSED_SICK | category=EXCUSED_SICK, סגול |
-| T14 | מנהל ייצא PDF | קובץ נוצר עם כל הפרטים |
-
-## 61. Edge cases ידועים
-
-1. **תלמיד עם 2 מכשירים** — UPSERT, האחרון מנצח.
-2. **רכז בלי push** — fallback ל־Realtime broadcast.
-3. **timeout GPS על נייד ישן** — חוזר אחרי 15s עם status=TIMEOUT.
-4. **רשת איטית** — Optimistic UI, RPC ברקע, rollback אם נכשל.
-
-## 62. Load testing
-
-- 381 תלמידים שולחים GPS באותה שנייה.
-- Postgres triggers צריכים להתמודד.
-- ביצועי Realtime — Supabase תומך עד ~200 conn/sec.
+This data does not include PII. It feeds the post-rollout monitoring dashboard (§17).
 
 ---
 
-# חלק י"ד — Step-by-Step Roadmap
+# Part 15 — Edge Cases
 
-זה החלק החשוב ביותר במסמך. כל צעד מסומן עם:
-- **תלות** (אילו צעדים קודמים)
-- **קבצים** (אילו קבצים נוגעים)
-- **תוצרים** (מה נוצר/השתנה)
-- **בדיקות** (כיצד לוודא שעבד)
+A catalog of edge cases, each with a designed handling. Edge cases are weaknesses if undesigned; they are strengths if anticipated.
 
----
+| # | Scenario | Handling |
+|---|---|---|
+| 1 | A student is in two classes (rare but possible during a transition week). | The class denormalization snapshots the student's classId at session open. The response carries that class. If the student later changes class in the Sheet, the audit retains the original. |
+| 2 | A student is added to the Sheet during an active audit. | The student is **not** added to the active session. They will be in the next audit. Adding mid-session would create a row with a missing time-history. |
+| 3 | A student is deleted from the Sheet during an active audit. | The cascade does *not* fire (the audit reference is to the *response*, not the student). The response row remains; the student id is now dangling. UI handles by showing the studentId hash truncated and a "תלמיד נמחק" badge. History stays intact. |
+| 4 | The admin's PIN is changed during an active session. | Existing supervisor PINs (which are concatenated from the admin PIN) become invalid. Supervisors who were marking lose authorization on their *next* submission. The session continues; the admin can manually mark on supervisors' behalf, or pause and rotate codes. **Mitigation:** UI warns the admin before saving a PIN change while a session is active. |
+| 5 | A supervisor opens the app for a class they no longer manage. | The supervisor panel queries by their authenticated class. If they have no class, the panel is empty with a message "אינך משויך לכיתה". |
+| 6 | Two students share one phone (rare, but in dormitories it happens). | Each authenticates separately. Each has their own push_token. The shared phone receives two pushes for two different student IDs. The student must tap the right notification for themselves. |
+| 7 | A student has multiple devices (phone and old phone). | Whichever device most recently set its push_token receives the audit push. The other becomes silent. **This is a known limitation; not addressed in v1.** |
+| 8 | The admin opens an audit at 23:55 and closes it at 00:05 the next day. | All timestamps are TIMESTAMPTZ; the session crosses date boundaries cleanly. The summary shows the cross-day range explicitly. |
+| 9 | Daylight-saving transition during an active audit. | Asia/Jerusalem observes DST. TIMESTAMPTZ handles correctly. The "elapsed time" UI uses ISO time math, not display-local-time subtraction. No bug. |
+| 10 | The session is opened in MANUAL but the admin wants to add GPS for some students. | Not supported in v1. The admin can override any response manually, but cannot trigger a GPS request from a MANUAL session. **If demanded post-launch, a "request GPS for these N students" feature can be added without schema change.** |
+| 11 | A student's GPS reports accuracy of 50 km. | Tagged as `LOW_ACCURACY` and category set to `UNKNOWN`. The supervisor sees the student in their "needs manual" list. |
+| 12 | A student is in a Faraday cage (basement, elevator) and gets no GPS fix. | Times out, category `UNKNOWN`. Supervisor handles. |
+| 13 | GPS reports a position over water (clearly wrong, e.g. middle of the Dead Sea, which is geographically possible from Hebron). | The distance still computes legitimately. If the bucket is `RED`, an alert fires. If the supervisor knows the student is in fact on campus, they can override to `IN_YESHIVA` with a note. **The system does not "second-guess" GPS — it reports what it sees.** |
+| 14 | The student approves consent, gets the GPS dialog, takes a long time to make a decision, and approves after the session has closed. | The submit RPC returns `SESSION_NOT_ACTIVE`. The student sees a friendly message: "הסשן הסתיים. תודה." Their response is `UNKNOWN` for that session. |
+| 15 | A push notification is delivered 30 minutes late (some carriers do this). | Same as #14. By the time the student taps, the session may be closed. Same handling. |
+| 16 | The admin starts a session and then loses internet. | The session is created in DB. The admin's UI shows an "offline" banner. The admin cannot mark, but the session continues. Supervisors and students continue to be served by the DB. When the admin reconnects, they catch up. |
+| 17 | The Edge Function for push fails partway through fan-out. | The Edge Function reports partial success. The admin's UI shows the partial count. They can choose to retry (a separate Edge Function: `resend-audit-push` — same logic, only targets students with `audit_push_log.success=false`). |
+| 18 | A supervisor accidentally taps `OUT_NO_PERMIT` on a student. | The change is reflected immediately. The supervisor sees their action in the activity feed. They can tap the student row again and pick a different category. The audit_response_log records both transitions. |
+| 19 | An admin attempts to delete a student who has audit history. | Student deletion is a separate flow (via Sheets sync). The cascade rules: deleting a student deletes their responses but not their `audit_session` membership (responses CASCADE; session does not reference student directly). The aggregate stats remain correct minus that student. |
+| 20 | Two students with the same name in the same class. | The system shows full names; if duplicates exist, the supervisor disambiguates by other means (student ID, photo would help but is rejected on privacy grounds — §16). |
+| 21 | The admin lands on a "compare" page with three sessions selected, but one of those sessions is deleted from history. | The page fetches each session; failed fetches render as "ביקורת לא קיימת" tiles; the rest of the comparison renders normally. |
+| 22 | A class has 0 students (a placeholder class in the Sheet). | `open_audit` validates `total_students > 0` overall (across all selected classes). It does **not** validate per-class. Empty classes are simply empty in the dashboard. |
+| 23 | All 16 classes have 0 students (placeholder state). | `open_audit` returns `NO_STUDENTS_IN_SELECTION`. Admin sees an error. |
+| 24 | The browser tab is backgrounded for 30 minutes during an active session. | Most browsers throttle background tabs aggressively. Realtime may pause. When the tab is foregrounded, the polling fallback kicks in and the realtime reconnects. State is refreshed. |
+| 25 | The supervisor's phone runs out of battery mid-mark. | Whatever was already submitted is in DB. Re-login on a different device (or same device when charged) — replay-safe. |
+| 26 | A student's clock is set wrong (off by years). | The student's clock has no bearing on anything — all timestamps are server-side. |
+| 27 | The student is on a VPN that places them in Iceland by IP. | IP geolocation is not used; only GPS is used. VPN does not affect the result. |
+| 28 | The student denies GPS once, then changes their mind. | The student can tap the notification again (it's still there). The bottom sheet reopens. They can approve this time. |
+| 29 | The admin wants to "test" an audit without alerting everyone. | Not supported. There is no "test mode". The admin can use a `MANUAL` mode with a single test class to limit blast radius. Future: a sandbox project copy. |
+| 30 | The yeshiva expands to 600 students. | Architecture supports this without change (see §17.4). |
 
-## שלב 0 — הכנות סביבה (1-2 ימים)
-
-### 0.1 גיבוי
-- [ ] Snapshot של DB ב־Supabase Dashboard (לפני שינויי schema).
-- [ ] Tag git: `v1-before-audit-rewrite`.
-- [ ] **תוצרים:** backup ID, git tag.
-
-### 0.2 ספריות
-- [ ] `npm install leaflet react-leaflet leaflet.markercluster howler jspdf jspdf-autotable`
-- [ ] `npm install -D @types/leaflet @types/howler`
-- [ ] עדכון `package.json`, `package-lock.json`.
-
-### 0.3 קובץ סוגים
-- [ ] צור `src/types/audit.ts` עם:
-  - `AuditMode = 'MANUAL' | 'LOCATION'`
-  - `AuditSessionStatus = 'ACTIVE' | 'CLOSED' | 'ABORTED' | 'TIMED_OUT'`
-  - `AuditCategory = 'PENDING' | 'IN_YESHIVA' | 'OUT_PERMIT' | 'OUT_NO_PERMIT' | 'UNKNOWN' | 'EXCUSED_SICK'`
-  - `DistanceBucket = 'GREEN' | 'BLUE' | 'ORANGE' | 'RED'`
-  - `AuditSession`, `AuditResponse`, `AuditAlert` interfaces.
-
-### 0.4 קבצי הגדרה
-- [ ] צור `src/lib/audit/categories.ts` (תווית עברית + צבע + אייקון לכל קטגוריה).
-- [ ] צור `src/lib/audit/distanceBuckets.ts` (סף + צבע + תווית).
-- [ ] צור `src/lib/audit/haversine.ts` (פונקציה).
+The catalog is not exhaustive. It is representative of the rigor expected throughout. New edge cases discovered during implementation are appended.
 
 ---
 
-## שלב 1 — DB Schema (1-2 ימים)
-
-### 1.1 כתיבת migration
-- [ ] צור `supabase/migrations/20260516_internal_audit_v2.sql` עם:
-  - יצירת 4 הטבלאות.
-  - יצירת 4 indices.
-  - יצירת 2 triggers.
-  - ALTER PUBLICATION supabase_realtime.
-
-### 1.2 הרצה ב־DB
-- [ ] הרץ ב־Supabase Dashboard SQL Editor.
-- [ ] ודא בקליק שהטבלאות נוצרו (`list_tables` MCP).
-
-### 1.3 בדיקה ידנית
-- [ ] INSERT שורת test ל־audit_sessions.
-- [ ] INSERT שורת test ל־audit_responses.
-- [ ] UPDATE category → ודא ש־audit_response_log התעדכן.
-- [ ] UPDATE עם distance_bucket=RED → ודא ש־audit_alerts התעדכן.
-- [ ] DELETE ה־session → ודא CASCADE.
+# Part 16 — Security & Privacy
 
----
+This section is structured deliberately: the **threat model** comes before the **mitigations**, because mitigations without a threat model are theatre.
 
-## שלב 2 — RPC Functions (2-3 ימים)
+## 16.1 Threat model
 
-### 2.1 RPC: `open_audit`
-- [ ] כתוב SQL function (חתימה + לוגיקה מלאה — ראה סעיף 28.1).
-- [ ] בדיקה: קרא ל־RPC עם class_ids=['כיתה הרב הלל'], mode='MANUAL' — ודא ש־16 שורות responses נוצרו.
-- [ ] בדיקה: תלמיד עם departure ACTIVE → category=OUT_PERMIT אוטומטית.
+Threats are categorized by actor.
 
-### 2.2 RPC: `submit_audit_response`
-- [ ] כתוב SQL function (ראה 28.2).
-- [ ] בדיקה: submit עם GPS 50m → category=IN_YESHIVA, bucket=GREEN.
-- [ ] בדיקה: submit עם GPS 6000m → category=OUT_NO_PERMIT, bucket=RED, alert נוצר.
-- [ ] בדיקה: submit עם gps_status='DENIED' → category=UNKNOWN.
-- [ ] בדיקה: submit לסשן לא ACTIVE → error.
+**External attacker (network, anonymous).** Goals: extract student data, deny service, embarrass the yeshiva.
 
-### 2.3 RPC: `close_audit`
-- [ ] כתוב SQL function.
-- [ ] בדיקה: PENDING הופכים ל־UNKNOWN, status=CLOSED, closed_at מולא.
+**Curious user (student, supervisor, or family member with limited access).** Goals: see information about other students that they aren't entitled to.
 
-### 2.4 RPC: `get_active_audit` + `get_audit_full`
-- [ ] כתוב 2 functions.
-- [ ] בדיקה: get_active מחזיר session אחד או null.
+**Hostile insider (a student wanting to spoof presence; a disgruntled supervisor wanting to falsify a record).** Goals: present false data to the system.
 
-### 2.5 RPC: `acknowledge_audit_alert`
-- [ ] כתוב function.
-- [ ] בדיקה: alert.acknowledged_by התעדכן.
+**Compromised auth (a leaked PIN, a stolen phone with an active session).** Goals: same as insider, with the access of the compromised user.
 
-### 2.6 cron: `tick_audit_timeout`
-- [ ] כתוב function.
-- [ ] רישום pg_cron `SELECT cron.schedule('tick_audit_timeout', '*/5 * * * *', 'SELECT tick_audit_timeout()')`.
+**Operational risk (developer error, accidental deletion).** Not a threat in the security sense but enumerated here because the same controls help.
 
-### 2.7 TypeScript types
-- [ ] הרץ `supabase gen types typescript` או הוסף ידנית ב־`src/lib/api/types.ts`.
+## 16.2 What is being protected
 
----
+In rough order of sensitivity:
 
-## שלב 3 — Edge Functions (1-2 ימים)
+1. **Student GPS coordinates.** Highest sensitivity. Bounded retention (§5.7).
+2. **Audit history (who was marked what, by whom).** Moderate sensitivity; valuable for institutional integrity.
+3. **PII (names, phones).** Existing — not introduced by the audit subsystem, but accessed by it.
+4. **Operational metadata (who pushed what button when).** Low sensitivity, but its integrity matters for trust.
 
-### 3.1 `send-audit-push`
-- [ ] צור `supabase/functions/send-audit-push/index.ts` — בסיס מ־`send-push` הקיים.
-- [ ] קלט: `{ session_id, target, class_ids }`.
-- [ ] לוגיקה: שלוף push_tokens, שלח VAPID, חזור עם stats.
-- [ ] Deploy: `supabase functions deploy send-audit-push`.
-- [ ] בדיקה: קרא לפונקציה, ראה Push מגיע למכשיר.
+What is not in this system: passwords (student auth is ID-only currently), payment info (none), health records (none), parents' contact info (none directly — held in the Sheet).
 
-### 3.2 `send-audit-reminder`
-- [ ] צור edge function דומה, אבל לרכז ספציפי.
+## 16.3 Authentication, today and tomorrow
 
----
+The current state of authentication in the system (as of CLAUDE.md) is honest:
 
-## שלב 4 — API Client (1 יום)
-
-### 4.1 `IApiClient` הרחבה
-- [ ] הוסף ל־`src/lib/api/types.ts`:
-  ```ts
-  openAudit(mode, classIds, settings?): Promise<...>
-  submitAuditResponse(...): Promise<...>
-  closeAudit(id, note?): Promise<...>
-  getActiveAudit(): Promise<...>
-  getAuditFull(id): Promise<...>
-  acknowledgeAuditAlert(id, note?): Promise<...>
-  listPastAudits(filters?): Promise<...>
-  ```
-
-### 4.2 supabaseClient
-- [ ] יישם בכל הפונקציות (rpc.invoke + functions.invoke לפי הצורך).
-
-### 4.3 mockClient
-- [ ] יישם stubs לצורך פיתוח offline / tests.
+- **Students authenticate by ID number only.** No password. The "device token" mechanism provides a degree of device-stability but not security.
+- **Admins authenticate by PIN.** Single PIN, plaintext in `app_settings`.
+- **Supervisors authenticate by a concatenation:** `{adminPin}{classCode}`.
 
----
+This is acknowledged technical debt. The audit subsystem **inherits** these limits and does not introduce stricter requirements that the existing system cannot meet. Specifically:
 
-## שלב 5 — Frontend Stores + Hooks (2 ימים)
+- The audit subsystem will trust the role-bearer claim that the existing auth makes. If a stolen device authenticates, the audit subsystem cannot tell.
+- The audit subsystem **logs every action with the claimed actor identity**, so post-hoc forensics is possible even if real-time prevention is not.
 
-### 5.1 auditStore
-- [ ] צור `src/store/auditStore.ts` עם state + actions (ראה 33.1).
-- [ ] בלי persist (DB הוא source).
+The path forward — out of scope for this plan but explicitly named — is:
 
-### 5.2 auditUiStore
-- [ ] צור `src/store/auditUiStore.ts` (ראה 33.2).
-- [ ] עם persist רק על `activeTab` ו־`projectionMode`.
+- Add a password layer to student authentication.
+- Add 2FA (TOTP) to admin authentication.
+- Migrate supervisor authentication to per-user credentials, not concatenated PINs.
+- Enable Supabase RLS so the database itself enforces scope (not just the application).
 
-### 5.3 useActiveAudit
-- [ ] צור hook, ב־mount קורא ל־getActiveAudit + מנוי realtime.
-- [ ] בדיקה: עליית page → store מתעדכן.
+This is a meaningful infrastructure project. It is a prerequisite for the audit subsystem to be considered hardened.
 
-### 5.4 useAuditResponses, useAuditAlerts
-- [ ] צור hooks עם Realtime subscription.
-- [ ] בדיקה: עדכון ב־DB → store מתעדכן.
+## 16.4 Authorization (within the audit subsystem)
 
-### 5.5 useAuditLocationCollector
-- [ ] לתלמיד. ב־mount: בודק active session + צריך GPS → מציג Sheet.
-- [ ] בדיקה: simulate active LOCATION audit → Sheet נפתח.
+The role-to-capability matrix is in §6.5. Enforcement is **dual**:
 
-### 5.6 useProjectionRotation
-- [ ] timer rotation. paused on user click.
+- **In the application UI.** Routes are role-gated. The supervisor cannot navigate to the admin live dashboard.
+- **In the RPC layer (best-effort given current auth).** RPCs accept an `actor` argument and validate it against a hashed admin PIN where possible. This is not bulletproof in the absence of RLS.
 
----
+**Honest assessment:** the audit subsystem ships with the same authorization story as the rest of the application. It does not regress, but it does not lead. The threat of a curious supervisor manually crafting an HTTP request to mark a student in a class they don't manage is real and not prevented at the database. The mitigation is that supervisors don't typically have the technical ability or the motivation. This is a "trust the institution" model, not a "zero-trust" model.
 
-## שלב 6 — Components (3-4 ימים)
-
-### 6.1 רכיבי בסיס
-- [ ] `AuditCategoryChip.tsx` — chip בצבע מתאים, אייקון.
-- [ ] `AuditDistanceBadge.tsx` — badge מציג מרחק + bucket color.
-
-### 6.2 רכיבים מורכבים
-- [ ] `AuditKpiRow.tsx` — שורת KPI עם countup.
-- [ ] `AuditClassCard.tsx` — כרטיס כיתה עם פס התקדמות.
-- [ ] `AuditClassGrid.tsx` — grid responsive 1/2/3/4 columns.
-- [ ] `AuditHeatmap.tsx` — heatmap blocks per class, color gradient.
-- [ ] `AuditActivityFeed.tsx` — stream של אירועים עם AnimatePresence.
-- [ ] `AuditAlertList.tsx`, `AuditAlertModal.tsx`.
-
-### 6.3 מפה
-- [ ] `AuditMap.tsx` — Leaflet + 4 circles (300m, 1km, 5km, > 5km).
-- [ ] `AuditMapMarker.tsx` — marker עם pulse animation.
-- [ ] `AuditMapCluster.tsx` — markercluster wrapper.
-
-### 6.4 רכיבי פתיחה
-- [ ] `AuditModeSelector.tsx` — בחירה בין MANUAL / LOCATION.
-- [ ] `AuditClassSelector.tsx` — רשימת כיתות עם תיבות סימון.
-- [ ] `AuditLocationSettings.tsx` — timeout + sensitivity + push target.
-
-### 6.5 רכיבי רכז + תלמיד
-- [ ] `SupervisorAuditPanel.tsx`.
-- [ ] `SupervisorStudentRow.tsx`.
-- [ ] `StudentAuditSheet.tsx` — Bottom Sheet עם "אשר ושלח".
-
-### 6.6 מצב הקרנה
-- [ ] `AuditProjectionMode.tsx` — overlay full-screen.
-
-### 6.7 רכיבי סיכום
-- [ ] `AuditSummaryModal.tsx`, `AuditSummaryStats.tsx`.
-- [ ] `AuditComparePage.tsx`.
+## 16.5 Privacy, including halachic considerations
 
----
+The yeshiva is a religious institution. Privacy norms in that context are stricter and more particular than secular defaults.
 
-## שלב 7 — Pages + Routing (2 ימים)
+**Principles:**
 
-### 7.1 דפים חדשים
-- [ ] `AuditLandingPage.tsx` — `/admin/audit`.
-- [ ] `AuditNewPage.tsx` — `/admin/audit/new`.
-- [ ] `AuditLivePage.tsx` — `/admin/audit/:id/live`.
-- [ ] `AuditSummaryPage.tsx` — `/admin/audit/:id/summary`.
-- [ ] `AuditComparePage.tsx` — `/admin/audit/compare`.
+1. **Tzniut (modesty) extends to data.** Even non-sensitive data about a person is treated with reserve. The system does not display photos. It does not aggregate behavior across audits into a "behavior score" visible to anyone. It does not surface inferences ("this student tends to be late") to anyone other than the immediate supervisor.
 
-### 7.2 רכז
-- [ ] `SupervisorAuditPage.tsx` — `/class-supervisor/audit/:id` (אם יש active).
+2. **Parental authority over minor students.** Most students are 16–22 years old, in the gray zone between minors and adults. The institutional practice — confirmed in CLAUDE.md and standard for yeshivot — is that the yeshiva acts in loco parentis. The audit subsystem treats this responsibility seriously: location data is collected only with student consent, retained briefly, and used only for the intended purpose.
 
-### 7.3 תלמיד
-- [ ] הוסף `<StudentAuditSheet>` ל־`StudentLayout` — מופיע אוטומטית כשיש active LOCATION audit.
+3. **Rabbinic oversight.** The rosh yeshiva is, in practice, the privacy officer. Major changes to the audit subsystem's data collection should be presented to him before implementation. This plan should be reviewed by him; the team should not assume his approval.
 
-### 7.4 Routing
-- [ ] עדכן `src/App.tsx` עם הניתובים החדשים.
-- [ ] הסר את הניתוב הישן `/admin/rollcall` או redirect ל־`/admin/audit`.
+**Concrete practices:**
 
----
+- GPS coordinates are nulled after 90 days. Buckets and distances remain. The shape of the analytical signal is preserved without preserving the raw locations.
+- The student's consent flow includes a one-sentence privacy statement on every audit: "המיקום נשלח פעם אחת, נשמר 90 יום, ולא נחשף לחברים."
+- The admin's "privacy diagnostic" page (UC-12) allows the rosh yeshiva to answer a parent's question about a specific student's data history. This page exists not because the parent will ask often, but because the ability to answer cleanly is a form of trust.
 
-## שלב 8 — Service Worker + Push integration (1 יום)
+## 16.6 Anti-fraud — what we do and what we don't
 
-### 8.1 SW
-- [ ] עדכן `public/sw.js` להתמודד עם `kind: 'AUDIT_LOCATION'`.
-- [ ] notification.actions: [{ action: 'open', title: 'פתח' }].
-- [ ] על click: `clients.openWindow('/student?audit=' + session_id)`.
+A determined student can fool the GPS system:
 
-### 8.2 Client listener
-- [ ] ב־StudentLayout, hook שמאזין ל־message מה־SW.
-- [ ] open Sheet אוטומטית.
+- They can use a mock-location app on Android.
+- They can hand their phone to a friend who is on campus.
+- They can leave their phone on campus and go elsewhere.
 
----
+The system does **not** attempt to prevent these. The reasoning:
 
-## שלב 9 — עיצוב, אנימציות, סאונדים (2-3 ימים)
+- An arms race against mock-location apps is unwinnable at the application layer.
+- The vast majority of students will not attempt to defeat the system; the audit is not a punitive instrument so the motivation is low.
+- Where fraud is suspected, it is an administrative matter (the supervisor knows the student isn't in the room; the supervisor marks `OUT_NO_PERMIT`). The system supports the supervisor's authority; it does not replace it.
 
-### 9.1 CSS variables
-- [ ] הוסף את משתני הצבע ב־`src/index.css` (ראה 39).
+The system does:
 
-### 9.2 Tailwind config
-- [ ] הוסף עזרים: `bg-audit-green`, `text-audit-red`, וכו'.
+- Log every action so post-hoc review can detect patterns.
+- Compute distance accuracy bands so highly-imprecise GPS is flagged `UNKNOWN` rather than trusted as `IN_YESHIVA`.
+- Allow the admin to override any auto-classification.
 
-### 9.3 אנימציות
-- [ ] התקן `framer-motion` (אם לא קיים).
-- [ ] יישם animation על AuditClassCard ב־category change.
-- [ ] יישם CountUp על KPI numbers.
+## 16.7 Data export and right to deletion
 
-### 9.4 סאונדים
-- [ ] הוסף קבצים ל־`public/sounds/`.
-- [ ] צור `src/lib/audit/soundManager.ts` (Howler wrapper).
+The data subject — the student — has implicit rights even absent formal regulation:
 
-### 9.5 Projection mode
-- [ ] CSS class ייעודי (large fonts, black bg, accent colors).
-- [ ] auto rotation 6-12 sec per tab.
+- A student can request the rosh yeshiva to see their audit history. The admin can produce this via the privacy diagnostic page.
+- A student can request deletion. The system supports a manual `DELETE FROM audit_responses WHERE student_id = ...`. This deletes their *responses* but leaves the *sessions* (which lose one count). Aggregated history is preserved without the individual.
+- This is currently a manual procedure with the admin running an SQL query. Future: a self-serve "delete my data" UI for the student, gated by the rosh yeshiva's approval.
 
 ---
-
-## שלב 10 — ייצוא + השוואות (1-2 ימים)
-
-### 10.1 ייצוא PDF
-- [ ] צור `src/lib/audit/exportPdf.ts` — jspdf + autoTable.
-- [ ] כפתור "📄 ייצא PDF" ב־AuditSummaryPage.
 
-### 10.2 ייצוא Excel
-- [ ] צור `src/lib/audit/exportExcel.ts` — xlsx.
+# Part 17 — Performance & Scalability
 
-### 10.3 השוואה
-- [ ] `AuditComparePage.tsx` עם טבלה דינמית + גרף recharts.
+## 17.1 Load profile
 
----
+The product is small. Honestly assessing the load:
 
-## שלב 11 — בדיקות סוף-לסוף (2 ימים)
+- 381 students at first; 600 projected within 3 years.
+- ~30 audit sessions per month at first; ~50/month later.
+- During a `LOCATION` session: 381 RPC calls within ~3 minutes (peak burst of perhaps 50 calls in the first 30 seconds, then a long tail).
+- During a `MANUAL` session: ~16 supervisors × ~25 students = ~400 RPC calls over ~3 minutes.
+- Realtime subscriptions during a session: 1 admin + up to 16 supervisors + up to 381 students = ~398 concurrent subscriptions on the same channel.
 
-### 11.1 ידני
-- [ ] רץ דרך כל T1-T14 (ראה סעיף 60).
-- [ ] בדוק refresh במנהל באמצע ביקורת.
-- [ ] בדוק refresh ברכז.
-- [ ] בדוק refresh בתלמיד.
+This load is **trivially small** by modern database standards. The product will not be performance-bottlenecked. The performance discipline is about *latency* (the live dashboard feeling instant) more than *throughput*.
 
-### 11.2 חישוב מרחק
-- [ ] השווה client-side haversine למה ש־DB מחזיר. צריך להיות זהה.
+## 17.2 Latency targets
 
-### 11.3 Load
-- [ ] simulate 381 GPS responses ב־5 שניות (script). ודא ש־UI לא קורס.
+| Operation | Target p50 | Target p95 | Hard ceiling |
+|---|---|---|---|
+| `open_audit` | 200 ms | 500 ms | 2 s |
+| `submit_audit_response` | 80 ms | 200 ms | 1 s |
+| `get_active_audit` | 100 ms | 300 ms | 1 s |
+| `close_audit` | 300 ms | 800 ms | 3 s |
+| Realtime event → UI update | 400 ms | 1 s | 2 s |
+| Live dashboard first paint | 800 ms | 2 s | 4 s |
+| Live dashboard interactive | 1.5 s | 3 s | 5 s |
 
-### 11.4 Push
-- [ ] בדוק בנייד אמיתי שה־Push מגיע ופותח את האפליקציה.
+These are not aspirations. They are commitments. If any number breaches the hard ceiling, the launch holds.
 
----
+## 17.3 Where bottlenecks are likely
 
-## שלב 12 — תיעוד ועדכון CLAUDE.md (1 יום)
+- **Push fan-out (Edge Function).** Sending 381 web pushes is the longest single operation. Mitigation: parallelize within the Edge Function with a concurrency limit of 20–30 (Web Push servers rate-limit individual subscribers; concurrency higher than ~30 risks 429s).
+- **Realtime delivery to 398 concurrent subscribers.** Supabase's realtime tier is generous but not unlimited. Mitigation: scope subscriptions narrowly (filter on session_id, not table-wide).
+- **Postgres connections.** Each Realtime client uses one connection, and Supabase's Free tier connection limit is 60. Mitigation: realtime uses pooled connections internally; at our load this is not a concern; if we reach the limit, the upgrade to Pro tier is $25/mo.
+- **Browser memory on long sessions.** A live dashboard left open for 8 hours subscribes to many realtime events. Mitigation: realtime events are processed and discarded; the in-memory `responses` Map is bounded by 381 entries; the activity feed is capped at 30 displayed items.
 
-### 12.1 עדכון CLAUDE.md
-- [ ] הוסף סעיף 21: "Audit Sessions" עם כל הכללים החדשים.
-- [ ] עדכן סעיף 12 (GPS) — להגיד שעכשיו GPS אוסף גם בביקורת מיקום, לא רק RollCall.
-- [ ] הסר הזכרות של "RollCall" — שנה ל"Audit".
+## 17.4 Capacity at 12 months and 36 months
 
-### 12.2 README / docs
-- [ ] תוסיף הוראות הפעלה ביקורת.
+| Metric | Today | +12 mo | +36 mo |
+|---|---|---|---|
+| Students | 381 | ~450 | ~600 |
+| Audits / month | 30 | 40 | 60 |
+| `audit_sessions` rows | 0 | ~480 | ~1,800 |
+| `audit_responses` rows | 0 | ~210,000 | ~1,000,000 |
+| `audit_alerts` rows | 0 | ~200 | ~800 |
+| DB size (audit only) | 0 | ~80 MB | ~400 MB |
+| Concurrent live admins | 1 | 2 | 3 |
+| Peak push fan-out events / day | 0 | 1-2 | 2-3 |
 
-### 12.3 GoogleAppsScript
-- [ ] לוודא שאין תלות בטבלאות חדשות.
+All numbers fit within Supabase's Free tier (500 MB DB cap) at 12 months. At 36 months, the Pro tier ($25/mo, 8 GB) is comfortable headroom.
 
----
+## 17.5 Frontend performance
 
-## שלב 13 — Deploy + Monitor (חצי יום)
+- **Bundle size budget.** The audit subsystem adds <120 KB gzipped to the existing app bundle. Heavy components (Leaflet maps, jsPDF) are code-split.
+- **First Contentful Paint** on the live page: <1.5 s on a mid-range Android over 4G.
+- **Largest Contentful Paint**: <2.5 s.
+- **CLS**: <0.1. Layouts are stable; cards have fixed aspect ratios; KPI strip is always present.
+- **JS execution time on a class card update**: <16 ms (one frame). Achievable because card updates are isolated and don't re-render the grid.
 
-### 13.1 Pre-deploy
-- [ ] `npm run build` — ודא ללא שגיאות.
-- [ ] `npm run lint` — נקי.
-- [ ] `npm run test` (אם יש).
+## 17.6 Maps and Leaflet — special attention
 
-### 13.2 Deploy
-- [ ] push לבעצה.
-- [ ] Vercel: בודק שה־deploy עלה.
-- [ ] Supabase: כל המיגרציות חלות.
+The map view is the most expensive single component. Discipline:
 
-### 13.3 Monitor
-- [ ] בדוק logs ב־Vercel + Supabase 30 דק' אחרי.
-- [ ] בדוק רמת CPU של DB.
-- [ ] ודא שאין spike של errors.
+- **Render only on map tab.** The map is mounted only when the map tab is active. Switching to grid unmounts it.
+- **Cluster markers.** Above 50 markers, use `react-leaflet-cluster`. Below, render individually.
+- **Tile caching.** OSM tiles are cached at the browser level; we serve directly from openstreetmap.org or a CDN (if traffic grows).
+- **No realtime marker animation on each event.** Animation is throttled to one frame per ~33 ms (30 fps). At >30 events/second, marker positions update in batch.
 
 ---
 
-## שלב 14 — User Acceptance (1-2 ימים)
+# Part 18 — Accessibility
 
-### 14.1 הכשרת מנהל
-- [ ] הראה למנהל איך לפתוח ביקורת מהירה.
-- [ ] הראה איך לפתוח ביקורת מיקום.
-- [ ] הראה מצב הקרנה.
+## 18.1 Targets
 
-### 14.2 הכשרת רכזים
-- [ ] שלח רכזים ל־PIN שלהם, הסבר על המסך החדש.
+- WCAG 2.1 AA compliance for all user-facing screens.
+- Keyboard-navigable end to end.
+- Screen-reader compatible (VoiceOver, TalkBack, NVDA).
+- Tested with real assistive technology, not just lint rules.
 
-### 14.3 איסוף feedback
-- [ ] רוץ 3-4 ביקורות בפועל.
-- [ ] רשום נקודות לתיקון.
-- [ ] חזור על שלב 11 לפי הצורך.
+## 18.2 Hebrew RTL accessibility specifics
 
----
+- `dir="rtl"` on `<html>` (already in place for the existing app).
+- Focus order naturally follows RTL reading order in flex/grid containers.
+- Numbers within text use `<bdi dir="ltr">` to prevent visual bidi reversal.
+- Hebrew screen readers (NVDA with Hebrew voice, VoiceOver Hebrew) pronounce text correctly only if the markup language is `lang="he-IL"` on the root element.
 
-# נספח A — דוגמת JSON של סשן חי
-
-```json
-{
-  "session": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "mode": "LOCATION",
-    "status": "ACTIVE",
-    "class_ids": ["כיתה הרב הלל", "כיתה הרב יעקב"],
-    "total_students": 41,
-    "started_by": "ADMIN:1234",
-    "started_at": "2026-05-15T09:15:00+03:00",
-    "settings": { "timeout_sec": 120, "sensitivity": "MEDIUM" },
-    "notes": "ביקורת בוקר"
-  },
-  "responses": [
-    {
-      "id": "r1",
-      "session_id": "550e8400-...",
-      "student_id": "s1",
-      "class_id": "כיתה הרב הלל",
-      "category": "IN_YESHIVA",
-      "marked_by": "AUTO_GPS",
-      "marked_at": "2026-05-15T09:15:23+03:00",
-      "gps_lat": 31.5251,
-      "gps_lng": 35.1058,
-      "gps_accuracy_m": 15,
-      "distance_from_campus_m": 32,
-      "distance_bucket": "GREEN",
-      "gps_status": "OK"
-    },
-    {
-      "id": "r2",
-      "student_id": "s5",
-      "category": "OUT_NO_PERMIT",
-      "marked_by": "AUTO_GPS",
-      "gps_lat": 31.7,
-      "gps_lng": 34.9,
-      "distance_from_campus_m": 38500,
-      "distance_bucket": "RED",
-      "gps_status": "OK"
-    }
-  ],
-  "alerts": [
-    {
-      "id": "a1",
-      "session_id": "550e8400-...",
-      "student_id": "s5",
-      "triggered_at": "2026-05-15T09:15:24+03:00",
-      "distance_m": 38500,
-      "gps_lat": 31.7,
-      "gps_lng": 34.9
-    }
-  ],
-  "kpis": {
-    "by_category": {
-      "IN_YESHIVA": 38,
-      "OUT_PERMIT": 1,
-      "OUT_NO_PERMIT": 1,
-      "UNKNOWN": 1,
-      "PENDING": 0
-    },
-    "by_class": {
-      "כיתה הרב הלל": { "total": 16, "marked": 16, "alerts": 0 },
-      "כיתה הרב יעקב": { "total": 25, "marked": 25, "alerts": 1 }
-    },
-    "by_distance_bucket": {
-      "GREEN": 38,
-      "BLUE": 1,
-      "ORANGE": 0,
-      "RED": 1
-    }
-  }
-}
-```
+## 18.3 Color and contrast
 
----
+All status colors are checked against light and dark backgrounds for WCAG AA contrast:
 
-# נספח B — דוגמת DDL מלאה
+| Token | Light bg contrast | Dark bg contrast | Notes |
+|---|---|---|---|
+| `--audit-green` on white | 4.6:1 ✓ | 6.8:1 ✓ | Passes AA for normal text |
+| `--audit-blue` on white | 5.1:1 ✓ | 5.4:1 ✓ | Passes AA |
+| `--audit-orange` on white | 3.0:1 ✗ | 7.2:1 ✓ | Fails AA on light bg — paired with icon and bold weight to compensate; chips use darker text on light background |
+| `--audit-red` on white | 4.8:1 ✓ | 6.1:1 ✓ | Passes AA |
+| `--audit-amber` on white | 2.7:1 ✗ | 9.0:1 ✓ | Fails AA on light bg — same compensation as orange |
 
-(ראה סעיף 27 — כבר מלא)
+Where contrast fails, the system never communicates by color alone — the affected chips always include an icon (lucide) plus a Hebrew word.
 
----
+## 18.4 Interactive elements
 
-# נספח C — דוגמת חתימות TypeScript
-
-```ts
-// src/types/audit.ts
-
-export type AuditMode = 'MANUAL' | 'LOCATION'
-
-export type AuditSessionStatus = 'ACTIVE' | 'CLOSED' | 'ABORTED' | 'TIMED_OUT'
-
-export type AuditCategory =
-  | 'PENDING'
-  | 'IN_YESHIVA'
-  | 'OUT_PERMIT'
-  | 'OUT_NO_PERMIT'
-  | 'UNKNOWN'
-  | 'EXCUSED_SICK'
-
-export type DistanceBucket = 'GREEN' | 'BLUE' | 'ORANGE' | 'RED'
-
-export type GpsStatus = 'OK' | 'DENIED' | 'TIMEOUT' | 'OFFLINE' | 'UNAVAILABLE'
-
-export interface AuditSession {
-  id: string
-  mode: AuditMode
-  status: AuditSessionStatus
-  classIds: string[]
-  totalStudents: number
-  startedBy: string
-  startedAt: string
-  closedAt?: string
-  notes?: string
-  settings: {
-    timeoutSec?: number
-    sensitivity?: 'LOW' | 'MEDIUM' | 'HIGH'
-    pushTarget?: 'STUDENTS' | 'SUPERVISORS' | 'BOTH'
-  }
-}
-
-export interface AuditResponse {
-  id: string
-  sessionId: string
-  studentId: string
-  classId: string
-  category: AuditCategory
-  markedBy?: string
-  markedAt?: string
-  gpsLat?: number
-  gpsLng?: number
-  gpsAccuracyM?: number
-  distanceFromCampusM?: number
-  distanceBucket?: DistanceBucket
-  gpsStatus?: GpsStatus
-  departureId?: string
-  note?: string
-  createdAt: string
-  updatedAt: string
-}
-
-export interface AuditAlert {
-  id: string
-  sessionId: string
-  studentId: string
-  triggeredAt: string
-  distanceM: number
-  gpsLat?: number
-  gpsLng?: number
-  acknowledgedBy?: string
-  acknowledgedAt?: string
-  note?: string
-}
-
-// API client extension:
-export interface IAuditApiClient {
-  openAudit(mode: AuditMode, classIds: string[], settings?: AuditSession['settings'], notes?: string): Promise<{ sessionId: string; totalStudents: number }>
-  submitAuditResponse(sessionId: string, studentId: string, payload: Partial<AuditResponse>): Promise<{ responseId: string; category: AuditCategory }>
-  closeAudit(sessionId: string, notes?: string): Promise<{ summary: AuditSummary }>
-  getActiveAudit(): Promise<{ session: AuditSession; responses: AuditResponse[]; alerts: AuditAlert[] } | null>
-  getAuditFull(sessionId: string): Promise<{ session: AuditSession; responses: AuditResponse[]; alerts: AuditAlert[] }>
-  acknowledgeAuditAlert(alertId: string, note?: string): Promise<void>
-  listPastAudits(filters?: { mode?: AuditMode; since?: string; until?: string }): Promise<AuditSession[]>
-}
-```
+- All buttons have an accessible name (`aria-label` if the visible text is ambiguous).
+- All buttons are at least 44 × 44 pixels (Apple HIG / WCAG touch target minimum).
+- Focus rings are visible and 2 px solid.
+- Disabled buttons are visually distinct AND have `aria-disabled="true"`.
+- Form fields have associated `<label>` elements.
 
----
+## 18.5 Live regions
 
-# נספח D — דוגמת UI Components Hierarchy
-
-```tsx
-// src/pages/admin/AuditLivePage.tsx (sketch only — לא ליישום עכשיו)
-
-export function AuditLivePage() {
-  const { id } = useParams()
-  const { session, responses, alerts, loading } = useActiveAudit()
-  const { activeTab, setTab, projectionMode } = useAuditUiStore()
-
-  useAuditResponses(id!)
-  useAuditAlerts(id!)
-
-  if (loading) return <Skeleton />
-  if (!session || session.id !== id) return <Navigate to="/admin/audit" />
-
-  return (
-    <div className="audit-live-page">
-      <AuditHeader session={session} />
-      <AuditKpiRow responses={responses} />
-      <AuditTabs value={activeTab} onChange={setTab}>
-        <TabsList>
-          {session.mode === 'LOCATION' && <Tab value="map">🗺 מפה</Tab>}
-          <Tab value="heatmap">🔥 Heatmap</Tab>
-          <Tab value="grid">📊 Grid</Tab>
-          <Tab value="table">📋 טבלה</Tab>
-        </TabsList>
-        <TabsContent value="map"><AuditMap responses={responses} /></TabsContent>
-        <TabsContent value="heatmap"><AuditHeatmap responses={responses} classIds={session.classIds} /></TabsContent>
-        <TabsContent value="grid"><AuditClassGrid responses={responses} classIds={session.classIds} /></TabsContent>
-        <TabsContent value="table"><AuditTable responses={responses} /></TabsContent>
-      </AuditTabs>
-      <AuditAlertList alerts={alerts} />
-      <AuditActivityFeed responses={responses} />
-      <AuditCloseButton sessionId={session.id} />
-      {projectionMode && <AuditProjectionMode />}
-    </div>
-  )
-}
-```
+The KPI strip uses `aria-live="polite"` and `aria-atomic="true"` so screen readers announce updates as "נוכח, שלוש מאות ושבעים וארבע" after each significant change, but not for every increment.
 
----
+Alerts use `role="alert"` so they interrupt the current screen reader narration.
 
-# סיכום
-
-**תוכנית זו מכסה את כל מה שדרוש כדי לבנות את "ביקורת פנימית 2.0" מאפס:**
-
-- ✅ שני מצבי הפעלה (מהיר + מיקום)
-- ✅ שימור Refresh — DB כ־source of truth
-- ✅ Real-time בלי תקלות — Realtime + Push יחד
-- ✅ Heatmap + Map + Grid + Table — 4 תצוגות
-- ✅ מצב הקרנה — full-screen + רוטציה
-- ✅ אזעקות — בולטות + נשמרות
-- ✅ Manual mode — UX חדש לרכזים (מסומן אוטומטית מי שיש לו departure)
-- ✅ Location mode — איסוף GPS מתוכנן מחדש, accuracy filter
-- ✅ Permissions — admin / supervisor / student מובדלים
-- ✅ Historical — דף "ביקורות קודמות" + השוואה + ייצוא
-- ✅ Design system — צבעים, אנימציות, סאונדים, RTL
-- ✅ DB schema חדשה — 4 טבלאות + 2 triggers + 6 RPCs
-- ✅ Edge functions — push specific לביקורת
-- ✅ 14 שלבי roadmap, 80+ צעדים ספציפיים
-
-**זמן ביצוע משוער:** 18-25 ימי עבודה לפיתוח מלא + 2-3 ימי QA.
-
-**שלבי קריטיים בסדר עדיפויות:**
-1. **שלב 1+2 (DB + RPCs)** — תשתית. אסור לדלג שלבים.
-2. **שלב 6 (Components)** — הסיפור החזותי. ההשקעה הגדולה.
-3. **שלב 9 (אנימציות + סאונדים)** — מה שעושה את ה־"wow".
-4. **שלב 11 (בדיקות)** — אסור לדלג, לעולם.
+The activity feed is `aria-live="polite"` with `aria-relevant="additions"` — only new items are announced.
 
----
+## 18.6 Motion accessibility
 
-> **מסמך זה נכתב כתוכנית עיון בלבד.** אין בו שינויי קוד. ברגע שמתחילים לקודד — עוקבים אחרי roadmap שלב אחרי שלב. לכל שלב יש בדיקות מובהקות לפני המעבר לשלב הבא.
+`prefers-reduced-motion: reduce` is honored:
 
----
-# חלק ט"ו — קובץ Migration מלא של SQL
-
-> **הערה:** זה הקובץ המלא של מיגרציה. ניתן להעתיק אותו ל־`supabase/migrations/20260516000000_internal_audit_v2.sql` ולהריץ כמו שהוא. כל שורה מתוארת במלואה.
-
-```sql
--- ============================================================
--- INTERNAL AUDIT 2.0 — Full DB Migration
--- File: supabase/migrations/20260516000000_internal_audit_v2.sql
--- Author: Internal Audit Master Plan (planning artifact)
--- Purpose: Replace the legacy ad-hoc RollCall flow with a fully
---          persisted audit-session subsystem (manual + location).
--- Safety:  Idempotent — all CREATE statements use IF NOT EXISTS.
--- Order:   tables → indices → triggers → RPCs → cron → realtime
--- ============================================================
-
-BEGIN;
-
--- ------------------------------------------------------------
--- 0. Extensions (no-op if already present)
--- ------------------------------------------------------------
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";       -- gen_random_uuid()
-CREATE EXTENSION IF NOT EXISTS "pg_cron";        -- tick_audit_timeout schedule
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";        -- search by student name in audit table
-
--- ------------------------------------------------------------
--- 1. Tables
--- ------------------------------------------------------------
-
--- 1.1 audit_sessions: one row per audit. Forever-retained.
-CREATE TABLE IF NOT EXISTS public.audit_sessions (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    mode            TEXT        NOT NULL
-                                CHECK (mode IN ('MANUAL', 'LOCATION')),
-    status          TEXT        NOT NULL DEFAULT 'ACTIVE'
-                                CHECK (status IN ('ACTIVE','CLOSED','ABORTED','TIMED_OUT')),
-    class_ids       TEXT[]      NOT NULL CHECK (array_length(class_ids,1) > 0),
-    total_students  INT         NOT NULL CHECK (total_students >= 0),
-    started_by      TEXT        NOT NULL,
-    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at       TIMESTAMPTZ,
-    closed_by       TEXT,
-    notes           TEXT,
-    settings        JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_closed_after_started
-        CHECK (closed_at IS NULL OR closed_at >= started_at),
-    CONSTRAINT chk_settings_keys
-        CHECK (
-            settings ?| ARRAY['timeoutSec','sensitivity','pushTarget','showMap']
-            OR settings = '{}'::jsonb
-        )
-);
-
-COMMENT ON TABLE  public.audit_sessions IS 'One row per internal audit session.';
-COMMENT ON COLUMN public.audit_sessions.mode IS 'MANUAL=supervisor marks manually. LOCATION=GPS-based.';
-COMMENT ON COLUMN public.audit_sessions.status IS 'ACTIVE→CLOSED|ABORTED|TIMED_OUT.';
-COMMENT ON COLUMN public.audit_sessions.class_ids IS 'Denormalized list of class IDs included.';
-COMMENT ON COLUMN public.audit_sessions.settings IS 'JSONB: { timeoutSec, sensitivity, pushTarget, showMap }';
-
--- 1.2 audit_responses: one row per student per session.
-CREATE TABLE IF NOT EXISTS public.audit_responses (
-    id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id               UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
-    student_id               UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
-    class_id                 TEXT        NOT NULL,
-    category                 TEXT        NOT NULL DEFAULT 'PENDING'
-                                         CHECK (category IN
-                                             ('PENDING','IN_YESHIVA','OUT_PERMIT','OUT_NO_PERMIT','UNKNOWN')),
-    marked_by                TEXT,
-    marked_at                TIMESTAMPTZ,
-    gps_lat                  DOUBLE PRECISION,
-    gps_lng                  DOUBLE PRECISION,
-    gps_accuracy_m           DOUBLE PRECISION,
-    distance_from_campus_m   DOUBLE PRECISION,
-    distance_bucket          TEXT        CHECK (distance_bucket IN ('GREEN','BLUE','ORANGE','RED')),
-    gps_status               TEXT        CHECK (gps_status IN
-                                             ('OK','DENIED','TIMEOUT','OFFLINE','UNAVAILABLE','LOW_ACCURACY')),
-    departure_id             UUID        REFERENCES public.departures(id),
-    note                     TEXT,
-    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_audit_responses_student_session UNIQUE (session_id, student_id),
-    CONSTRAINT chk_gps_pair CHECK (
-        (gps_lat IS NULL AND gps_lng IS NULL)
-        OR (gps_lat BETWEEN -90 AND 90 AND gps_lng BETWEEN -180 AND 180)
-    ),
-    CONSTRAINT chk_accuracy_non_negative
-        CHECK (gps_accuracy_m IS NULL OR gps_accuracy_m >= 0),
-    CONSTRAINT chk_distance_non_negative
-        CHECK (distance_from_campus_m IS NULL OR distance_from_campus_m >= 0)
-);
-
-COMMENT ON TABLE  public.audit_responses IS 'Per-student response in an audit session.';
-
--- 1.3 audit_response_log: full audit trail. INSERT-only.
-CREATE TABLE IF NOT EXISTS public.audit_response_log (
-    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    response_id    UUID        NOT NULL REFERENCES public.audit_responses(id) ON DELETE CASCADE,
-    session_id     UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
-    student_id     UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
-    from_category  TEXT,
-    to_category    TEXT        NOT NULL,
-    actor          TEXT        NOT NULL,
-    changed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- 1.4 audit_alerts: one row per "out of range" event.
-CREATE TABLE IF NOT EXISTS public.audit_alerts (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id       UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
-    student_id       UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
-    triggered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    distance_m       DOUBLE PRECISION NOT NULL,
-    gps_lat          DOUBLE PRECISION,
-    gps_lng          DOUBLE PRECISION,
-    severity         TEXT        NOT NULL DEFAULT 'HIGH'
-                                 CHECK (severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
-    acknowledged_by  TEXT,
-    acknowledged_at  TIMESTAMPTZ,
-    note             TEXT
-);
-
--- 1.5 audit_push_log: trail of push notifications sent.
-CREATE TABLE IF NOT EXISTS public.audit_push_log (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id    UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
-    target_kind   TEXT        NOT NULL CHECK (target_kind IN ('STUDENT','SUPERVISOR','BROADCAST')),
-    target_id     TEXT,
-    sent_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    success       BOOLEAN     NOT NULL,
-    error_message TEXT
-);
-
--- ------------------------------------------------------------
--- 2. Indices
--- ------------------------------------------------------------
--- Only one ACTIVE session at a time
-CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_sessions_one_active
-    ON public.audit_sessions ((1)) WHERE status = 'ACTIVE';
-
-CREATE INDEX IF NOT EXISTS ix_audit_sessions_status
-    ON public.audit_sessions (status);
-
-CREATE INDEX IF NOT EXISTS ix_audit_sessions_started_at
-    ON public.audit_sessions (started_at DESC);
-
-CREATE INDEX IF NOT EXISTS ix_audit_responses_session_category
-    ON public.audit_responses (session_id, category);
-
-CREATE INDEX IF NOT EXISTS ix_audit_responses_session_class
-    ON public.audit_responses (session_id, class_id, category);
-
-CREATE INDEX IF NOT EXISTS ix_audit_responses_student
-    ON public.audit_responses (student_id, marked_at DESC NULLS LAST);
-
-CREATE INDEX IF NOT EXISTS ix_audit_responses_distance
-    ON public.audit_responses (session_id, distance_bucket)
-    WHERE distance_bucket IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS ix_audit_response_log_session
-    ON public.audit_response_log (session_id, changed_at DESC);
-
-CREATE INDEX IF NOT EXISTS ix_audit_alerts_session
-    ON public.audit_alerts (session_id, triggered_at DESC);
-
-CREATE INDEX IF NOT EXISTS ix_audit_alerts_open
-    ON public.audit_alerts (session_id)
-    WHERE acknowledged_at IS NULL;
-
--- ------------------------------------------------------------
--- 3. Triggers
--- ------------------------------------------------------------
-
--- 3.1 updated_at touch on audit_sessions
-CREATE OR REPLACE FUNCTION public.tg_audit_sessions_updated_at()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS tr_audit_sessions_updated_at ON public.audit_sessions;
-CREATE TRIGGER tr_audit_sessions_updated_at
-    BEFORE UPDATE ON public.audit_sessions
-    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_sessions_updated_at();
-
--- 3.2 log category changes
-CREATE OR REPLACE FUNCTION public.tg_audit_responses_log_change()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.category IS DISTINCT FROM OLD.category THEN
-        INSERT INTO public.audit_response_log
-            (response_id, session_id, student_id, from_category, to_category, actor)
-        VALUES
-            (NEW.id, NEW.session_id, NEW.student_id, OLD.category, NEW.category,
-             COALESCE(NEW.marked_by, 'SYSTEM'));
-    END IF;
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS tr_audit_responses_log_change ON public.audit_responses;
-CREATE TRIGGER tr_audit_responses_log_change
-    BEFORE UPDATE ON public.audit_responses
-    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_responses_log_change();
-
--- 3.3 alert on out-of-range
-CREATE OR REPLACE FUNCTION public.tg_audit_responses_alert()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-DECLARE
-    v_severity TEXT;
-BEGIN
-    IF NEW.distance_bucket IN ('ORANGE','RED')
-       AND (OLD.distance_bucket IS NULL OR OLD.distance_bucket NOT IN ('ORANGE','RED'))
-    THEN
-        v_severity := CASE
-            WHEN NEW.distance_bucket = 'RED' THEN 'CRITICAL'
-            ELSE 'MEDIUM'
-        END;
-
-        INSERT INTO public.audit_alerts
-            (session_id, student_id, distance_m, gps_lat, gps_lng, severity)
-        VALUES
-            (NEW.session_id, NEW.student_id,
-             NEW.distance_from_campus_m, NEW.gps_lat, NEW.gps_lng, v_severity);
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS tr_audit_responses_alert ON public.audit_responses;
-CREATE TRIGGER tr_audit_responses_alert
-    AFTER UPDATE ON public.audit_responses
-    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_responses_alert();
-
--- ------------------------------------------------------------
--- 4. Helper functions
--- ------------------------------------------------------------
-
--- Haversine distance in meters between two lat/lng points
-CREATE OR REPLACE FUNCTION public.fn_haversine_m(
-    lat1 DOUBLE PRECISION, lng1 DOUBLE PRECISION,
-    lat2 DOUBLE PRECISION, lng2 DOUBLE PRECISION
-) RETURNS DOUBLE PRECISION
-LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-AS $$
-DECLARE
-    R CONSTANT DOUBLE PRECISION := 6371000;
-    dLat DOUBLE PRECISION;
-    dLng DOUBLE PRECISION;
-    a DOUBLE PRECISION;
-BEGIN
-    IF lat1 IS NULL OR lng1 IS NULL OR lat2 IS NULL OR lng2 IS NULL THEN
-        RETURN NULL;
-    END IF;
-    dLat := radians(lat2 - lat1);
-    dLng := radians(lng2 - lng1);
-    a := sin(dLat/2) * sin(dLat/2)
-       + cos(radians(lat1)) * cos(radians(lat2))
-       * sin(dLng/2) * sin(dLng/2);
-    RETURN R * 2 * asin(sqrt(a));
-END;
-$$;
-
--- Compute distance_bucket from distance_m
-CREATE OR REPLACE FUNCTION public.fn_distance_bucket(
-    dist_m DOUBLE PRECISION
-) RETURNS TEXT
-LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-AS $$
-BEGIN
-    IF dist_m IS NULL THEN RETURN NULL; END IF;
-    IF dist_m <= 300   THEN RETURN 'GREEN';  END IF;
-    IF dist_m <= 1000  THEN RETURN 'BLUE';   END IF;
-    IF dist_m <= 5000  THEN RETURN 'ORANGE'; END IF;
-    RETURN 'RED';
-END;
-$$;
-
--- ------------------------------------------------------------
--- 5. RPC: open_audit
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.open_audit(
-    p_mode        TEXT,
-    p_class_ids   TEXT[],
-    p_started_by  TEXT,
-    p_settings    JSONB DEFAULT '{}'::jsonb,
-    p_notes       TEXT  DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-DECLARE
-    v_session_id    UUID;
-    v_existing      UUID;
-    v_total         INT;
-BEGIN
-    -- Validate mode
-    IF p_mode NOT IN ('MANUAL', 'LOCATION') THEN
-        RETURN jsonb_build_object('error', 'INVALID_MODE');
-    END IF;
-
-    -- Validate class_ids
-    IF array_length(p_class_ids, 1) IS NULL OR array_length(p_class_ids, 1) = 0 THEN
-        RETURN jsonb_build_object('error', 'NO_CLASSES_SELECTED');
-    END IF;
-
-    -- Reject if active session exists
-    SELECT id INTO v_existing
-    FROM public.audit_sessions
-    WHERE status = 'ACTIVE'
-    LIMIT 1;
-
-    IF v_existing IS NOT NULL THEN
-        RETURN jsonb_build_object(
-            'error', 'AUDIT_ACTIVE',
-            'existing_session_id', v_existing
-        );
-    END IF;
-
-    -- Create session
-    INSERT INTO public.audit_sessions
-        (mode, class_ids, total_students, started_by, settings, notes)
-    SELECT
-        p_mode,
-        p_class_ids,
-        (SELECT COUNT(*) FROM public.students s WHERE s."classId" = ANY(p_class_ids)),
-        p_started_by,
-        COALESCE(p_settings, '{}'::jsonb),
-        p_notes
-    RETURNING id, total_students INTO v_session_id, v_total;
-
-    -- Pre-create one response per student
-    INSERT INTO public.audit_responses
-        (session_id, student_id, class_id, category, marked_by, marked_at, departure_id)
-    SELECT
-        v_session_id,
-        s.id,
-        s."classId",
-        CASE WHEN d.id IS NOT NULL THEN 'OUT_PERMIT' ELSE 'PENDING' END,
-        CASE WHEN d.id IS NOT NULL THEN 'AUTO_DEPARTURE' ELSE NULL END,
-        CASE WHEN d.id IS NOT NULL THEN NOW() ELSE NULL END,
-        d.id
-    FROM public.students s
-    LEFT JOIN public.departures d
-           ON d.student_id = s.id AND d.status = 'ACTIVE'
-    WHERE s."classId" = ANY(p_class_ids);
-
-    RETURN jsonb_build_object(
-        'session_id',     v_session_id,
-        'total_students', v_total,
-        'mode',           p_mode,
-        'started_at',     NOW()
-    );
-END;
-$$;
-
-REVOKE ALL ON FUNCTION public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 6. RPC: submit_audit_response
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.submit_audit_response(
-    p_session_id       UUID,
-    p_student_id       UUID,
-    p_category         TEXT             DEFAULT NULL,
-    p_gps_lat          DOUBLE PRECISION DEFAULT NULL,
-    p_gps_lng          DOUBLE PRECISION DEFAULT NULL,
-    p_gps_accuracy_m   DOUBLE PRECISION DEFAULT NULL,
-    p_gps_status       TEXT             DEFAULT NULL,
-    p_marked_by        TEXT             DEFAULT NULL,
-    p_note             TEXT             DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-DECLARE
-    v_distance        DOUBLE PRECISION;
-    v_bucket          TEXT;
-    v_final_category  TEXT;
-    v_response_id     UUID;
-    v_session_status  TEXT;
-    v_was_pending     BOOLEAN;
-BEGIN
-    -- Verify session
-    SELECT status INTO v_session_status
-    FROM public.audit_sessions
-    WHERE id = p_session_id;
-
-    IF v_session_status IS NULL THEN
-        RETURN jsonb_build_object('error', 'SESSION_NOT_FOUND');
-    END IF;
-
-    IF v_session_status <> 'ACTIVE' THEN
-        RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE', 'status', v_session_status);
-    END IF;
-
-    -- Compute distance + bucket
-    IF p_gps_lat IS NOT NULL AND p_gps_lng IS NOT NULL THEN
-        v_distance := public.fn_haversine_m(31.5253, 35.1056, p_gps_lat, p_gps_lng);
-        v_bucket   := public.fn_distance_bucket(v_distance);
-    END IF;
-
-    -- Low-accuracy guard: anything > 1000m of error is treated as UNKNOWN
-    IF p_gps_accuracy_m IS NOT NULL AND p_gps_accuracy_m > 1000 THEN
-        v_final_category := 'UNKNOWN';
-    ELSE
-        v_final_category := COALESCE(
-            p_category,
-            CASE
-                WHEN p_gps_status IN ('DENIED','TIMEOUT','OFFLINE','UNAVAILABLE','LOW_ACCURACY')
-                    THEN 'UNKNOWN'
-                WHEN v_bucket = 'GREEN'
-                    THEN 'IN_YESHIVA'
-                WHEN v_bucket IN ('BLUE','ORANGE','RED')
-                    THEN 'OUT_NO_PERMIT'
-                ELSE 'PENDING'
-            END
-        );
-    END IF;
-
-    -- Detect if this was the first transition out of PENDING
-    SELECT (category = 'PENDING') INTO v_was_pending
-    FROM public.audit_responses
-    WHERE session_id = p_session_id AND student_id = p_student_id;
-
-    -- Upsert
-    UPDATE public.audit_responses SET
-        category                = v_final_category,
-        marked_by               = COALESCE(p_marked_by, marked_by, 'AUTO_GPS'),
-        marked_at               = NOW(),
-        gps_lat                 = COALESCE(p_gps_lat, gps_lat),
-        gps_lng                 = COALESCE(p_gps_lng, gps_lng),
-        gps_accuracy_m          = COALESCE(p_gps_accuracy_m, gps_accuracy_m),
-        distance_from_campus_m  = COALESCE(v_distance, distance_from_campus_m),
-        distance_bucket         = COALESCE(v_bucket, distance_bucket),
-        gps_status              = COALESCE(p_gps_status, gps_status),
-        note                    = COALESCE(p_note, note)
-    WHERE session_id = p_session_id AND student_id = p_student_id
-    RETURNING id INTO v_response_id;
-
-    IF v_response_id IS NULL THEN
-        RETURN jsonb_build_object('error', 'RESPONSE_NOT_FOUND');
-    END IF;
-
-    RETURN jsonb_build_object(
-        'response_id',       v_response_id,
-        'category',          v_final_category,
-        'distance_m',        v_distance,
-        'distance_bucket',   v_bucket,
-        'was_pending',       v_was_pending
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.submit_audit_response(UUID, UUID, TEXT, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, TEXT, TEXT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 7. RPC: close_audit
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.close_audit(
-    p_session_id UUID,
-    p_closed_by  TEXT,
-    p_notes      TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-DECLARE
-    v_status TEXT;
-    v_summary JSONB;
-BEGIN
-    SELECT status INTO v_status FROM public.audit_sessions WHERE id = p_session_id;
-
-    IF v_status IS NULL THEN
-        RETURN jsonb_build_object('error', 'SESSION_NOT_FOUND');
-    END IF;
-
-    IF v_status <> 'ACTIVE' THEN
-        RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE', 'status', v_status);
-    END IF;
-
-    -- Convert PENDING → UNKNOWN
-    UPDATE public.audit_responses
-       SET category = 'UNKNOWN',
-           marked_by = 'AUTO_CLOSE',
-           marked_at = NOW()
-     WHERE session_id = p_session_id AND category = 'PENDING';
-
-    -- Close
-    UPDATE public.audit_sessions
-       SET status    = 'CLOSED',
-           closed_at = NOW(),
-           closed_by = p_closed_by,
-           notes     = COALESCE(p_notes, notes)
-     WHERE id = p_session_id;
-
-    -- Compute summary
-    SELECT jsonb_build_object(
-        'in_yeshiva',   COUNT(*) FILTER (WHERE category='IN_YESHIVA'),
-        'out_permit',   COUNT(*) FILTER (WHERE category='OUT_PERMIT'),
-        'out_no_permit',COUNT(*) FILTER (WHERE category='OUT_NO_PERMIT'),
-        'unknown',      COUNT(*) FILTER (WHERE category='UNKNOWN'),
-        'alerts_count', (SELECT COUNT(*) FROM public.audit_alerts WHERE session_id = p_session_id)
-    ) INTO v_summary
-    FROM public.audit_responses
-    WHERE session_id = p_session_id;
-
-    RETURN jsonb_build_object(
-        'session_id', p_session_id,
-        'status',     'CLOSED',
-        'summary',    v_summary
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.close_audit(UUID, TEXT, TEXT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 8. RPC: abort_audit
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.abort_audit(
-    p_session_id UUID,
-    p_actor      TEXT,
-    p_reason     TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-BEGIN
-    UPDATE public.audit_sessions
-       SET status='ABORTED', closed_at=NOW(), closed_by=p_actor, notes=COALESCE(p_reason, notes)
-     WHERE id=p_session_id AND status='ACTIVE';
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('error','SESSION_NOT_ACTIVE');
-    END IF;
-
-    RETURN jsonb_build_object('status','ABORTED','session_id',p_session_id);
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.abort_audit(UUID, TEXT, TEXT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 9. RPC: get_active_audit
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.get_active_audit()
-RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER STABLE
-AS $$
-DECLARE
-    v_session  public.audit_sessions%ROWTYPE;
-    v_payload  JSONB;
-BEGIN
-    SELECT * INTO v_session
-    FROM public.audit_sessions
-    WHERE status = 'ACTIVE'
-    ORDER BY started_at DESC
-    LIMIT 1;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('session', NULL);
-    END IF;
-
-    SELECT jsonb_build_object(
-        'session', to_jsonb(v_session),
-        'responses', COALESCE(
-            (SELECT jsonb_agg(to_jsonb(ar.*))
-             FROM public.audit_responses ar
-             WHERE ar.session_id = v_session.id),
-            '[]'::jsonb),
-        'alerts', COALESCE(
-            (SELECT jsonb_agg(to_jsonb(aa.*))
-             FROM public.audit_alerts aa
-             WHERE aa.session_id = v_session.id),
-            '[]'::jsonb),
-        'kpis', public.compute_audit_kpis(v_session.id)
-    ) INTO v_payload;
-
-    RETURN v_payload;
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.get_active_audit() TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 10. RPC: get_audit_full
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.get_audit_full(p_session_id UUID)
-RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER STABLE
-AS $$
-DECLARE
-    v_session public.audit_sessions%ROWTYPE;
-BEGIN
-    SELECT * INTO v_session FROM public.audit_sessions WHERE id = p_session_id;
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('error','SESSION_NOT_FOUND');
-    END IF;
-
-    RETURN jsonb_build_object(
-        'session', to_jsonb(v_session),
-        'responses', COALESCE(
-            (SELECT jsonb_agg(to_jsonb(ar.*))
-             FROM public.audit_responses ar
-             WHERE ar.session_id = p_session_id),
-            '[]'::jsonb),
-        'alerts', COALESCE(
-            (SELECT jsonb_agg(to_jsonb(aa.*))
-             FROM public.audit_alerts aa
-             WHERE aa.session_id = p_session_id),
-            '[]'::jsonb),
-        'log', COALESCE(
-            (SELECT jsonb_agg(to_jsonb(l.*) ORDER BY l.changed_at)
-             FROM public.audit_response_log l
-             WHERE l.session_id = p_session_id),
-            '[]'::jsonb),
-        'kpis', public.compute_audit_kpis(p_session_id)
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.get_audit_full(UUID) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 11. RPC: compute_audit_kpis (used by both)
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.compute_audit_kpis(p_session_id UUID)
-RETURNS JSONB
-LANGUAGE plpgsql STABLE
-AS $$
-DECLARE
-    v_by_category JSONB;
-    v_by_class    JSONB;
-    v_by_bucket   JSONB;
-BEGIN
-    SELECT jsonb_object_agg(category, cnt)
-      INTO v_by_category
-    FROM (
-        SELECT category, COUNT(*) AS cnt
-        FROM public.audit_responses
-        WHERE session_id = p_session_id
-        GROUP BY category
-    ) t;
-
-    SELECT jsonb_object_agg(class_id, sub)
-      INTO v_by_class
-    FROM (
-        SELECT class_id,
-               jsonb_build_object(
-                   'total',         COUNT(*),
-                   'in_yeshiva',    COUNT(*) FILTER (WHERE category='IN_YESHIVA'),
-                   'out_permit',    COUNT(*) FILTER (WHERE category='OUT_PERMIT'),
-                   'out_no_permit', COUNT(*) FILTER (WHERE category='OUT_NO_PERMIT'),
-                   'unknown',       COUNT(*) FILTER (WHERE category='UNKNOWN'),
-                   'pending',       COUNT(*) FILTER (WHERE category='PENDING')
-               ) AS sub
-        FROM public.audit_responses
-        WHERE session_id = p_session_id
-        GROUP BY class_id
-    ) t;
-
-    SELECT jsonb_object_agg(distance_bucket, cnt)
-      INTO v_by_bucket
-    FROM (
-        SELECT distance_bucket, COUNT(*) AS cnt
-        FROM public.audit_responses
-        WHERE session_id = p_session_id AND distance_bucket IS NOT NULL
-        GROUP BY distance_bucket
-    ) t;
-
-    RETURN jsonb_build_object(
-        'by_category', COALESCE(v_by_category, '{}'::jsonb),
-        'by_class',    COALESCE(v_by_class,    '{}'::jsonb),
-        'by_bucket',   COALESCE(v_by_bucket,   '{}'::jsonb)
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.compute_audit_kpis(UUID) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 12. RPC: acknowledge_audit_alert
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.acknowledge_audit_alert(
-    p_alert_id UUID,
-    p_actor    TEXT,
-    p_note     TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-BEGIN
-    UPDATE public.audit_alerts
-       SET acknowledged_by = p_actor,
-           acknowledged_at = NOW(),
-           note            = COALESCE(p_note, note)
-     WHERE id = p_alert_id
-       AND acknowledged_at IS NULL;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('error','ALERT_ALREADY_ACKNOWLEDGED_OR_MISSING');
-    END IF;
-
-    RETURN jsonb_build_object('alert_id', p_alert_id, 'acknowledged_by', p_actor);
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.acknowledge_audit_alert(UUID, TEXT, TEXT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 13. RPC: list_past_audits
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.list_past_audits(
-    p_mode  TEXT DEFAULT NULL,
-    p_since TIMESTAMPTZ DEFAULT NULL,
-    p_until TIMESTAMPTZ DEFAULT NULL,
-    p_limit INT DEFAULT 50
-) RETURNS JSONB
-LANGUAGE plpgsql STABLE
-AS $$
-BEGIN
-    RETURN COALESCE(
-        (SELECT jsonb_agg(to_jsonb(s.*) ORDER BY s.started_at DESC)
-         FROM public.audit_sessions s
-         WHERE (p_mode  IS NULL OR s.mode = p_mode)
-           AND (p_since IS NULL OR s.started_at >= p_since)
-           AND (p_until IS NULL OR s.started_at <= p_until)
-         ORDER BY s.started_at DESC
-         LIMIT p_limit),
-        '[]'::jsonb
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.list_past_audits(TEXT, TIMESTAMPTZ, TIMESTAMPTZ, INT) TO anon, authenticated;
-
--- ------------------------------------------------------------
--- 14. RPC: tick_audit_timeout (cron)
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.tick_audit_timeout()
-RETURNS INT
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-DECLARE
-    v_count INT;
-BEGIN
-    UPDATE public.audit_sessions
-       SET status='TIMED_OUT', closed_at=NOW()
-     WHERE status='ACTIVE'
-       AND started_at < NOW() - INTERVAL '24 hours';
-
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-    RETURN v_count;
-END;
-$$;
-
--- Schedule via pg_cron
-SELECT cron.schedule(
-    'tick_audit_timeout',
-    '*/5 * * * *',
-    $$SELECT public.tick_audit_timeout();$$
-);
-
--- ------------------------------------------------------------
--- 15. Realtime publication
--- ------------------------------------------------------------
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_publication_tables
-        WHERE pubname = 'supabase_realtime'
-          AND tablename = 'audit_sessions'
-    ) THEN
-        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_sessions;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_publication_tables
-        WHERE pubname = 'supabase_realtime'
-          AND tablename = 'audit_responses'
-    ) THEN
-        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_responses;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_publication_tables
-        WHERE pubname = 'supabase_realtime'
-          AND tablename = 'audit_alerts'
-    ) THEN
-        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_alerts;
-    END IF;
-END $$;
-
-COMMIT;
-
--- ============================================================
--- END OF MIGRATION
--- ============================================================
-```
+- CountUp animation reduces to instant value change.
+- Slide-in animations become fades.
+- Pulse animation on RED markers becomes a static glow.
+- Tab rotation in projection mode pauses.
 
 ---
 
-# חלק ט"ז — TypeScript Types (קבצים מלאים)
-
-## 16.1 `src/types/audit.ts`
-
-```ts
-// src/types/audit.ts
-// All TypeScript types for the Internal Audit subsystem.
-// This is the single source of truth for shapes shared between
-// the API layer, stores, hooks, and UI components.
-
-// ---- Enums (string-literal unions; matches DB CHECK constraints) ----
-
-export const AUDIT_MODES = ['MANUAL', 'LOCATION'] as const
-export type AuditMode = typeof AUDIT_MODES[number]
-
-export const AUDIT_SESSION_STATUSES = ['ACTIVE', 'CLOSED', 'ABORTED', 'TIMED_OUT'] as const
-export type AuditSessionStatus = typeof AUDIT_SESSION_STATUSES[number]
-
-export const AUDIT_CATEGORIES = [
-  'PENDING',
-  'IN_YESHIVA',
-  'OUT_PERMIT',
-  'OUT_NO_PERMIT',
-  'UNKNOWN',
-] as const
-export type AuditCategory = typeof AUDIT_CATEGORIES[number]
-
-export const DISTANCE_BUCKETS = ['GREEN', 'BLUE', 'ORANGE', 'RED'] as const
-export type DistanceBucket = typeof DISTANCE_BUCKETS[number]
-
-export const GPS_STATUSES = [
-  'OK',
-  'DENIED',
-  'TIMEOUT',
-  'OFFLINE',
-  'UNAVAILABLE',
-  'LOW_ACCURACY',
-] as const
-export type GpsStatus = typeof GPS_STATUSES[number]
-
-export const ALERT_SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const
-export type AlertSeverity = typeof ALERT_SEVERITIES[number]
-
-export const PUSH_TARGETS = ['STUDENTS', 'SUPERVISORS', 'BOTH'] as const
-export type PushTarget = typeof PUSH_TARGETS[number]
-
-export const SENSITIVITIES = ['LOW', 'MEDIUM', 'HIGH'] as const
-export type Sensitivity = typeof SENSITIVITIES[number]
-
-// ---- Session settings ----
-
-export interface AuditSessionSettings {
-  /** Seconds before sending reminder pushes. Default: 120 */
-  timeoutSec?: number
-  /** Alert threshold sensitivity */
-  sensitivity?: Sensitivity
-  /** Who to send push to */
-  pushTarget?: PushTarget
-  /** Whether to show map by default */
-  showMap?: boolean
-  /** Auto-rotate projection mode dwell time (sec) */
-  projectionDwellSec?: number
-}
-
-// ---- Domain entities (match DB row shapes via snake_case → camelCase) ----
-
-export interface AuditSession {
-  id: string
-  mode: AuditMode
-  status: AuditSessionStatus
-  classIds: string[]
-  totalStudents: number
-  startedBy: string
-  startedAt: string             // ISO-8601 with TZ
-  closedAt: string | null
-  closedBy: string | null
-  notes: string | null
-  settings: AuditSessionSettings
-  createdAt: string
-  updatedAt: string
-}
-
-export interface AuditResponse {
-  id: string
-  sessionId: string
-  studentId: string
-  classId: string
-  category: AuditCategory
-  markedBy: string | null
-  markedAt: string | null
-  gpsLat: number | null
-  gpsLng: number | null
-  gpsAccuracyM: number | null
-  distanceFromCampusM: number | null
-  distanceBucket: DistanceBucket | null
-  gpsStatus: GpsStatus | null
-  departureId: string | null
-  note: string | null
-  createdAt: string
-  updatedAt: string
-}
-
-export interface AuditAlert {
-  id: string
-  sessionId: string
-  studentId: string
-  triggeredAt: string
-  distanceM: number
-  gpsLat: number | null
-  gpsLng: number | null
-  severity: AlertSeverity
-  acknowledgedBy: string | null
-  acknowledgedAt: string | null
-  note: string | null
-}
-
-export interface AuditResponseLogEntry {
-  id: string
-  responseId: string
-  sessionId: string
-  studentId: string
-  fromCategory: AuditCategory | null
-  toCategory: AuditCategory
-  actor: string
-  changedAt: string
-}
-
-// ---- KPI aggregates (from RPC compute_audit_kpis) ----
-
-export interface AuditKpis {
-  byCategory: Partial<Record<AuditCategory, number>>
-  byClass: Record<string, AuditClassKpis>
-  byBucket: Partial<Record<DistanceBucket, number>>
-}
-
-export interface AuditClassKpis {
-  total: number
-  in_yeshiva: number
-  out_permit: number
-  out_no_permit: number
-  unknown: number
-  pending: number
-}
-
-// ---- Payloads ----
-
-export interface OpenAuditPayload {
-  mode: AuditMode
-  classIds: string[]
-  startedBy: string
-  settings?: AuditSessionSettings
-  notes?: string
-}
-
-export interface SubmitAuditResponsePayload {
-  sessionId: string
-  studentId: string
-  category?: AuditCategory
-  gpsLat?: number
-  gpsLng?: number
-  gpsAccuracyM?: number
-  gpsStatus?: GpsStatus
-  markedBy?: string
-  note?: string
-}
-
-export interface CloseAuditPayload {
-  sessionId: string
-  closedBy: string
-  notes?: string
-}
-
-// ---- Type guards ----
-
-export function isAuditMode(x: unknown): x is AuditMode {
-  return typeof x === 'string' && (AUDIT_MODES as readonly string[]).includes(x)
-}
-
-export function isAuditCategory(x: unknown): x is AuditCategory {
-  return typeof x === 'string' && (AUDIT_CATEGORIES as readonly string[]).includes(x)
-}
-
-export function isDistanceBucket(x: unknown): x is DistanceBucket {
-  return typeof x === 'string' && (DISTANCE_BUCKETS as readonly string[]).includes(x)
-}
-
-// ---- Realtime payloads (Supabase wire format → our types) ----
-
-export interface RealtimeAuditEvent {
-  schema: 'public'
-  table: 'audit_sessions' | 'audit_responses' | 'audit_alerts'
-  eventType: 'INSERT' | 'UPDATE' | 'DELETE'
-  new: any
-  old: any
-}
-```
+# Part 19 — Mobile & Responsive
 
-## 16.2 `src/lib/audit/categories.ts`
-
-```ts
-// src/lib/audit/categories.ts
-// Single source of truth for category labels, icons, colors.
-// Used by every UI component that renders a category.
-
-import type { AuditCategory } from '@/types/audit'
-import {
-  Check,
-  LogOut,
-  AlertOctagon,
-  HelpCircle,
-  Clock,
-  type LucideIcon,
-} from 'lucide-react'
-
-export interface CategoryMeta {
-  label: string                 // Hebrew label
-  shortLabel: string            // ultra-short for badges
-  color: string                 // Tailwind class (background)
-  bgColor: string               // pale background
-  borderColor: string
-  textColor: string
-  icon: LucideIcon
-  description: string
-  priority: number              // for sorting (higher = more attention)
-}
-
-export const CATEGORY_META: Record<AuditCategory, CategoryMeta> = {
-  PENDING: {
-    label: 'ממתין',
-    shortLabel: 'ממ',
-    color: 'bg-gray-300 dark:bg-gray-600',
-    bgColor: 'bg-gray-100 dark:bg-gray-800',
-    borderColor: 'border-gray-300 dark:border-gray-600',
-    textColor: 'text-gray-700 dark:text-gray-300',
-    icon: Clock,
-    description: 'התלמיד עדיין לא הגיב/סומן',
-    priority: 30,
-  },
-  IN_YESHIVA: {
-    label: 'נוכח',
-    shortLabel: 'נוכח',
-    color: 'bg-emerald-500',
-    bgColor: 'bg-emerald-50 dark:bg-emerald-950',
-    borderColor: 'border-emerald-500',
-    textColor: 'text-emerald-700 dark:text-emerald-400',
-    icon: Check,
-    description: 'התלמיד נמצא בישיבה',
-    priority: 10,
-  },
-  OUT_PERMIT: {
-    label: 'בחוץ עם אישור',
-    shortLabel: 'עם אישור',
-    color: 'bg-blue-500',
-    bgColor: 'bg-blue-50 dark:bg-blue-950',
-    borderColor: 'border-blue-500',
-    textColor: 'text-blue-700 dark:text-blue-400',
-    icon: LogOut,
-    description: 'התלמיד יצא עם יציאה מאושרת',
-    priority: 20,
-  },
-  OUT_NO_PERMIT: {
-    label: 'בחוץ ללא אישור',
-    shortLabel: 'ללא אישור',
-    color: 'bg-red-500',
-    bgColor: 'bg-red-50 dark:bg-red-950',
-    borderColor: 'border-red-500',
-    textColor: 'text-red-700 dark:text-red-400',
-    icon: AlertOctagon,
-    description: 'התלמיד מחוץ לישיבה ללא אישור',
-    priority: 100,
-  },
-  UNKNOWN: {
-    label: 'לא ידוע',
-    shortLabel: 'לא ידוע',
-    color: 'bg-amber-400',
-    bgColor: 'bg-amber-50 dark:bg-amber-950',
-    borderColor: 'border-amber-400',
-    textColor: 'text-amber-700 dark:text-amber-400',
-    icon: HelpCircle,
-    description: 'התלמיד לא הגיב או GPS דחה',
-    priority: 60,
-  },
-}
-
-export function getCategoryMeta(c: AuditCategory): CategoryMeta {
-  return CATEGORY_META[c] ?? CATEGORY_META.PENDING
-}
-
-// Manual-mode buttons (3 categories only the supervisor picks)
-export const MANUAL_PICKABLE_CATEGORIES: AuditCategory[] = [
-  'IN_YESHIVA',
-  'OUT_PERMIT',
-  'OUT_NO_PERMIT',
-]
-
-// Sort categories by priority (descending: highest priority first)
-export function sortCategoriesByPriority(cats: AuditCategory[]): AuditCategory[] {
-  return [...cats].sort(
-    (a, b) => getCategoryMeta(b).priority - getCategoryMeta(a).priority
-  )
-}
-```
+## 19.1 Form factor targets
 
-## 16.3 `src/lib/audit/distanceBuckets.ts`
-
-```ts
-// src/lib/audit/distanceBuckets.ts
-// Distance bucket configuration. THESE NUMBERS MUST MATCH THE RPC.
-// (See fn_distance_bucket in the migration file.)
-
-import type { DistanceBucket } from '@/types/audit'
-
-export interface BucketMeta {
-  bucket: DistanceBucket
-  maxMeters: number              // inclusive upper bound; Infinity for RED
-  label: string                  // Hebrew long label
-  shortLabel: string
-  color: string                  // hex
-  twBg: string                   // tailwind bg class
-  twBorder: string
-  twText: string
-  twRing: string
-  emoji: string
-}
-
-export const DISTANCE_BUCKETS_ORDERED: BucketMeta[] = [
-  {
-    bucket: 'GREEN',
-    maxMeters: 300,
-    label: 'בישיבה',
-    shortLabel: 'בישיבה',
-    color: '#10b981',
-    twBg: 'bg-emerald-500',
-    twBorder: 'border-emerald-500',
-    twText: 'text-emerald-700 dark:text-emerald-400',
-    twRing: 'ring-emerald-300 dark:ring-emerald-700',
-    emoji: '🟢',
-  },
-  {
-    bucket: 'BLUE',
-    maxMeters: 1000,
-    label: 'באזור הישיבה',
-    shortLabel: 'קרוב',
-    color: '#3b82f6',
-    twBg: 'bg-blue-500',
-    twBorder: 'border-blue-500',
-    twText: 'text-blue-700 dark:text-blue-400',
-    twRing: 'ring-blue-300 dark:ring-blue-700',
-    emoji: '🔵',
-  },
-  {
-    bucket: 'ORANGE',
-    maxMeters: 5000,
-    label: 'אזור חברון',
-    shortLabel: 'כתום',
-    color: '#f59e0b',
-    twBg: 'bg-amber-500',
-    twBorder: 'border-amber-500',
-    twText: 'text-amber-700 dark:text-amber-400',
-    twRing: 'ring-amber-300 dark:ring-amber-700',
-    emoji: '🟠',
-  },
-  {
-    bucket: 'RED',
-    maxMeters: Infinity,
-    label: 'מחוץ לטווח',
-    shortLabel: 'רחוק',
-    color: '#ef4444',
-    twBg: 'bg-red-500',
-    twBorder: 'border-red-500',
-    twText: 'text-red-700 dark:text-red-400',
-    twRing: 'ring-red-300 dark:ring-red-700',
-    emoji: '🔴',
-  },
-]
-
-export function bucketFromMeters(m: number | null | undefined): DistanceBucket | null {
-  if (m == null || Number.isNaN(m) || m < 0) return null
-  for (const b of DISTANCE_BUCKETS_ORDERED) {
-    if (m <= b.maxMeters) return b.bucket
-  }
-  return 'RED'
-}
-
-export function getBucketMeta(b: DistanceBucket): BucketMeta {
-  const m = DISTANCE_BUCKETS_ORDERED.find(x => x.bucket === b)
-  if (!m) throw new Error(`Unknown bucket: ${b}`)
-  return m
-}
-
-export function formatDistance(m: number | null | undefined): string {
-  if (m == null) return '—'
-  if (m < 1000) return `${Math.round(m)}m`
-  return `${(m / 1000).toFixed(1)} ק"מ`
-}
-```
+- **Primary: mobile 375 × 667 px.** This is iPhone SE, an honest lower bound for what the admin's phone might be.
+- **Secondary: mobile 414 × 896 px.** This is the more common modern iPhone width. Most admin use happens here.
+- **Tertiary: tablet 768 × 1024 px.** Used in projection scenarios.
+- **Desktop 1280 × 720+.** Used for compare page, summary page, history page. Rarely for live monitoring.
 
-## 16.4 `src/lib/audit/haversine.ts`
-
-```ts
-// src/lib/audit/haversine.ts
-// Great-circle distance in meters between two lat/lng points.
-// Mirrors the SQL fn_haversine_m function — both must agree.
-
-export const CAMPUS_LAT = 31.5253
-export const CAMPUS_LNG = 35.1056
-export const EARTH_RADIUS_M = 6371000
-
-export function haversineMeters(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number,
-): number {
-  if (!isFinite(lat1) || !isFinite(lng1) || !isFinite(lat2) || !isFinite(lng2)) {
-    return NaN
-  }
-  const toRad = (deg: number) => (deg * Math.PI) / 180
-  const dLat = toRad(lat2 - lat1)
-  const dLng = toRad(lng2 - lng1)
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
-  return EARTH_RADIUS_M * 2 * Math.asin(Math.sqrt(a))
-}
-
-export function distanceFromCampus(lat: number, lng: number): number {
-  return haversineMeters(CAMPUS_LAT, CAMPUS_LNG, lat, lng)
-}
-```
+## 19.2 Mobile-specific design
 
-## 16.5 `src/lib/audit/gpsCollector.ts`
-
-```ts
-// src/lib/audit/gpsCollector.ts
-// Hardened wrapper around navigator.geolocation.getCurrentPosition.
-// Returns a discriminated union with explicit error types.
-
-import type { GpsStatus } from '@/types/audit'
-
-export type GpsResult =
-  | {
-      status: 'OK'
-      lat: number
-      lng: number
-      accuracyM: number
-      timestamp: number
-    }
-  | {
-      status: Exclude<GpsStatus, 'OK'>
-      reason?: string
-    }
-
-export interface CollectOptions {
-  timeoutMs?: number
-  highAccuracy?: boolean
-  maxAccuracyM?: number       // results worse than this → LOW_ACCURACY
-}
-
-const DEFAULTS: Required<CollectOptions> = {
-  timeoutMs: 15000,
-  highAccuracy: true,
-  maxAccuracyM: 1000,
-}
-
-export async function checkPermission(): Promise<PermissionState | 'unknown'> {
-  if (!('permissions' in navigator)) return 'unknown'
-  try {
-    const p = await navigator.permissions.query({ name: 'geolocation' as PermissionName })
-    return p.state
-  } catch {
-    return 'unknown'
-  }
-}
-
-export function isOnline(): boolean {
-  return typeof navigator !== 'undefined' && navigator.onLine !== false
-}
-
-export async function collectGps(opts: CollectOptions = {}): Promise<GpsResult> {
-  const cfg = { ...DEFAULTS, ...opts }
-
-  if (!('geolocation' in navigator)) {
-    return { status: 'UNAVAILABLE', reason: 'navigator.geolocation missing' }
-  }
-
-  if (!isOnline()) {
-    return { status: 'OFFLINE', reason: 'navigator.onLine = false' }
-  }
-
-  return new Promise<GpsResult>((resolve) => {
-    let settled = false
-    const timer = window.setTimeout(() => {
-      if (settled) return
-      settled = true
-      resolve({ status: 'TIMEOUT', reason: `Exceeded ${cfg.timeoutMs}ms` })
-    }, cfg.timeoutMs)
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        if (settled) return
-        settled = true
-        window.clearTimeout(timer)
-
-        const { latitude, longitude, accuracy } = pos.coords
-        if (accuracy > cfg.maxAccuracyM) {
-          resolve({
-            status: 'LOW_ACCURACY',
-            reason: `Accuracy ${accuracy.toFixed(0)}m > ${cfg.maxAccuracyM}m`,
-          })
-          return
-        }
-
-        resolve({
-          status: 'OK',
-          lat: latitude,
-          lng: longitude,
-          accuracyM: accuracy,
-          timestamp: pos.timestamp,
-        })
-      },
-      (err) => {
-        if (settled) return
-        settled = true
-        window.clearTimeout(timer)
-
-        const map: Record<number, GpsStatus> = {
-          1: 'DENIED',
-          2: 'UNAVAILABLE',
-          3: 'TIMEOUT',
-        }
-        resolve({
-          status: map[err.code] ?? 'UNAVAILABLE',
-          reason: err.message,
-        })
-      },
-      {
-        enableHighAccuracy: cfg.highAccuracy,
-        timeout: cfg.timeoutMs,
-        maximumAge: 0,
-      },
-    )
-  })
-}
-
-export async function collectGpsWithRetry(
-  opts: CollectOptions = {},
-  retries = 1,
-): Promise<GpsResult> {
-  let last: GpsResult = await collectGps(opts)
-  for (let i = 0; i < retries; i++) {
-    if (last.status === 'OK') return last
-    if (last.status === 'DENIED' || last.status === 'UNAVAILABLE') return last
-    last = await collectGps(opts)
-  }
-  return last
-}
-```
+- **Sticky KPI strip.** On scroll, the KPI strip pins to the top of the viewport, shrinking from large numbers to compact form. The admin can always see the totals.
+- **Tab bar at the bottom on mobile.** Grid/Heatmap/Map/Feed switch is reachable by thumb without stretching.
+- **Drawer slide direction.** Class detail drawer slides up from the bottom on mobile (75% of viewport), in from the right on desktop (450 px wide). On tablet, follows screen orientation.
+- **Touch targets.** Minimum 44 px. Spacing between targets 8 px (so finger doesn't accidentally hit two).
+- **Pinch-to-zoom on map.** Native Leaflet behavior preserved.
+- **No hover states.** Mobile design assumes no hover; all hover affordances on desktop have a tap equivalent.
 
-## 16.6 `src/lib/audit/soundManager.ts`
-
-```ts
-// src/lib/audit/soundManager.ts
-// Howler.js wrapper for audit-related sounds.
-
-import { Howl } from 'howler'
-
-type SoundKey = 'chime' | 'ding' | 'alert' | 'notification' | 'complete'
-
-const SOURCES: Record<SoundKey, { src: string[]; volume: number }> = {
-  chime:        { src: ['/sounds/chime-soft.mp3'], volume: 0.30 },
-  ding:         { src: ['/sounds/ding.mp3'],       volume: 0.50 },
-  alert:        { src: ['/sounds/alert.mp3'],      volume: 0.70 },
-  notification: { src: ['/sounds/notification.mp3'], volume: 0.60 },
-  complete:     { src: ['/sounds/complete.mp3'],   volume: 0.40 },
-}
-
-const cache: Partial<Record<SoundKey, Howl>> = {}
-let globalMuted = false
-
-export function setGlobalMute(muted: boolean) { globalMuted = muted }
-export function isMuted() { return globalMuted }
-
-export function play(key: SoundKey): void {
-  if (globalMuted) return
-  if (!cache[key]) {
-    cache[key] = new Howl({ src: SOURCES[key].src, volume: SOURCES[key].volume })
-  }
-  try {
-    cache[key]!.play()
-  } catch (e) {
-    console.warn('[soundManager] play failed', key, e)
-  }
-}
-
-export function preloadAll(): void {
-  for (const key of Object.keys(SOURCES) as SoundKey[]) {
-    if (!cache[key]) {
-      cache[key] = new Howl({ src: SOURCES[key].src, volume: SOURCES[key].volume, preload: true })
-    }
-  }
-}
-```
+## 19.3 Network conditions
 
----
+- **3G as a baseline.** Live dashboard must be usable on a phone with 3G. Realtime works on 3G but with higher latency (2–5 s); polling fallback handles the gaps.
+- **Offline supervisor.** As discussed, supervisor mutations queue offline.
+- **Offline student.** Student cannot respond to an audit while offline. The notification is preserved by the OS; tapping it after going online still works.
+- **Offline admin.** Admin cannot run the dashboard while offline. The connectivity status is shown prominently.
 
-# חלק י"ז — Zustand Stores (קוד מלא)
-
-## 17.1 `src/store/auditStore.ts`
-
-```ts
-// src/store/auditStore.ts
-// Zustand store for the active audit session.
-// SOURCE OF TRUTH: DB. This store mirrors DB state via RPC + Realtime.
-// NEVER persist this store — every page load re-fetches from DB.
-
-import { create } from 'zustand'
-import type {
-  AuditSession,
-  AuditResponse,
-  AuditAlert,
-  AuditCategory,
-  AuditKpis,
-} from '@/types/audit'
-import { api } from '@/lib/api'
-
-interface AuditStoreState {
-  session: AuditSession | null
-  responses: Map<string, AuditResponse>      // key: studentId
-  alerts: AuditAlert[]
-  kpis: AuditKpis | null
-  loading: boolean
-  error: string | null
-  lastSync: number | null
-
-  // queries
-  loadActive: () => Promise<void>
-  loadById: (sessionId: string) => Promise<void>
-
-  // mutations
-  open: (
-    mode: 'MANUAL' | 'LOCATION',
-    classIds: string[],
-    startedBy: string,
-    settings?: Record<string, unknown>,
-    notes?: string,
-  ) => Promise<string>
-  close: (closedBy: string, notes?: string) => Promise<void>
-  abort: (actor: string, reason?: string) => Promise<void>
-  submitResponse: (
-    studentId: string,
-    payload: Partial<AuditResponse> & { markedBy?: string },
-  ) => Promise<void>
-  acknowledgeAlert: (alertId: string, actor: string, note?: string) => Promise<void>
-
-  // realtime hooks
-  upsertResponse: (r: AuditResponse) => void
-  insertAlert: (a: AuditAlert) => void
-  updateSession: (s: AuditSession) => void
-
-  // utilities
-  reset: () => void
-}
-
-export const useAuditStore = create<AuditStoreState>((set, get) => ({
-  session: null,
-  responses: new Map(),
-  alerts: [],
-  kpis: null,
-  loading: false,
-  error: null,
-  lastSync: null,
-
-  loadActive: async () => {
-    set({ loading: true, error: null })
-    try {
-      const data = await api.getActiveAudit()
-      if (!data || !data.session) {
-        set({ session: null, responses: new Map(), alerts: [], kpis: null, loading: false, lastSync: Date.now() })
-        return
-      }
-      const respMap = new Map<string, AuditResponse>()
-      for (const r of data.responses) respMap.set(r.studentId, r)
-      set({
-        session: data.session,
-        responses: respMap,
-        alerts: data.alerts,
-        kpis: data.kpis,
-        loading: false,
-        lastSync: Date.now(),
-      })
-    } catch (e: any) {
-      set({ loading: false, error: e?.message ?? 'failed_to_load_audit' })
-    }
-  },
-
-  loadById: async (sessionId) => {
-    set({ loading: true, error: null })
-    try {
-      const data = await api.getAuditFull(sessionId)
-      const respMap = new Map<string, AuditResponse>()
-      for (const r of data.responses) respMap.set(r.studentId, r)
-      set({
-        session: data.session,
-        responses: respMap,
-        alerts: data.alerts,
-        kpis: data.kpis,
-        loading: false,
-        lastSync: Date.now(),
-      })
-    } catch (e: any) {
-      set({ loading: false, error: e?.message ?? 'failed_to_load_audit' })
-    }
-  },
-
-  open: async (mode, classIds, startedBy, settings, notes) => {
-    const res = await api.openAudit({ mode, classIds, startedBy, settings, notes })
-    if ('error' in res) throw new Error(res.error)
-    await get().loadById(res.session_id)
-    return res.session_id
-  },
-
-  close: async (closedBy, notes) => {
-    const s = get().session
-    if (!s) throw new Error('no_active_session')
-    const res = await api.closeAudit({ sessionId: s.id, closedBy, notes })
-    if ('error' in res) throw new Error(res.error)
-    set({ session: { ...s, status: 'CLOSED', closedAt: new Date().toISOString(), closedBy } })
-  },
-
-  abort: async (actor, reason) => {
-    const s = get().session
-    if (!s) throw new Error('no_active_session')
-    await api.abortAudit(s.id, actor, reason)
-    set({ session: { ...s, status: 'ABORTED', closedAt: new Date().toISOString(), closedBy: actor } })
-  },
-
-  submitResponse: async (studentId, payload) => {
-    const s = get().session
-    if (!s) throw new Error('no_active_session')
-    await api.submitAuditResponse({ sessionId: s.id, studentId, ...payload })
-    // realtime will push the canonical row back, but optimistic update here:
-    const cur = get().responses.get(studentId)
-    if (cur) {
-      const next = new Map(get().responses)
-      next.set(studentId, { ...cur, ...payload, markedAt: new Date().toISOString() } as AuditResponse)
-      set({ responses: next })
-    }
-  },
-
-  acknowledgeAlert: async (alertId, actor, note) => {
-    await api.acknowledgeAuditAlert(alertId, actor, note)
-    set({
-      alerts: get().alerts.map(a =>
-        a.id === alertId
-          ? { ...a, acknowledgedBy: actor, acknowledgedAt: new Date().toISOString(), note: note ?? a.note }
-          : a,
-      ),
-    })
-  },
-
-  upsertResponse: (r) => {
-    const next = new Map(get().responses)
-    next.set(r.studentId, r)
-    set({ responses: next })
-  },
-
-  insertAlert: (a) => {
-    set({ alerts: [a, ...get().alerts] })
-  },
-
-  updateSession: (s) => {
-    set({ session: s })
-  },
-
-  reset: () => {
-    set({ session: null, responses: new Map(), alerts: [], kpis: null, error: null })
-  },
-}))
-
-// Selectors
-export const selectKpis = (s: AuditStoreState) => s.kpis
-export const selectClassResponses = (classId: string) => (s: AuditStoreState) =>
-  [...s.responses.values()].filter(r => r.classId === classId)
-export const selectAlertsOpen = (s: AuditStoreState) =>
-  s.alerts.filter(a => !a.acknowledgedAt)
-```
+## 19.4 Battery and resource considerations
 
-## 17.2 `src/store/auditUiStore.ts`
-
-```ts
-// src/store/auditUiStore.ts
-// UI-only state for the audit dashboard. PERSISTED to localStorage.
-// (Tab selection, filters, projection mode survive a refresh.)
-
-import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
-import type { AuditCategory } from '@/types/audit'
-
-export type LiveTab = 'map' | 'heatmap' | 'grid' | 'table' | 'feed'
-
-interface AuditUiState {
-  activeTab: LiveTab
-  classFilter: string[]
-  categoryFilter: AuditCategory[]
-  minDistance: number | null
-  projectionMode: boolean
-  projectionPaused: boolean
-  soundEnabled: boolean
-
-  setTab: (t: LiveTab) => void
-  setClassFilter: (ids: string[]) => void
-  toggleCategoryFilter: (c: AuditCategory) => void
-  setMinDistance: (m: number | null) => void
-  enterProjection: () => void
-  exitProjection: () => void
-  toggleProjectionPause: () => void
-  setSoundEnabled: (b: boolean) => void
-  resetFilters: () => void
-}
-
-export const useAuditUiStore = create<AuditUiState>()(
-  persist(
-    (set, get) => ({
-      activeTab: 'grid',
-      classFilter: [],
-      categoryFilter: [],
-      minDistance: null,
-      projectionMode: false,
-      projectionPaused: false,
-      soundEnabled: true,
-
-      setTab: (t) => set({ activeTab: t }),
-      setClassFilter: (ids) => set({ classFilter: ids }),
-      toggleCategoryFilter: (c) => {
-        const cur = get().categoryFilter
-        set({
-          categoryFilter: cur.includes(c) ? cur.filter(x => x !== c) : [...cur, c],
-        })
-      },
-      setMinDistance: (m) => set({ minDistance: m }),
-      enterProjection: () => set({ projectionMode: true, projectionPaused: false }),
-      exitProjection: () => set({ projectionMode: false, projectionPaused: false }),
-      toggleProjectionPause: () => set({ projectionPaused: !get().projectionPaused }),
-      setSoundEnabled: (b) => set({ soundEnabled: b }),
-      resetFilters: () => set({ classFilter: [], categoryFilter: [], minDistance: null }),
-    }),
-    {
-      name: 'audit-ui-store',
-      partialize: (s) => ({
-        activeTab: s.activeTab,
-        soundEnabled: s.soundEnabled,
-      }),
-    },
-  ),
-)
-```
+- **No background polling.** Polling fallback only runs while the page is foregrounded.
+- **GPS request is one-shot.** No `watchPosition`. Battery cost: one GPS fix per audit.
+- **Service worker is light.** Only handles push and routing; no heavy background work.
 
 ---
-
-# חלק י"ח — Hooks (קוד מלא)
-
-## 18.1 `src/hooks/useActiveAudit.ts`
-
-```tsx
-// src/hooks/useActiveAudit.ts
-// Loads the active audit on mount and subscribes to realtime.
-
-import { useEffect, useRef } from 'react'
-import { supabase } from '@/lib/api/supabaseClient'
-import { useAuditStore } from '@/store/auditStore'
-import * as sound from '@/lib/audit/soundManager'
-
-export function useActiveAudit() {
-  const session = useAuditStore(s => s.session)
-  const loadActive = useAuditStore(s => s.loadActive)
-  const upsertResponse = useAuditStore(s => s.upsertResponse)
-  const insertAlert = useAuditStore(s => s.insertAlert)
-  const updateSession = useAuditStore(s => s.updateSession)
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
-
-  useEffect(() => {
-    loadActive()
-  }, [loadActive])
-
-  useEffect(() => {
-    if (!session?.id) return
-    const sid = session.id
-
-    const ch = supabase
-      .channel(`audit:${sid}`)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'audit_responses', filter: `session_id=eq.${sid}` },
-        (payload) => {
-          if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
-            upsertResponse(payload.new as any)
-            sound.play('chime')
-          }
-        })
-      .on('postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'audit_alerts', filter: `session_id=eq.${sid}` },
-        (payload) => {
-          insertAlert(payload.new as any)
-          sound.play('alert')
-        })
-      .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` },
-        (payload) => {
-          updateSession(payload.new as any)
-        })
-      .subscribe()
-
-    channelRef.current = ch
-
-    // Polling fallback: every 30s, refetch if no realtime events for > 30s
-    const pollInterval = window.setInterval(() => {
-      const last = useAuditStore.getState().lastSync
-      if (last && Date.now() - last > 30000) {
-        loadActive()
-      }
-    }, 30000)
-
-    return () => {
-      window.clearInterval(pollInterval)
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
-      }
-    }
-  }, [session?.id, upsertResponse, insertAlert, updateSession, loadActive])
-
-  return { session }
-}
-```
-
-## 18.2 `src/hooks/useAuditStats.ts`
-
-```tsx
-// src/hooks/useAuditStats.ts
-// Memoized aggregations over audit_responses.
-
-import { useMemo } from 'react'
-import { useAuditStore } from '@/store/auditStore'
-import type { AuditCategory, DistanceBucket } from '@/types/audit'
-
-export interface AuditStats {
-  total: number
-  byCategory: Record<AuditCategory, number>
-  byBucket: Record<DistanceBucket, number>
-  byClass: Record<string, { total: number; marked: number; alerts: number }>
-  progressPct: number             // marked / total
-  alertsOpen: number
-}
-
-const EMPTY_CAT: Record<AuditCategory, number> = {
-  PENDING: 0, IN_YESHIVA: 0, OUT_PERMIT: 0, OUT_NO_PERMIT: 0, UNKNOWN: 0,
-}
-const EMPTY_BUCKET: Record<DistanceBucket, number> = {
-  GREEN: 0, BLUE: 0, ORANGE: 0, RED: 0,
-}
-
-export function useAuditStats(): AuditStats {
-  const responses = useAuditStore(s => s.responses)
-  const alerts = useAuditStore(s => s.alerts)
-
-  return useMemo(() => {
-    const byCategory = { ...EMPTY_CAT }
-    const byBucket = { ...EMPTY_BUCKET }
-    const byClass: Record<string, { total: number; marked: number; alerts: number }> = {}
-    let total = 0
-    let marked = 0
-
-    for (const r of responses.values()) {
-      total++
-      byCategory[r.category] = (byCategory[r.category] ?? 0) + 1
-      if (r.distanceBucket) byBucket[r.distanceBucket]++
-      if (!byClass[r.classId]) byClass[r.classId] = { total: 0, marked: 0, alerts: 0 }
-      byClass[r.classId].total++
-      if (r.category !== 'PENDING') {
-        byClass[r.classId].marked++
-        marked++
-      }
-    }
-    for (const a of alerts) {
-      if (a.acknowledgedAt) continue
-      const cls = responses.get(a.studentId)?.classId
-      if (cls && byClass[cls]) byClass[cls].alerts++
-    }
-    return {
-      total,
-      byCategory,
-      byBucket,
-      byClass,
-      progressPct: total === 0 ? 0 : Math.round((marked / total) * 100),
-      alertsOpen: alerts.filter(a => !a.acknowledgedAt).length,
-    }
-  }, [responses, alerts])
-}
-```
-
-## 18.3 `src/hooks/useAuditLocationCollector.ts`
-
-```tsx
-// src/hooks/useAuditLocationCollector.ts
-// On student device: when an active LOCATION audit exists and our
-// response is PENDING, open the GPS sheet automatically.
-
-import { useEffect, useState } from 'react'
-import { useAuditStore } from '@/store/auditStore'
-import { collectGps } from '@/lib/audit/gpsCollector'
-import { api } from '@/lib/api'
-import { useAuthStore } from '@/store/authStore'
-import { toast } from 'sonner'
-
-export type CollectorPhase =
-  | 'idle'
-  | 'awaiting_consent'
-  | 'collecting'
-  | 'submitting'
-  | 'done'
-  | 'denied'
-  | 'error'
-
-export function useAuditLocationCollector() {
-  const session = useAuditStore(s => s.session)
-  const responses = useAuditStore(s => s.responses)
-  const studentId = useAuthStore(s => s.currentUser?.id)
-  const [phase, setPhase] = useState<CollectorPhase>('idle')
-  const [error, setError] = useState<string | null>(null)
-
-  // Determine if we need to act
-  const ourResponse = studentId ? responses.get(studentId) : undefined
-  const shouldAct =
-    !!session &&
-    session.status === 'ACTIVE' &&
-    session.mode === 'LOCATION' &&
-    !!ourResponse &&
-    ourResponse.category === 'PENDING'
-
-  useEffect(() => {
-    if (shouldAct && phase === 'idle') setPhase('awaiting_consent')
-    if (!shouldAct && phase !== 'done' && phase !== 'idle') setPhase('idle')
-  }, [shouldAct, phase])
-
-  async function confirm() {
-    if (!session || !studentId) return
-    setPhase('collecting')
-    setError(null)
-    const result = await collectGps({ timeoutMs: 15000, highAccuracy: true })
-    setPhase('submitting')
-
-    try {
-      if (result.status === 'OK') {
-        await api.submitAuditResponse({
-          sessionId: session.id,
-          studentId,
-          gpsLat: result.lat,
-          gpsLng: result.lng,
-          gpsAccuracyM: result.accuracyM,
-          gpsStatus: 'OK',
-          markedBy: 'AUTO_GPS',
-        })
-      } else {
-        await api.submitAuditResponse({
-          sessionId: session.id,
-          studentId,
-          gpsStatus: result.status,
-          markedBy: 'AUTO_GPS',
-        })
-      }
-      setPhase('done')
-      toast.success(result.status === 'OK' ? 'נשלח ✓' : 'שלום — לא נמצא מיקום, רכז יבדוק')
-    } catch (e: any) {
-      setPhase('error')
-      setError(e?.message ?? 'submit_failed')
-      toast.error('שגיאה בשליחה')
-    }
-  }
-
-  async function refuse() {
-    if (!session || !studentId) return
-    try {
-      await api.submitAuditResponse({
-        sessionId: session.id,
-        studentId,
-        gpsStatus: 'DENIED',
-        markedBy: 'AUTO_GPS',
-      })
-      setPhase('denied')
-      toast.info('הרכז יקבל את הבקשה לאישור ידני')
-    } catch (e) {
-      toast.error('שגיאה')
-    }
-  }
-
-  return { phase, error, shouldAct, confirm, refuse }
-}
-```
-
-## 18.4 `src/hooks/useProjectionRotation.ts`
-
-```tsx
-// src/hooks/useProjectionRotation.ts
-// Rotates the active tab while projection mode is on.
-
-import { useEffect } from 'react'
-import { useAuditUiStore, type LiveTab } from '@/store/auditUiStore'
-
-const SEQUENCE: { tab: LiveTab; dwellMs: number }[] = [
-  { tab: 'grid',    dwellMs: 12000 },
-  { tab: 'heatmap', dwellMs: 8000 },
-  { tab: 'map',     dwellMs: 10000 },
-  { tab: 'feed',    dwellMs: 6000 },
-]
-
-export function useProjectionRotation() {
-  const projectionMode = useAuditUiStore(s => s.projectionMode)
-  const projectionPaused = useAuditUiStore(s => s.projectionPaused)
-  const setTab = useAuditUiStore(s => s.setTab)
-  const activeTab = useAuditUiStore(s => s.activeTab)
-
-  useEffect(() => {
-    if (!projectionMode || projectionPaused) return
-    const idx = SEQUENCE.findIndex(s => s.tab === activeTab)
-    const next = SEQUENCE[(idx + 1) % SEQUENCE.length]
-    const cur = SEQUENCE[idx >= 0 ? idx : 0]
-    const timer = window.setTimeout(() => setTab(next.tab), cur.dwellMs)
-    return () => window.clearTimeout(timer)
-  }, [projectionMode, projectionPaused, activeTab, setTab])
-}
-```
 
----
+# Part 20 — Auditability & History
 
-# חלק י"ט — React Components (קוד מלא)
-
-## 19.1 `src/components/audit/AuditCategoryChip.tsx`
-
-```tsx
-// src/components/audit/AuditCategoryChip.tsx
-import { cn } from '@/lib/utils'
-import { getCategoryMeta } from '@/lib/audit/categories'
-import type { AuditCategory } from '@/types/audit'
-
-interface Props {
-  category: AuditCategory
-  size?: 'sm' | 'md' | 'lg'
-  showIcon?: boolean
-  className?: string
-}
-
-export function AuditCategoryChip({ category, size = 'md', showIcon = true, className }: Props) {
-  const m = getCategoryMeta(category)
-  const Icon = m.icon
-  const sizeClasses = {
-    sm: 'text-xs px-2 py-0.5 gap-1',
-    md: 'text-sm px-2.5 py-1 gap-1.5',
-    lg: 'text-base px-3 py-1.5 gap-2',
-  }[size]
-  const iconSize = { sm: 12, md: 14, lg: 16 }[size]
-
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center rounded-full font-medium border',
-        m.bgColor, m.textColor, m.borderColor,
-        sizeClasses,
-        className,
-      )}
-    >
-      {showIcon && <Icon size={iconSize} />}
-      <span>{m.label}</span>
-    </span>
-  )
-}
-```
+## 20.1 What the audit trail must answer
 
-## 19.2 `src/components/audit/AuditDistanceBadge.tsx`
-
-```tsx
-// src/components/audit/AuditDistanceBadge.tsx
-import { cn } from '@/lib/utils'
-import { getBucketMeta, formatDistance } from '@/lib/audit/distanceBuckets'
-import type { DistanceBucket } from '@/types/audit'
-
-interface Props {
-  bucket: DistanceBucket | null
-  distanceM: number | null
-  className?: string
-  size?: 'sm' | 'md'
-}
-
-export function AuditDistanceBadge({ bucket, distanceM, className, size = 'md' }: Props) {
-  if (!bucket) return <span className="text-xs text-muted-foreground">—</span>
-  const m = getBucketMeta(bucket)
-  return (
-    <span className={cn(
-      'inline-flex items-center gap-1 rounded-full border-2',
-      m.twBorder, m.twText,
-      size === 'sm' ? 'text-[10px] px-1.5 py-0' : 'text-xs px-2 py-0.5',
-      className,
-    )}>
-      <span className={cn('w-1.5 h-1.5 rounded-full', m.twBg)} />
-      <span dir="ltr">{formatDistance(distanceM)}</span>
-    </span>
-  )
-}
-```
+A reviewer six months later, reading only the database, must be able to answer:
 
-## 19.3 `src/components/audit/AuditKpiRow.tsx`
-
-```tsx
-// src/components/audit/AuditKpiRow.tsx
-import CountUp from 'react-countup'
-import { useAuditStats } from '@/hooks/useAuditStats'
-import { CATEGORY_META } from '@/lib/audit/categories'
-import { AlertTriangle } from 'lucide-react'
-import { cn } from '@/lib/utils'
-
-export function AuditKpiRow() {
-  const { byCategory, alertsOpen, total, progressPct } = useAuditStats()
-
-  const items = [
-    { key: 'IN_YESHIVA' as const, count: byCategory.IN_YESHIVA },
-    { key: 'OUT_PERMIT' as const, count: byCategory.OUT_PERMIT },
-    { key: 'OUT_NO_PERMIT' as const, count: byCategory.OUT_NO_PERMIT },
-    { key: 'UNKNOWN' as const, count: byCategory.UNKNOWN },
-    { key: 'PENDING' as const, count: byCategory.PENDING },
-  ]
-
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-      {items.map((it) => {
-        const m = CATEGORY_META[it.key]
-        return (
-          <div
-            key={it.key}
-            className={cn(
-              'rounded-2xl border-2 p-4 shadow-sm transition-all',
-              m.bgColor, m.borderColor,
-            )}
-            data-testid={`kpi-${it.key.toLowerCase()}`}
-          >
-            <div className={cn('text-3xl font-bold tabular-nums', m.textColor)}>
-              <CountUp end={it.count} duration={0.6} preserveValue />
-            </div>
-            <div className={cn('text-xs mt-1', m.textColor)}>{m.label}</div>
-          </div>
-        )
-      })}
-
-      <div
-        className={cn(
-          'rounded-2xl border-2 p-4 shadow-sm',
-          alertsOpen > 0
-            ? 'bg-red-50 dark:bg-red-950 border-red-500 animate-pulse'
-            : 'bg-gray-50 dark:bg-gray-900 border-gray-300',
-        )}
-        data-testid="kpi-alerts"
-      >
-        <div className="flex items-center gap-2">
-          <AlertTriangle size={20} className={alertsOpen > 0 ? 'text-red-600' : 'text-gray-400'} />
-          <div className={cn('text-3xl font-bold tabular-nums', alertsOpen > 0 ? 'text-red-700' : 'text-gray-500')}>
-            <CountUp end={alertsOpen} duration={0.4} preserveValue />
-          </div>
-        </div>
-        <div className={cn('text-xs mt-1', alertsOpen > 0 ? 'text-red-700' : 'text-gray-500')}>
-          אזעקות פתוחות
-        </div>
-      </div>
-    </div>
-  )
-}
-```
+- *When* was each audit run? *Who* opened it? *Who* closed it?
+- *Which classes* were included?
+- *Who* marked each student? *What* did they mark them as? *When*?
+- *What previous values* did each response have before the current one?
+- *Why* did a response transition (free-form `note` field, optional but encouraged)?
+- *Which alerts* fired? *Who* acknowledged them? *When*? *Why* (acknowledgement note)?
+- *Which push notifications* succeeded/failed?
 
-## 19.4 `src/components/audit/AuditClassCard.tsx`
-
-```tsx
-// src/components/audit/AuditClassCard.tsx
-import { useMemo } from 'react'
-import { motion } from 'framer-motion'
-import { useAuditStore } from '@/store/auditStore'
-import { CATEGORY_META } from '@/lib/audit/categories'
-import { cn } from '@/lib/utils'
-import { ChevronLeft } from 'lucide-react'
-
-interface Props {
-  classId: string
-  onClick?: () => void
-}
-
-export function AuditClassCard({ classId, onClick }: Props) {
-  const responses = useAuditStore(s => s.responses)
-
-  const stats = useMemo(() => {
-    const all = [...responses.values()].filter(r => r.classId === classId)
-    const total = all.length
-    const marked = all.filter(r => r.category !== 'PENDING').length
-    const inYeshiva = all.filter(r => r.category === 'IN_YESHIVA').length
-    const outPermit = all.filter(r => r.category === 'OUT_PERMIT').length
-    const outNoPermit = all.filter(r => r.category === 'OUT_NO_PERMIT').length
-    const unknown = all.filter(r => r.category === 'UNKNOWN').length
-    const pending = all.filter(r => r.category === 'PENDING').length
-    const pct = total === 0 ? 0 : Math.round((marked / total) * 100)
-    return { total, marked, inYeshiva, outPermit, outNoPermit, unknown, pending, pct }
-  }, [responses, classId])
-
-  const hasAlert = stats.outNoPermit > 0
-  const isDone = stats.pct === 100
-  const isUntouched = stats.marked === 0
-
-  return (
-    <motion.button
-      layout
-      onClick={onClick}
-      whileHover={{ scale: 1.02 }}
-      whileTap={{ scale: 0.98 }}
-      className={cn(
-        'rounded-2xl border-2 p-4 text-start w-full shadow-sm transition-colors',
-        isDone && !hasAlert && 'bg-emerald-50 dark:bg-emerald-950 border-emerald-300',
-        hasAlert && 'bg-red-50 dark:bg-red-950 border-red-500 animate-[flash_1s_ease-in-out_3]',
-        !isDone && !hasAlert && !isUntouched && 'bg-amber-50 dark:bg-amber-950 border-amber-300',
-        isUntouched && 'bg-gray-50 dark:bg-gray-900 border-gray-300',
-      )}
-    >
-      <div className="flex justify-between items-start mb-2">
-        <div className="font-semibold text-lg">{classId}</div>
-        <ChevronLeft size={20} className="text-muted-foreground" />
-      </div>
-
-      <div className="text-xs text-muted-foreground mb-2 tabular-nums">
-        {stats.marked} / {stats.total} ({stats.pct}%)
-      </div>
-
-      <div className="w-full h-2 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden mb-3">
-        <motion.div
-          initial={{ width: 0 }}
-          animate={{ width: `${stats.pct}%` }}
-          transition={{ duration: 0.6, ease: 'easeOut' }}
-          className={cn(
-            'h-full',
-            hasAlert ? 'bg-red-500' : isDone ? 'bg-emerald-500' : 'bg-blue-500',
-          )}
-        />
-      </div>
-
-      <div className="flex items-center gap-2 text-xs flex-wrap">
-        <Pill bg="bg-emerald-100" text="text-emerald-800" count={stats.inYeshiva} label="נוכח" />
-        <Pill bg="bg-blue-100"    text="text-blue-800"    count={stats.outPermit}  label="עם א'" />
-        <Pill bg="bg-red-100"     text="text-red-800"     count={stats.outNoPermit} label="ללא א'" />
-        <Pill bg="bg-amber-100"   text="text-amber-800"   count={stats.unknown}    label="לא ידוע" />
-        {stats.pending > 0 && (
-          <Pill bg="bg-gray-100" text="text-gray-700" count={stats.pending} label="ממתין" />
-        )}
-      </div>
-    </motion.button>
-  )
-}
-
-function Pill({ bg, text, count, label }: { bg: string; text: string; count: number; label: string }) {
-  if (count === 0) return null
-  return (
-    <span className={cn('rounded-full px-1.5 py-0.5', bg, text)}>
-      <span className="tabular-nums font-semibold">{count}</span> {label}
-    </span>
-  )
-}
-```
+All of these are answerable by direct queries against `audit_sessions`, `audit_responses`, `audit_response_log`, `audit_alerts`, `audit_push_log`.
 
-## 19.5 `src/components/audit/AuditClassGrid.tsx`
-
-```tsx
-// src/components/audit/AuditClassGrid.tsx
-import { useMemo, useState } from 'react'
-import { AnimatePresence } from 'framer-motion'
-import { AuditClassCard } from './AuditClassCard'
-import { AuditClassDrawer } from './AuditClassDrawer'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuditStats } from '@/hooks/useAuditStats'
-
-export function AuditClassGrid() {
-  const session = useAuditStore(s => s.session)
-  const stats = useAuditStats()
-  const [openClassId, setOpenClassId] = useState<string | null>(null)
-
-  // Sort by: alerts first, untouched second, in-progress third, done last
-  const sortedClassIds = useMemo(() => {
-    if (!session) return []
-    const ranks = session.classIds.map(cid => {
-      const s = stats.byClass[cid] ?? { total: 0, marked: 0, alerts: 0 }
-      const pct = s.total === 0 ? 0 : s.marked / s.total
-      const rank =
-        s.alerts > 0 ? 0
-        : s.marked === 0 ? 1
-        : pct < 1 ? 2
-        : 3
-      return { cid, rank, pct }
-    })
-    return ranks
-      .sort((a, b) => a.rank - b.rank || (b.pct - a.pct))
-      .map(r => r.cid)
-  }, [session, stats])
-
-  if (!session) return null
-
-  return (
-    <>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        <AnimatePresence>
-          {sortedClassIds.map(cid => (
-            <AuditClassCard
-              key={cid}
-              classId={cid}
-              onClick={() => setOpenClassId(cid)}
-            />
-          ))}
-        </AnimatePresence>
-      </div>
-      {openClassId && (
-        <AuditClassDrawer
-          classId={openClassId}
-          open
-          onClose={() => setOpenClassId(null)}
-        />
-      )}
-    </>
-  )
-}
-```
+## 20.2 What the audit trail intentionally does not record
 
-## 19.6 `src/components/audit/AuditMap.tsx`
-
-```tsx
-// src/components/audit/AuditMap.tsx
-// Leaflet-based live map of student locations.
-
-import 'leaflet/dist/leaflet.css'
-import { useEffect, useMemo, useRef } from 'react'
-import { MapContainer, TileLayer, Circle, Marker, Tooltip, useMap } from 'react-leaflet'
-import L from 'leaflet'
-import MarkerClusterGroup from 'react-leaflet-cluster'
-import { useAuditStore } from '@/store/auditStore'
-import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/audit/haversine'
-import { DISTANCE_BUCKETS_ORDERED, getBucketMeta } from '@/lib/audit/distanceBuckets'
-
-const COLORS_BY_BUCKET: Record<string, string> = {
-  GREEN: '#10b981',
-  BLUE: '#3b82f6',
-  ORANGE: '#f59e0b',
-  RED: '#ef4444',
-}
-
-function dotIcon(color: string, pulse = false) {
-  return L.divIcon({
-    className: 'audit-dot',
-    html: `<div style="
-      width: 14px; height: 14px;
-      border-radius: 50%;
-      background: ${color};
-      border: 2px solid white;
-      box-shadow: 0 0 0 2px ${color}55, 0 1px 4px rgba(0,0,0,0.3);
-      ${pulse ? 'animation: audit-marker-pulse 1.4s ease-in-out infinite;' : ''}
-    "></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
-  })
-}
-
-export function AuditMap() {
-  const responses = useAuditStore(s => s.responses)
-  const positioned = useMemo(
-    () => [...responses.values()].filter(r => r.gpsLat != null && r.gpsLng != null),
-    [responses],
-  )
-
-  return (
-    <div className="relative h-[600px] rounded-2xl overflow-hidden border-2">
-      <MapContainer center={[CAMPUS_LAT, CAMPUS_LNG]} zoom={14} className="h-full w-full">
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-
-        {/* Concentric range circles */}
-        {DISTANCE_BUCKETS_ORDERED.filter(b => b.maxMeters < Infinity).map(b => (
-          <Circle
-            key={b.bucket}
-            center={[CAMPUS_LAT, CAMPUS_LNG]}
-            radius={b.maxMeters}
-            pathOptions={{
-              color: b.color,
-              weight: 1,
-              opacity: 0.4,
-              fillOpacity: 0,
-              dashArray: '4 6',
-            }}
-          />
-        ))}
-
-        {/* Campus marker */}
-        <Marker
-          position={[CAMPUS_LAT, CAMPUS_LNG]}
-          icon={L.divIcon({
-            className: 'audit-campus',
-            html: '<div style="font-size:24px;">🏫</div>',
-            iconSize: [24, 24],
-            iconAnchor: [12, 12],
-          })}
-        />
-
-        {/* Student markers (clustered) */}
-        <MarkerClusterGroup chunkedLoading>
-          {positioned.map(r => {
-            const color = r.distanceBucket ? COLORS_BY_BUCKET[r.distanceBucket] : '#9ca3af'
-            const pulse = r.distanceBucket === 'RED'
-            return (
-              <Marker
-                key={r.id}
-                position={[r.gpsLat!, r.gpsLng!]}
-                icon={dotIcon(color, pulse)}
-              >
-                <Tooltip direction="top" offset={[0, -10]} opacity={1}>
-                  <div className="text-sm">
-                    <div className="font-semibold">{r.studentId.slice(0, 8)}</div>
-                    <div className="text-xs">{r.classId}</div>
-                    <div className="text-xs" dir="ltr">
-                      {r.distanceFromCampusM
-                        ? `${Math.round(r.distanceFromCampusM)}m`
-                        : '—'}
-                    </div>
-                  </div>
-                </Tooltip>
-              </Marker>
-            )
-          })}
-        </MarkerClusterGroup>
-      </MapContainer>
-
-      {/* Legend overlay */}
-      <div className="absolute top-3 end-3 bg-white/95 dark:bg-gray-900/95 rounded-xl p-3 shadow-lg z-[1000] text-xs">
-        <div className="font-semibold mb-2">מקרא</div>
-        {DISTANCE_BUCKETS_ORDERED.map(b => (
-          <div key={b.bucket} className="flex items-center gap-2 my-1">
-            <span className="w-3 h-3 rounded-full" style={{ background: b.color }} />
-            <span>{b.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-```
+- **The admin's location.** They are the operator; their phone's location is not part of the audit.
+- **Per-keystroke activity in the supervisor panel.** Only category transitions are logged. The supervisor's typing of a note is captured in the final value, not in keystroke trail.
+- **Page views, button clicks, scroll positions.** This is application-telemetry territory and lives in the existing application's logging, not in the audit subsystem.
 
-## 19.7 `src/components/audit/AuditHeatmap.tsx`
-
-```tsx
-// src/components/audit/AuditHeatmap.tsx
-// Heatmap by class. Each cell = a class. Color = % marked.
-
-import { useAuditStore } from '@/store/auditStore'
-import { useAuditStats } from '@/hooks/useAuditStats'
-import { motion } from 'framer-motion'
-import { cn } from '@/lib/utils'
-
-// Group classIds by grade prefix using normalizeHebrew rules
-function groupClasses(classIds: string[]): Record<string, string[]> {
-  // Simple grouping by inferring "shiur" from classId is complex; fallback:
-  // we return a flat single group "כיתות". Real impl should query students store
-  // for the actual grade.
-  return { 'כיתות': classIds }
-}
-
-export function AuditHeatmap() {
-  const session = useAuditStore(s => s.session)
-  const stats = useAuditStats()
-  if (!session) return null
-
-  const groups = groupClasses(session.classIds)
-
-  return (
-    <div className="space-y-6">
-      {Object.entries(groups).map(([grade, ids]) => (
-        <div key={grade}>
-          <h3 className="text-lg font-semibold mb-3">{grade}</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-            {ids.map(cid => {
-              const s = stats.byClass[cid] ?? { total: 0, marked: 0, alerts: 0 }
-              const pct = s.total === 0 ? 0 : s.marked / s.total
-              const hsl = pctToHsl(pct, s.alerts > 0)
-              return (
-                <motion.div
-                  key={cid}
-                  layout
-                  className={cn(
-                    'rounded-xl p-3 border-2 text-center transition-colors',
-                    s.alerts > 0 && 'animate-pulse border-red-500',
-                  )}
-                  style={{ backgroundColor: hsl }}
-                >
-                  <div className="text-2xl mb-1">
-                    {s.alerts > 0 ? '🔴' : pct >= 0.99 ? '✓' : pct >= 0.8 ? '🟢' : pct >= 0.5 ? '🟠' : '⚪'}
-                  </div>
-                  <div className="text-3xl font-bold tabular-nums">
-                    {Math.round(pct * 100)}%
-                  </div>
-                  <div className="text-xs mt-1 line-clamp-1">{cid}</div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5">
-                    {s.marked}/{s.total}
-                  </div>
-                </motion.div>
-              )
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function pctToHsl(pct: number, hasAlert: boolean): string {
-  if (hasAlert) return 'hsl(0, 80%, 90%)'
-  if (pct >= 0.99) return 'hsl(142, 76%, 88%)'
-  if (pct >= 0.8) return 'hsl(142, 50%, 92%)'
-  if (pct >= 0.5) return 'hsl(45, 80%, 90%)'
-  return 'hsl(210, 10%, 95%)'
-}
-```
+## 20.3 Export formats
 
-## 19.8 `src/components/audit/AuditActivityFeed.tsx`
-
-```tsx
-// src/components/audit/AuditActivityFeed.tsx
-// Streaming feed of recent audit actions.
-
-import { useMemo } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
-import { useAuditStore } from '@/store/auditStore'
-import { CATEGORY_META } from '@/lib/audit/categories'
-import { formatDistance } from '@/lib/audit/distanceBuckets'
-import { Clock } from 'lucide-react'
-
-const MAX_ITEMS = 30
-
-export function AuditActivityFeed() {
-  const responses = useAuditStore(s => s.responses)
-
-  const items = useMemo(() => {
-    return [...responses.values()]
-      .filter(r => r.markedAt)
-      .sort((a, b) => (a.markedAt! < b.markedAt! ? 1 : -1))
-      .slice(0, MAX_ITEMS)
-  }, [responses])
-
-  return (
-    <div className="rounded-2xl border-2 p-4 bg-white dark:bg-gray-900 h-[400px] overflow-hidden flex flex-col">
-      <div className="flex items-center gap-2 mb-3">
-        <Clock size={18} />
-        <h3 className="font-semibold">פיד פעילות חי</h3>
-      </div>
-      <div className="overflow-y-auto flex-1 space-y-1.5">
-        <AnimatePresence initial={false}>
-          {items.map(r => {
-            const m = CATEGORY_META[r.category]
-            const Icon = m.icon
-            return (
-              <motion.div
-                key={r.id + (r.markedAt ?? '')}
-                initial={{ opacity: 0, y: -10, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className={`flex items-center gap-3 p-2 rounded-lg ${m.bgColor}`}
-              >
-                <Icon size={16} className={m.textColor} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-xs tabular-nums text-muted-foreground" dir="ltr">
-                      {r.markedAt ? new Date(r.markedAt).toLocaleTimeString('he-IL') : ''}
-                    </span>
-                    <span className="text-sm font-medium truncate">{r.classId}</span>
-                  </div>
-                  <div className={`text-xs ${m.textColor}`}>
-                    {r.markedBy === 'AUTO_GPS'
-                      ? `GPS: ${m.label}${r.distanceFromCampusM ? ` (${formatDistance(r.distanceFromCampusM)})` : ''}`
-                      : r.markedBy === 'AUTO_DEPARTURE'
-                        ? 'אוטומטית: יציאה מאושרת'
-                        : `${r.markedBy ?? '?'} → ${m.label}`}
-                  </div>
-                </div>
-              </motion.div>
-            )
-          })}
-        </AnimatePresence>
-        {items.length === 0 && (
-          <div className="text-center text-sm text-muted-foreground py-8">
-            עוד אין פעילות. ממתין לתגובות...
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-```
+For regulatory or internal-review purposes, audit data can be exported in:
 
-## 19.9 `src/components/audit/AuditAlertList.tsx`
-
-```tsx
-// src/components/audit/AuditAlertList.tsx
-import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, Check, MapPin } from 'lucide-react'
-import { useAuditStore } from '@/store/auditStore'
-import { formatDistance } from '@/lib/audit/distanceBuckets'
-import { Button } from '@/components/ui/button'
-
-export function AuditAlertList() {
-  const alerts = useAuditStore(s => s.alerts)
-  const acknowledge = useAuditStore(s => s.acknowledgeAlert)
-  const openAlerts = alerts.filter(a => !a.acknowledgedAt)
-
-  if (openAlerts.length === 0) {
-    return (
-      <div className="text-sm text-muted-foreground p-4 text-center">
-        ✓ אין אזעקות פתוחות
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-2">
-      <AnimatePresence>
-        {openAlerts.map(a => (
-          <motion.div
-            key={a.id}
-            initial={{ opacity: 0, scale: 0.95, x: -20 }}
-            animate={{ opacity: 1, scale: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            className={`rounded-xl border-2 p-3 flex items-center gap-3 ${
-              a.severity === 'CRITICAL'
-                ? 'bg-red-50 dark:bg-red-950 border-red-500'
-                : 'bg-amber-50 dark:bg-amber-950 border-amber-500'
-            }`}
-          >
-            <AlertTriangle size={24} className={a.severity === 'CRITICAL' ? 'text-red-600' : 'text-amber-600'} />
-            <div className="flex-1 min-w-0">
-              <div className="font-semibold text-sm">תלמיד מחוץ לטווח</div>
-              <div className="text-xs text-muted-foreground flex items-center gap-3">
-                <span dir="ltr"><MapPin size={12} className="inline" /> {formatDistance(a.distanceM)}</span>
-                <span>{new Date(a.triggeredAt).toLocaleTimeString('he-IL')}</span>
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => acknowledge(a.id, 'ADMIN')}
-            >
-              <Check size={14} />
-              סמן כנצפה
-            </Button>
-          </motion.div>
-        ))}
-      </AnimatePresence>
-    </div>
-  )
-}
-```
+- **PDF.** Per-session summary suitable for printing. Hebrew RTL handled correctly using `jspdf` with a Hebrew font subset.
+- **Excel (`.xlsx`).** Per-session detail; useful for analysis. Multiple sheets: summary, by-class, full responses, alerts. RTL-correct in modern Excel.
+- **CSV.** A flat file of `(session_id, student_id, class_id, category, marked_by, marked_at, distance_bucket, distance_m)`. Used for ad-hoc analysis.
 
-## 19.10 `src/components/audit/AuditModeSelector.tsx`
-
-```tsx
-// src/components/audit/AuditModeSelector.tsx
-import { Zap, MapPin } from 'lucide-react'
-import { cn } from '@/lib/utils'
-import type { AuditMode } from '@/types/audit'
-
-interface Props {
-  value: AuditMode | null
-  onChange: (mode: AuditMode) => void
-}
-
-const OPTIONS: { mode: AuditMode; title: string; subtitle: string; Icon: any; bg: string; border: string }[] = [
-  {
-    mode: 'MANUAL',
-    title: 'ביקורת מהירה',
-    subtitle: 'הרכזים מסמנים ידנית את כיתתם — ~3 דקות',
-    Icon: Zap,
-    bg: 'bg-amber-50 dark:bg-amber-950',
-    border: 'border-amber-500',
-  },
-  {
-    mode: 'LOCATION',
-    title: 'ביקורת מיקום',
-    subtitle: 'הסלולרים שולחים GPS אוטומטית — ~5 דקות',
-    Icon: MapPin,
-    bg: 'bg-blue-50 dark:bg-blue-950',
-    border: 'border-blue-500',
-  },
-]
-
-export function AuditModeSelector({ value, onChange }: Props) {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      {OPTIONS.map(o => (
-        <button
-          key={o.mode}
-          onClick={() => onChange(o.mode)}
-          className={cn(
-            'rounded-3xl border-2 p-6 text-start transition-all',
-            value === o.mode ? `${o.bg} ${o.border} ring-4 ring-offset-2 ring-blue-300` : 'border-gray-200 hover:border-gray-400',
-          )}
-        >
-          <o.Icon size={36} className="mb-3" />
-          <div className="text-xl font-bold mb-1">{o.title}</div>
-          <div className="text-sm text-muted-foreground">{o.subtitle}</div>
-        </button>
-      ))}
-    </div>
-  )
-}
-```
+All exports include a header line with: session ID, mode, start time, end time, exporter identity.
 
-## 19.11 `src/components/audit/StudentAuditSheet.tsx`
-
-```tsx
-// src/components/audit/StudentAuditSheet.tsx
-// Bottom sheet shown to a student when an active LOCATION audit
-// is in progress AND their response is still PENDING.
-
-import { useAuditLocationCollector } from '@/hooks/useAuditLocationCollector'
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet'
-import { Button } from '@/components/ui/button'
-import { MapPin, Check, X, Loader2 } from 'lucide-react'
-
-export function StudentAuditSheet() {
-  const { phase, shouldAct, confirm, refuse, error } = useAuditLocationCollector()
-
-  return (
-    <Sheet open={shouldAct && phase !== 'done' && phase !== 'denied'}>
-      <SheetContent side="bottom" className="rounded-t-3xl">
-        <SheetHeader>
-          <SheetTitle className="flex items-center gap-2">
-            <MapPin className="text-blue-600" />
-            בקרת מיקום מהירה
-          </SheetTitle>
-          <SheetDescription>
-            ההנהלה מבקשת לוודא שאתה בישיבה. האפליקציה תשלח את מיקומך הנוכחי
-            ולא תאחסן אותו לאחר תום הביקורת.
-          </SheetDescription>
-        </SheetHeader>
-
-        <div className="space-y-3 mt-6">
-          {phase === 'awaiting_consent' && (
-            <>
-              <Button onClick={confirm} className="w-full h-14 bg-emerald-600 hover:bg-emerald-700 text-lg">
-                <Check className="me-2" /> אשר ושלח מיקום
-              </Button>
-              <Button onClick={refuse} variant="outline" className="w-full h-12">
-                <X className="me-2" /> אני לא יכול / לא בישיבה
-              </Button>
-            </>
-          )}
-
-          {(phase === 'collecting' || phase === 'submitting') && (
-            <div className="flex flex-col items-center gap-3 py-6">
-              <Loader2 className="animate-spin text-blue-600" size={36} />
-              <div className="text-sm text-muted-foreground">
-                {phase === 'collecting' ? 'מתבצע איסוף מיקום…' : 'שולח לשרת…'}
-              </div>
-            </div>
-          )}
-
-          {phase === 'error' && (
-            <div className="rounded-xl bg-red-50 p-3 text-red-700 text-sm">
-              שגיאה: {error ?? 'נכשל'}
-              <Button onClick={confirm} variant="outline" className="mt-3 w-full">
-                נסה שוב
-              </Button>
-            </div>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
-  )
-}
-```
+GPS coordinates are not exported by default — the export shows buckets only. A separate, gated export option (admin-only confirmation) includes coordinates for sessions younger than 90 days.
 
 ---
-
-# חלק כ' — Edge Functions (קוד מלא)
-
-## 20.1 `supabase/functions/send-audit-push/index.ts`
-
-```ts
-// supabase/functions/send-audit-push/index.ts
-// Edge Function: send Web Push to all students/supervisors
-// for a given audit session.
-
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-// VAPID helpers (reused from existing send-push)
-import { sendWebPush } from './webPush.ts'
-
-interface Payload {
-  session_id: string
-  target: 'STUDENTS' | 'SUPERVISORS' | 'BOTH'
-  class_ids?: string[]
-}
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-}
-
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
-
-  try {
-    const body = (await req.json()) as Payload
-    if (!body.session_id || !body.target) {
-      return json({ error: 'invalid_payload' }, 400)
-    }
-
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-    )
-
-    // Look up session
-    const { data: session, error: sErr } = await supabase
-      .from('audit_sessions').select('*').eq('id', body.session_id).single()
-    if (sErr || !session) return json({ error: 'session_not_found' }, 404)
-
-    if (session.status !== 'ACTIVE') {
-      return json({ error: 'session_not_active' }, 400)
-    }
-
-    // Resolve targets to push_tokens
-    let tokens: { studentId: string; pushToken: string }[] = []
-    if (body.target === 'STUDENTS' || body.target === 'BOTH') {
-      const { data: students } = await supabase
-        .from('students').select('id, push_token')
-        .in('classId', body.class_ids ?? session.class_ids)
-        .not('push_token', 'is', null)
-      for (const s of students ?? []) {
-        tokens.push({ studentId: s.id, pushToken: s.push_token })
-      }
-    }
-
-    // (Future: supervisors come from app_settings; not in this snippet)
-
-    let sent = 0, failed = 0, removed = 0
-    for (const t of tokens) {
-      const payload = JSON.stringify({
-        kind: 'AUDIT_LOCATION',
-        sessionId: body.session_id,
-        deadlineTs: Date.now() + (session.settings?.timeoutSec ?? 120) * 1000,
-        mode: session.mode,
-        title: 'בקרת מיקום מהירה',
-        body: 'ההנהלה מבקשת לוודא שאתה בישיבה — אנא לחץ כאן.',
-      })
-      try {
-        const ok = await sendWebPush(t.pushToken, payload)
-        if (ok.statusCode >= 200 && ok.statusCode < 300) sent++
-        else if (ok.statusCode === 410 || ok.statusCode === 404) {
-          await supabase.from('students').update({ push_token: null }).eq('id', t.studentId)
-          removed++
-        } else failed++
-
-        await supabase.from('audit_push_log').insert({
-          session_id: body.session_id, target_kind: 'STUDENT',
-          target_id: t.studentId, success: ok.statusCode < 300,
-          error_message: ok.statusCode >= 300 ? `HTTP ${ok.statusCode}` : null,
-        })
-      } catch (e: any) {
-        failed++
-        await supabase.from('audit_push_log').insert({
-          session_id: body.session_id, target_kind: 'STUDENT',
-          target_id: t.studentId, success: false, error_message: e?.message ?? 'unknown',
-        })
-      }
-    }
-
-    return json({ sent, failed, removed, total: tokens.length })
-  } catch (e: any) {
-    return json({ error: e?.message ?? 'unknown' }, 500)
-  }
-})
-
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
-}
-```
 
----
+# Part 21 — Testing Strategy
 
-# חלק כ"א — Service Worker Update
-
-## 21.1 הוספה ל־`public/sw.js`
-
-```js
-// public/sw.js — additions for audit
-self.addEventListener('push', (event) => {
-  if (!event.data) return
-  let payload
-  try { payload = event.data.json() } catch { return }
-
-  if (payload.kind === 'AUDIT_LOCATION') {
-    const promise = self.registration.showNotification(
-      payload.title ?? 'בקרת מיקום',
-      {
-        body: payload.body ?? 'לחץ כדי לפתוח את האפליקציה',
-        icon: '/icons/audit-192.png',
-        badge: '/icons/audit-72.png',
-        tag: 'audit-' + payload.sessionId,
-        renotify: true,
-        requireInteraction: true,
-        vibrate: [200, 100, 200],
-        data: { sessionId: payload.sessionId, kind: 'AUDIT_LOCATION' },
-        actions: [
-          { action: 'open', title: 'פתח אפליקציה' },
-          { action: 'dismiss', title: 'דחה' },
-        ],
-      },
-    )
-    event.waitUntil(promise)
-    return
-  }
-  // ... existing handlers
-})
-
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close()
-  if (event.notification.data?.kind === 'AUDIT_LOCATION') {
-    const url = `/student?audit=${event.notification.data.sessionId}`
-    event.waitUntil(
-      clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-        for (const c of list) {
-          if (c.url.includes('/student')) { c.focus(); c.postMessage({ kind: 'AUDIT_OPEN', sessionId: event.notification.data.sessionId }); return }
-        }
-        return clients.openWindow(url)
-      })
-    )
-  }
-})
-```
+## 21.1 Testing philosophy
 
----
+- **Test the database first.** SQL is the core of correctness. Trigger tests, RPC tests, constraint tests, retention tests.
+- **Test boundaries, not internals.** A component test mocks the store; a store test mocks the API; an API test mocks the database — only where necessary. Whole-stack tests are integration tests, not unit tests.
+- **Test what the user does, not what the developer wrote.** End-to-end tests follow the twelve use cases from §7.
+- **Test what is hard to get right.** Realtime, replay, concurrency, race conditions get more test attention than CRUD.
 
-# חלק כ"ב — CSS + Tailwind extensions
-
-## 22.1 `src/index.css` additions
-
-```css
-:root {
-  --audit-green:        #10b981;
-  --audit-green-bg:     #d1fae5;
-  --audit-blue:         #3b82f6;
-  --audit-blue-bg:      #dbeafe;
-  --audit-orange:       #f59e0b;
-  --audit-orange-bg:    #fef3c7;
-  --audit-red:          #ef4444;
-  --audit-red-bg:       #fee2e2;
-  --audit-gray:         #6b7280;
-  --audit-gray-bg:      #f3f4f6;
-
-  --audit-proj-bg:      #000;
-  --audit-proj-text:    #fff;
-  --audit-proj-accent:  #fbbf24;
-}
-
-@keyframes audit-marker-pulse {
-  0%   { transform: scale(1);   opacity: 1; }
-  70%  { transform: scale(2.5); opacity: 0; }
-  100% { transform: scale(1);   opacity: 0; }
-}
-
-@keyframes flash {
-  0%, 100% { background-color: var(--audit-red-bg); }
-  50%      { background-color: #fff; }
-}
-
-.audit-projection-mode {
-  background: var(--audit-proj-bg);
-  color: var(--audit-proj-text);
-  font-size: 1.5rem;
-}
-
-.audit-projection-mode .kpi-number { font-size: 5rem; font-weight: 900; }
-.audit-projection-mode h1 { font-size: 4rem; }
-```
+## 21.2 Test layers
 
-## 22.2 `tailwind.config.ts` additions
-
-```ts
-// tailwind.config.ts
-export default {
-  // ...existing
-  theme: {
-    extend: {
-      colors: {
-        'audit-green':   'var(--audit-green)',
-        'audit-blue':    'var(--audit-blue)',
-        'audit-orange':  'var(--audit-orange)',
-        'audit-red':     'var(--audit-red)',
-        'audit-gray':    'var(--audit-gray)',
-      },
-      animation: {
-        'audit-pulse': 'audit-marker-pulse 1.4s ease-in-out infinite',
-        'audit-flash': 'flash 1s ease-in-out 3',
-      },
-    },
-  },
-}
-```
+**Layer 1 — SQL unit tests.** Use `pg_tap` (or hand-rolled SQL assertions). Coverage:
 
----
+- Constraints fire correctly (no two active sessions; categories must be in the enumeration; distances are non-negative).
+- Triggers fire correctly (`audit_response_log` entry on every category change; `audit_alerts` row on every transition into ORANGE/RED).
+- RPCs return expected shapes for happy paths.
+- RPCs return expected error codes for failure paths.
+- Retention cron correctly nulls GPS but preserves bucket.
 
-# חלק כ"ג — API Client (קוד מלא של supabaseClient extension)
-
-## 23.1 `src/lib/api/supabaseClient.ts` — additions
-
-```ts
-// extension to existing supabaseClient.ts
-
-import type {
-  AuditSession, AuditResponse, AuditAlert, AuditKpis,
-  OpenAuditPayload, SubmitAuditResponsePayload, CloseAuditPayload,
-  AuditMode,
-} from '@/types/audit'
-import { supabase } from './supabase'
-
-// snake_case → camelCase (one helper per shape to be explicit)
-function toSession(row: any): AuditSession {
-  return {
-    id: row.id, mode: row.mode, status: row.status,
-    classIds: row.class_ids, totalStudents: row.total_students,
-    startedBy: row.started_by, startedAt: row.started_at,
-    closedAt: row.closed_at, closedBy: row.closed_by,
-    notes: row.notes, settings: row.settings ?? {},
-    createdAt: row.created_at, updatedAt: row.updated_at,
-  }
-}
-
-function toResponse(row: any): AuditResponse {
-  return {
-    id: row.id, sessionId: row.session_id, studentId: row.student_id,
-    classId: row.class_id, category: row.category,
-    markedBy: row.marked_by, markedAt: row.marked_at,
-    gpsLat: row.gps_lat, gpsLng: row.gps_lng,
-    gpsAccuracyM: row.gps_accuracy_m,
-    distanceFromCampusM: row.distance_from_campus_m,
-    distanceBucket: row.distance_bucket, gpsStatus: row.gps_status,
-    departureId: row.departure_id, note: row.note,
-    createdAt: row.created_at, updatedAt: row.updated_at,
-  }
-}
-
-function toAlert(row: any): AuditAlert {
-  return {
-    id: row.id, sessionId: row.session_id, studentId: row.student_id,
-    triggeredAt: row.triggered_at, distanceM: row.distance_m,
-    gpsLat: row.gps_lat, gpsLng: row.gps_lng,
-    severity: row.severity,
-    acknowledgedBy: row.acknowledged_by, acknowledgedAt: row.acknowledged_at,
-    note: row.note,
-  }
-}
-
-export const auditApi = {
-  async openAudit(p: OpenAuditPayload) {
-    const { data, error } = await supabase.rpc('open_audit', {
-      p_mode: p.mode, p_class_ids: p.classIds,
-      p_started_by: p.startedBy,
-      p_settings: p.settings ?? {}, p_notes: p.notes ?? null,
-    })
-    if (error) throw error
-    return data as { session_id: string; total_students: number; mode: AuditMode } | { error: string }
-  },
-
-  async submitAuditResponse(p: SubmitAuditResponsePayload) {
-    const { data, error } = await supabase.rpc('submit_audit_response', {
-      p_session_id: p.sessionId,
-      p_student_id: p.studentId,
-      p_category: p.category ?? null,
-      p_gps_lat: p.gpsLat ?? null,
-      p_gps_lng: p.gpsLng ?? null,
-      p_gps_accuracy_m: p.gpsAccuracyM ?? null,
-      p_gps_status: p.gpsStatus ?? null,
-      p_marked_by: p.markedBy ?? null,
-      p_note: p.note ?? null,
-    })
-    if (error) throw error
-    return data
-  },
-
-  async closeAudit(p: CloseAuditPayload) {
-    const { data, error } = await supabase.rpc('close_audit', {
-      p_session_id: p.sessionId, p_closed_by: p.closedBy, p_notes: p.notes ?? null,
-    })
-    if (error) throw error
-    return data
-  },
-
-  async abortAudit(id: string, actor: string, reason?: string) {
-    const { data, error } = await supabase.rpc('abort_audit', {
-      p_session_id: id, p_actor: actor, p_reason: reason ?? null,
-    })
-    if (error) throw error
-    return data
-  },
-
-  async getActiveAudit() {
-    const { data, error } = await supabase.rpc('get_active_audit')
-    if (error) throw error
-    if (!data?.session) return null
-    return {
-      session: toSession(data.session),
-      responses: (data.responses ?? []).map(toResponse),
-      alerts: (data.alerts ?? []).map(toAlert),
-      kpis: data.kpis as AuditKpis,
-    }
-  },
-
-  async getAuditFull(sessionId: string) {
-    const { data, error } = await supabase.rpc('get_audit_full', { p_session_id: sessionId })
-    if (error) throw error
-    return {
-      session: toSession(data.session),
-      responses: (data.responses ?? []).map(toResponse),
-      alerts: (data.alerts ?? []).map(toAlert),
-      kpis: data.kpis as AuditKpis,
-    }
-  },
-
-  async acknowledgeAuditAlert(alertId: string, actor: string, note?: string) {
-    const { data, error } = await supabase.rpc('acknowledge_audit_alert', {
-      p_alert_id: alertId, p_actor: actor, p_note: note ?? null,
-    })
-    if (error) throw error
-    return data
-  },
-
-  async listPastAudits(filters?: { mode?: AuditMode; since?: string; until?: string }) {
-    const { data, error } = await supabase.rpc('list_past_audits', {
-      p_mode: filters?.mode ?? null,
-      p_since: filters?.since ?? null,
-      p_until: filters?.until ?? null,
-      p_limit: 100,
-    })
-    if (error) throw error
-    return (data ?? []).map(toSession)
-  },
-}
-```
+**Layer 2 — TypeScript unit tests (Vitest).** Coverage:
 
----
+- `haversine`, `bucketFromMeters`, `formatDistance` — pure functions with property-based tests.
+- `gpsCollector` — wrapped against fake `navigator.geolocation`.
+- Stores — given an event sequence, the store reaches the expected state.
 
-# חלק כ"ד — מטריצת שגיאות מלאה
-
-| קוד | מקור | משמעות | UI behaviour | מעורבות מנהל |
-|-----|------|---------|---------------|----------------|
-| `AUDIT_ACTIVE` | `open_audit` | יש כבר סשן פעיל | מציע "המשך את הסשן הקיים" | אופציה לבטל ולפתוח חדש |
-| `INVALID_MODE` | `open_audit` | mode שגוי | toast שגיאה, חזרה לטופס | כן |
-| `NO_CLASSES_SELECTED` | `open_audit` | רשימת class_ids ריקה | UI חוסם submit | — |
-| `SESSION_NOT_FOUND` | כל RPC | session_id לא קיים | redirect ל־landing | — |
-| `SESSION_NOT_ACTIVE` | `submit_audit_response` / `close_audit` | סשן כבר נסגר | toast "הסשן נסגר", החדל ניסיון | — |
-| `RESPONSE_NOT_FOUND` | `submit_audit_response` | תלמיד לא בכיתות הנבחרות | toast "התלמיד לא בביקורת" | אזעקת שגיאה |
-| `ALERT_ALREADY_ACKNOWLEDGED_OR_MISSING` | `acknowledge_audit_alert` | אזעקה כבר נצפתה | toast info | — |
-| `LOW_ACCURACY` | client GPS | accuracy > 1000m | סימן ⚠ ליד התלמיד | רכז יחליט ידנית |
-| `DENIED` | client GPS | משתמש דחה | UNKNOWN, sheet סגור | רכז יחליט |
-| `TIMEOUT` | client GPS | חרגה מ־15s | UNKNOWN + הצעה לנסות שוב | רכז יחליט |
-| `UNAVAILABLE` | client GPS | אין מכשיר GPS | UNKNOWN | רכז יחליט |
-| `OFFLINE` | client GPS | navigator.onLine=false | נשמר ב־queue, ישלח כשיחזור | — |
-| `PUSH_INVALID_SUBSCRIPTION` | Edge Func | HTTP 410/404 | מוחק את ה־push_token | log בלבד |
-| `PUSH_RATE_LIMITED` | Edge Func | HTTP 429 | retry עם backoff | — |
-| `RPC_NETWORK_ERROR` | Supabase | fetch failed | retry x3 + toast | אם נכשל סופי |
-| `REALTIME_DISCONNECTED` | Supabase | ws closed | UI מציג banner "לא מחובר", polling fallback | — |
+**Layer 3 — Component tests (Vitest + React Testing Library).** Coverage:
 
----
+- Each major component renders correctly given mocked store state.
+- Loading, empty, error states render correctly.
+- Interactive behaviors (clicking, typing) call the right store methods.
 
-# חלק כ"ה — תרחישי בדיקה (Test Cases) מפורטים
-
-## 25.1 Manual mode happy path
-**שלב | פעולה | תוצאה צפויה**
-1. Admin login → `/admin/audit` | רשימת ביקורות מוצגת
-2. Click "ביקורת חדשה" | navigation ל-`/admin/audit/new`
-3. בחר MANUAL, סמן כל הכיתות | submit מופעל
-4. Click "פתח ביקורת" | RPC `open_audit` נקרא; session.id מוחזר
-5. Navigation ל-`/admin/audit/:id/live` | KPIs מציגים PENDING=381
-6. Supervisor1 פותח את האפליקציה | רואה רשימת תלמידיו
-7. Supervisor1 לוחץ "נוכח" על תלמיד #1 | RPC `submit_audit_response`. רכז רואה toast. מנהל רואה count IN_YESHIVA++
-8. אחרי סימון כל ה־381 | progress=100%, מנהל לוחץ "סיים"
-9. RPC `close_audit` | session.status='CLOSED'. SummaryModal צץ
-
-## 25.2 Location mode happy path
-1. Admin בוחר LOCATION, settings={timeoutSec:120, sensitivity:'MEDIUM'} | submit
-2. Edge func `send-audit-push` נקרא | push נשלח ל־381 push_tokens
-3. תלמיד 1 פותח את האפליקציה ע"י push tap | SW פוסט message → React מציג Sheet
-4. תלמיד 1 לוחץ "אשר" | gpsCollector קולט (50m, accuracy=12m)
-5. Submit ל־RPC | category='IN_YESHIVA', bucket='GREEN'
-6. Manager UI: KPI IN_YESHIVA++, מפה מציגה נקודה ירוקה | אנימציית pulse
-7. תלמיד 5 ב־5.2km | category='OUT_NO_PERMIT', bucket='RED', trigger insert ל־audit_alerts | מנהל רואה Modal אזעקה + sound
-8. Admin acks alert | UI מסיר את הקובייה
-
-## 25.3 Refresh persistence
-1. Admin פותח ביקורת. רואה 5/381 marked
-2. Admin מרענן את הדף (F5) | Page reload
-3. `useActiveAudit` mount → `get_active_audit` | מחזיר sessionId + 5 responses
-4. UI מציג בדיוק את אותו state | KPIs נכונים, Grid נכון, Feed מתאחה
-
-## 25.4 Refresh by supervisor mid-audit
-1. Supervisor1 סימן 12 תלמידים. רענן.
-2. `get_active_audit` מחזיר session
-3. UI מסנן רק לכיתת הרכז. 12 הסימונים נשמרו.
-
-## 25.5 Concurrent admin attempts
-1. Admin A פותח ביקורת
-2. Admin B מנסה לפתוח ביקורת חדשה
-3. RPC `open_audit` מחזיר `{error:'AUDIT_ACTIVE', existing_session_id: X}`
-4. Admin B מקבל choice: "המשך את X" או "ביטל את X ופתח חדש"
-
-## 25.6 GPS denied
-1. תלמיד דוחה הרשאה ב־browser
-2. Hook מחזיר `{status:'DENIED'}`
-3. RPC submit עם `gps_status='DENIED'`
-4. category='UNKNOWN'
-5. Supervisor רואה אותו ברשימת UNKNOWN, יכול לסמן ידנית
+**Layer 4 — Integration tests (Playwright with real Supabase staging).** Coverage:
 
----
+- UC-1 through UC-12 from §7, each as a Playwright scenario.
+- Two-admin concurrent scenario (UC-4).
+- Refresh-mid-session (UC-3).
+- Realtime disconnect simulation.
 
-# חלק כ"ו — Deployment Runbook
-
-## 26.1 לפני deploy
-- [ ] backup snapshot של Supabase DB
-- [ ] git tag (`v2-pre-audit-deploy`)
-- [ ] ודא ש־VAPID keys זהים בין secrets לל־.env
-
-## 26.2 רצף ההפעלה
-1. **בדיקה ב־staging:**
-   - hardcode SUPABASE_URL=staging
-   - run e2e suite
-2. **deploy migration ל־staging:**
-   - `supabase migration apply 20260516000000_internal_audit_v2`
-   - בדוק `\d audit_sessions` ב־psql
-3. **deploy edge funcs ל־staging:**
-   - `supabase functions deploy send-audit-push`
-4. **deploy frontend ל־staging:**
-   - `vercel --prod=false`
-5. **smoke test staging** (ראה test cases 25.1-25.3)
-6. **חזור על 2-4 בproduction**
-7. **monitor 30 דק** — Vercel logs + Supabase logs
-
-## 26.3 Rollback
-אם משהו נשבר:
-- **frontend:** Vercel rollback (לחיצה אחת)
-- **edge funcs:** redeploy גרסה קודמת מ־git
-- **DB migration:** **לא ניתן roll back פשוט** — צריך מיגרציה ידנית הופכית. אזהרה: אסור לאבד audit_sessions data.
+**Layer 5 — Manual QA pre-launch.** Coverage:
 
----
+- A QA tester acting as admin, supervisor, and student, on a real device, runs through each use case manually.
+- A separate tester attempts to break the system: spam-clicking, race conditions, network throttling.
+- A privacy reviewer reads the consent screens and verifies they match this document.
 
-# חלק כ"ז — Monitoring & Observability
+## 21.3 Performance testing
 
-## 27.1 מטריקות חיוניות
+Before launch:
 
-| מטריקה | מקור | סף התראה |
-|---------|------|------------|
-| כמות ביקורות פעילות | DB query | > 1 → bug |
-| ממוצע משך ביקורת | DB | > 30 דק → tweak UX |
-| אחוז responses קיבלו GPS | DB | < 70% → permission issue |
-| RPC latency (open_audit) | Supabase logs | p95 > 500ms |
-| Realtime disconnects | Vercel logs | > 5/min |
-| Push success rate | audit_push_log | < 80% → VAPID/token issue |
-| Alerts created | DB | spike = real event or bug |
+- Synthetic load test: simulate 381 concurrent `submit_audit_response` calls within 30 seconds against staging.
+- Verify p95 latency stays under §17.2 thresholds.
+- Verify realtime delivery to a single client stays under 1 second p95 during the burst.
+- Verify the database stays responsive to `get_active_audit` while the burst is in flight.
 
-## 27.2 Dashboards
-- Supabase Dashboard → SQL Editor → saved queries
-- Vercel Analytics → custom events: `audit.open`, `audit.submit`, `audit.close`
+## 21.4 Regression tests after launch
 
----
+After every change to audit code:
 
-# חלק כ"ח — User Training Scripts (עברית)
+- Full Playwright suite must pass.
+- SQL unit tests must pass.
+- Bundle size budget must be respected.
+- No new console errors in dev mode.
 
-## 28.1 מנהל — סקריפט הדרכה (5 דקות)
+## 21.5 What is *not* tested
 
-```
-שלום. נראה לך איך לפתוח ביקורת בשני מצבים.
-
-1. כניסה למסך ביקורת
-   - כנס לפאנל מנהל → "ביקורת"
-   - תראה ביקורות עבר
-
-2. פתיחת ביקורת מהירה (Manual)
-   - לחץ "פתח ביקורת חדשה"
-   - בחר "ביקורת מהירה"
-   - סמן את הכיתות שאתה רוצה לבדוק
-   - לחץ "פתח ביקורת"
-   - הרכזים יקבלו push ויתחילו לסמן
-   - אתה תראה את ההתקדמות בזמן אמת
-
-3. פתיחת ביקורת מיקום
-   - כמו לעיל אבל בחר "ביקורת מיקום"
-   - הגדר sensitivity (MEDIUM מומלץ)
-   - הסלולרים של התלמידים יקבלו push
-   - הם יאשרו ויישלחו GPS אוטומטית
-   - תראה אזעקות (אדום מהבהב) אם מישהו רחוק
-
-4. סיום
-   - לחץ "סיים ביקורת"
-   - תראה סיכום מיידי
-   - תוכל לפתוח דוח מלא
-
-5. הקרנה
-   - לחץ על אייקון "📺" למצב מסך מלא
-   - אופציה לרוטציה אוטומטית בין תצוגות
-```
+- The browsers' GPS APIs themselves. Trusted.
+- Supabase's realtime delivery guarantees. Trusted with polling fallback.
+- The user's network. Assumed working.
+- The push notification delivery infrastructure (Apple, Google). Trusted.
 
-## 28.2 רכז כיתה — סקריפט הדרכה (3 דקות)
+---
 
-```
-1. כשמנהל פותח ביקורת, אתה תקבל push (אם הסלולרי לא פתוח) או
-   תראה התראה אדומה בפינה (אם פתוח).
+# Part 22 — QA Checklist (per role)
 
-2. לחץ על ההתראה — תיכנס למסך ביקורת.
+## 22.1 Admin QA checklist
 
-3. תראה את כל תלמידי כיתתך. תלמידים שיש להם יציאה מאושרת כבר
-   מסומנים אוטומטית בכחול — לא צריך לעשות שום דבר.
+- [ ] Land on `/admin/audit`; landing page renders with prior sessions or empty state.
+- [ ] Tap "פתח ביקורת חדשה"; wizard step 1 (mode picker) appears.
+- [ ] Each mode card responds to tap; selection state visible.
+- [ ] "המשך" is disabled until a mode is picked.
+- [ ] Step 2 (class picker) shows all 16 classes, all pre-checked.
+- [ ] Uncheck-all then check-all toggles work.
+- [ ] Per-grade check-all checkboxes work.
+- [ ] Live student count updates as classes are toggled.
+- [ ] Step 3 (location settings) appears only for LOCATION mode.
+- [ ] Step 4 (confirmation) summarizes accurately.
+- [ ] Tap "פתח" opens session and navigates to live page in under 3 seconds.
+- [ ] Live page renders with all 381 students in PENDING immediately.
+- [ ] KPI strip shows correct totals.
+- [ ] Grid view sorts classes by attention-need.
+- [ ] Switching tabs (grid/heatmap/map/feed) preserves session state.
+- [ ] On LOCATION mode, map tab shows campus circles and 0 markers initially.
+- [ ] As responses arrive, KPIs update via CountUp animation.
+- [ ] As responses arrive, class cards update progress bars.
+- [ ] As responses arrive, activity feed inserts new items at top with slide-in.
+- [ ] Map (LOCATION) shows markers appearing one by one.
+- [ ] Alert modal pops on first CRITICAL alert; sound plays (if sound enabled).
+- [ ] Alert can be acknowledged; modal closes; alert list updates.
+- [ ] Tap class card opens drawer with per-student details.
+- [ ] Override a student's category from the drawer; change reflects everywhere.
+- [ ] Tap "📺" enters projection mode; layout enlarges; tabs auto-rotate.
+- [ ] Press Esc or tap "X" exits projection mode.
+- [ ] Refresh the page mid-session; all state preserves.
+- [ ] Tap "סיים"; modal asks for notes; preview shows current breakdown.
+- [ ] Tap "אישור"; navigates to summary page in under 3 seconds.
+- [ ] Summary page shows accurate totals and per-class breakdown.
+- [ ] "ייצא PDF" produces a Hebrew RTL PDF in under 5 seconds.
+- [ ] "ייצא Excel" produces a multi-sheet .xlsx in under 3 seconds.
+- [ ] Navigate to history page; recent session appears at top.
+- [ ] Tap "Compare", select 2-3 sessions, tap compare; comparison page renders.
+- [ ] Comparison shows side-by-side counts and timeline chart.
 
-4. לכל תלמיד אחר, לחץ אחד מ-3 כפתורים:
-   ✅ נוכח | 🔵 בחוץ עם אישור | 🔴 בחוץ ללא אישור
+## 22.2 Supervisor QA checklist
 
-5. כשתסמן את כל התלמידים, יהיה כתוב "0 ממתינים".
-   אם יש "מקצה לקצה" — חזור ולחץ.
+- [ ] Receive push when an audit opens; notification shows clear text.
+- [ ] Tap notification; app opens deep-linked to supervisor panel.
+- [ ] Supervisor panel shows ONLY their assigned class.
+- [ ] All students of the class are listed.
+- [ ] Students with `OUT_PERMIT` from active departures show as already-marked, in blue, with a "אוטומטי" badge.
+- [ ] Other students show three-button row (נוכח / עם אישור / ללא אישור).
+- [ ] Tap "נוכח"; button shows optimistic state immediately; backend updates within 1 second.
+- [ ] Tap a different category on the same student; row updates without ambiguity.
+- [ ] Tap "הוסף הערה"; note field appears; typed text saves on tap-elsewhere.
+- [ ] Mark all 23 students in under 90 seconds.
+- [ ] Panel shows "✓ סימנת את כולם" when 100%.
+- [ ] Refresh the panel; all markings preserved.
+- [ ] Disconnect network mid-marking; mark continues with queued mutations.
+- [ ] Reconnect; queued mutations flush; no error toasts.
+- [ ] Supervisor cannot navigate to admin live dashboard (route is gated).
+- [ ] Supervisor can navigate to history of their own class only.
 
-6. במצב ביקורת מיקום, חלק מהתלמידים יסומנו אוטומטית.
-   אתה תראה רק את אלו שלא הגיבו או שלא נתנו הרשאה לדחות.
+## 22.3 Student QA checklist
 
-7. אסור לך לפתוח/לסיים ביקורת — רק המנהל.
-```
+- [ ] Receive push during a LOCATION audit; notification text is clear Hebrew.
+- [ ] Tap notification; app opens to a bottom sheet.
+- [ ] Sheet shows: title, one-sentence privacy notice, two buttons.
+- [ ] Tap "אשר ושלח מיקום"; browser prompts for location permission (first time only).
+- [ ] Grant permission; GPS dialog disappears; spinner shows for 1-3 seconds.
+- [ ] Toast appears: "✓ נשלח, תודה"; sheet closes; app returns to home.
+- [ ] Tap "אני לא יכול"; sheet closes; no GPS sent.
+- [ ] Verify in the supervisor's view: student appears as `UNKNOWN` with note "GPS denied" (or equivalent).
+- [ ] Reopen app while audit is still active; sheet does NOT reopen (response is already submitted).
+- [ ] After session closes, no audit-related UI is visible.
 
-## 28.3 תלמיד — סקריפט הדרכה (60 שניות)
+## 22.4 Cross-cutting QA
 
-```
-לפעמים תופיע התראה: "בקרת מיקום מהירה"
-- זה אומר שההנהלה רוצה לוודא שאתה בישיבה.
-- לחץ "אשר ושלח מיקום".
-- אם אתה לא בישיבה (לדוגמה לסידור) — לחץ "אני לא יכול".
-- המיקום נשמר רק במהלך הביקורת ויימחק אחרי 30 ימים.
-```
+- [ ] Hebrew throughout, no English fallbacks.
+- [ ] All text is RTL-correct.
+- [ ] Dark mode works in all components.
+- [ ] All distance numbers render in LTR enclaves.
+- [ ] Color-only signaling is absent.
+- [ ] Keyboard navigation works for all interactive elements.
+- [ ] Screen reader announces KPI changes.
+- [ ] Reduced-motion preference is honored.
+- [ ] Mobile 375px width: all critical screens are usable.
+- [ ] Two admins concurrent: identical state, sub-second propagation.
+- [ ] Realtime disconnect: polling kicks in within 30 seconds.
 
 ---
-
-# חלק כ"ט — FAQ מורחב
 
-**ש: מה קורה אם המנהל סוגר את הדפדפן בזמן ביקורת?**
-ת: הסשן ממשיך לחיות ב־DB. הוא יכול להיכנס מהסלולרי שלו או ממחשב אחר — לראות את אותו state.
+# Part 23 — Implementation Phases
 
-**ש: מה אם הרכז עזב באמצע?**
-ת: הסימונים שעשה נשמרו. רכז אחר (או המנהל) יכול להמשיך. אם איש לא ממשיך, אחרי 24 שעות הסשן יתפוס TIMED_OUT.
+The implementation is divided into **five phases** with explicit gates. Each phase ends with a demonstrable artifact. No phase ends because "we ran out of days"; a phase ends when its acceptance criteria are met.
 
-**ש: מה אם 50 תלמידים שולחים GPS באותה שנייה?**
-ת: Postgres יכול לטפל בקלות. Realtime יתבטל אנימציות אם > 30fps; הנתון יבוא, רק אנימציה תהיה quieter.
+## 23.1 Phase 0 — Foundations (Week 1)
 
-**ש: מה אם תלמיד פותח 2 מכשירים?**
-ת: UPSERT לפי `(session_id, student_id)` — האחרון מנצח. שני הסימונים נשמרים ב־audit_response_log.
+**Goal:** Database is correct; no UI yet.
 
-**ש: מי יכול לסמן EXCUSED?**
-ת: אין EXCUSED כקטגוריה. אם תלמיד חולה — הרכז יסמן "בחוץ עם אישור" ויכתוב בהערה "חולה" / "בהלוויה".
+**Deliverables:**
 
-**ש: מה אם תלמיד אכן בישיבה אבל GPS מראה 5km?**
-ת: אזעקה אדומה. מנהל יכול override ל-IN_YESHIVA. כל override נרשם.
+- The full SQL migration applied to staging.
+- All 9 RPCs callable from `psql` and from the Supabase Studio.
+- Trigger behavior verified manually (insert a response, observe `audit_response_log` row appears).
+- `tick_audit_timeout` cron scheduled and tested (manually shift system time to verify).
+- Realtime publication confirmed (use Supabase's Realtime panel to see events).
+- SQL unit tests written and passing.
 
-**ש: מה אם המכשיר של תלמיד ב-airplane mode?**
-ת: הוא לא יקבל push. נשאר PENDING. הרכז יסמן ידנית.
+**Acceptance gate:** A QA engineer can run a hand-crafted SQL script that opens a session, inserts responses, triggers an alert, closes the session — and the data is in the expected shape afterwards.
 
-**ש: האם זה עובד ב-iOS?**
-ת: Web Push ב-iOS עובד מ-iOS 16.4+ ורק אם התלמיד הוסיף את האפליקציה ל-Home Screen. אם לא — fallback ל-Realtime broadcast (עובד רק אם האפליקציה פתוחה).
+**Risks:** Confusion about Hebrew class names in queries. Mitigation: use the existing `normalizeHebrew` discipline; verify in staging with real class data.
 
-**ש: כמה זמן נשמרים מיקומי GPS?**
-ת: ב-`audit_responses` — לתמיד. אם תרצה למחוק — יש למחוק ידנית או להוסיף cron.
+## 23.2 Phase 1 — Admin happy path, manual mode (Week 2)
 
-**ש: מה צבעי המרחק?**
-ת: ירוק ≤300m, כחול 300m-1km, כתום 1-5km, אדום >5km.
+**Goal:** An admin can open a manual audit, the UI shows responses pre-populated, the admin can close the audit, and history records it.
 
-**ש: האם רכז יכול להתחיל ביקורת רק לכיתה שלו?**
-ת: לא. רק admin פותח ביקורת.
+**Deliverables:**
 
-**ש: האם אפשר לסגור ביקורת אוטומטית?**
-ת: לא במצב המתוכנן. רק admin לוחץ "סיים". אם נשכח — cron אחרי 24h מסגיר אוטומטית כ-TIMED_OUT.
+- TypeScript types for the audit domain.
+- Audit API client wrapping the RPCs.
+- Audit Zustand stores (data + UI).
+- `useActiveAudit` hook.
+- Wizard screen (new audit).
+- Live page (basic — just the KPI strip and grid view).
+- Summary page.
+- Landing page (audit history).
+- All four navigation pages routed and reachable.
+- `data-testid` attributes throughout for E2E hooks.
 
-**ש: מה קורה כשמשנים את class_id של תלמיד באמצע ביקורת (sync מ-Sheets)?**
-ת: ה-class_id ב-audit_responses מוקפא בעת פתיחת הסשן. שינוי ב-students לא משפיע על הביקורת הפעילה.
+**Acceptance gate:** UC-1 (routine morning audit, manual) completes end-to-end on staging by one engineer playing both admin and supervisor roles (using two browsers). UC-3 (refresh mid-session) passes.
 
-**ש: האם אפשר לערוך ביקורת אחרי שנסגרה?**
-ת: לא. אבל יש override (manager יכול לעדכן category). השינוי נרשם ב-audit_response_log.
+**Risks:** Underestimating the Zustand store complexity. Mitigation: build the store on Day 1 of Phase 1, test it standalone before any UI is wired.
 
-**ש: איך מייצאים ל-Excel?**
-ת: מסך "ביקורות קודמות" → לחץ על ביקורת → "ייצא Excel" → קובץ .xlsx.
+## 23.3 Phase 2 — Supervisor and full manual workflow (Week 3)
 
----
-
-# חלק ל' — אבני דרך לקבלת המוצר (Acceptance Criteria)
-
-המוצר נחשב "מוכן ל-production" רק כש:
-
-**א. פונקציונליות**
-- [ ] Admin פותח MANUAL audit, רכז מסמן, admin סוגר — הכל עובד end-to-end
-- [ ] Admin פותח LOCATION audit, תלמידים שולחים GPS, alerts נוצרים
-- [ ] Refresh במנהל באמצע — state נשמר ומוצג נכון
-- [ ] Refresh ברכז — state נשמר
-- [ ] Refresh בתלמיד — Sheet GPS חוזר אם PENDING
-
-**ב. ביצועים**
-- [ ] open_audit p95 < 500ms
-- [ ] submit_audit_response p95 < 200ms
-- [ ] Realtime latency < 800ms (DB → UI)
-- [ ] First Contentful Paint ב-Live page < 1.5s
-
-**ג. UX**
-- [ ] כל הטקסטים בעברית
-- [ ] עובד גם ב-RTL
-- [ ] עובד גם בדארק מוד
-- [ ] Mobile (375px width) עובד
-- [ ] projection mode עובד על צג 4K
-
-**ד. אבטחה**
-- [ ] רכז יכול לראות רק את כיתתו (אכיפה ב-UI)
-- [ ] תלמיד יכול לראות רק את עצמו
-- [ ] RPCs דורשים auth.uid או admin PIN
-- [ ] push_tokens לא חשופים ב-client
-
-**ה. תיעוד**
-- [ ] CLAUDE.md מעודכן
-- [ ] הדרכת מנהל בעברית מוכנה
-- [ ] הדרכת רכזים מוכנה
-- [ ] FAQ מלא
-
-**ו. ניטור**
-- [ ] Vercel logs נצבעו
-- [ ] Supabase logs פעילים
-- [ ] התראת Slack ל-RPC errors
-
----
-
-# חלק ל"א — תוספות ושיפורים עתידיים
-
-מה לא נכנס לגרסה הראשונה אבל שווה לתכנן:
+**Goal:** Supervisors can mark students, mutations flow live to the admin dashboard, full UC-1 and UC-5 work.
 
-1. **AI Anomaly detection** — זיהוי דפוסים של תלמידים שתמיד "במרחק כתום".
-2. **Geo-fencing** — הגדרת polygon מדויק של מתחם הישיבה במקום מעגל.
-3. **Reports אוטומטיים** — PDF שבועי למנהל עם תקציר ביקורות.
-4. **Multi-language** — אם בעתיד תהיה שפה אחרת.
-5. **Audit Templates** — שמירת preset של "ביקורת בוקר" עם class_ids מוגדרים מראש.
-6. **In-app Notification Center** — היסטוריית התראות לרכז.
-7. **OAuth login** — אם RLS יופעל.
-8. **2FA למנהל** — בטחון יתר.
-9. **WebSocket fallback ל-Polling** — באזורים עם רשת חלשה.
-10. **Offline-first PWA במלא** — שמירת responses ב-IndexedDB, sync אחר כך.
+**Deliverables:**
 
----
+- Supervisor panel screen.
+- Three-button-per-student row component.
+- Note field on student rows.
+- Optimistic UI with rollback on failure.
+- IndexedDB queue for offline supervisor mutations.
+- Activity feed view.
+- Heatmap view.
+- Realtime subscription wired correctly.
+- Polling fallback.
 
-# נספח E — Glossary (מילון מונחים)
-
-| מונח | משמעות |
-|------|---------|
-| **Audit Session** | שורה ב־`audit_sessions`. סשן יחיד של ביקורת. |
-| **Audit Response** | שורה ב־`audit_responses`. תגובת תלמיד אחד בסשן אחד. |
-| **Audit Alert** | אזעקה. תלמיד שמרחקו הוא ORANGE/RED. |
-| **Manual mode** | רכז מסמן ידנית. אין GPS. |
-| **Location mode** | תלמידים שולחים GPS אוטומטית. |
-| **PENDING** | מצב התחלתי. עוד לא הוחלט. |
-| **IN_YESHIVA** | נוכח. ב-Manual = רכז סימן. ב-Location = GPS < 300m. |
-| **OUT_PERMIT** | בחוץ עם אישור. departure ACTIVE או רכז סימן. |
-| **OUT_NO_PERMIT** | בחוץ ללא אישור. |
-| **UNKNOWN** | לא ידוע. רק אחרי close_audit או GPS denied. |
-| **Distance Bucket** | GREEN/BLUE/ORANGE/RED, מחושב מ-distance_from_campus_m. |
-| **Projection Mode** | מצב הקרנה מסך מלא לחדר ישיבות. |
-| **Activity Feed** | רשימת אירועים בזמן אמת. |
-| **Heatmap** | תצוגת חום של כיתות לפי אחוז סימון. |
-| **Cron tick** | `tick_audit_timeout` שרץ כל 5 דק'. |
-| **RLS** | Row Level Security של Supabase. עוד לא מופעל. |
-| **VAPID** | Voluntary Application Server Identification — תקן Web Push. |
-| **PII** | Personally Identifiable Information. |
+**Acceptance gate:** UC-1, UC-3, UC-4, UC-5 all pass on staging. Supervisor experience is verified by one of the actual supervisors trying it.
 
----
+**Risks:** Realtime delivery latency under load. Mitigation: synthetic load test (§21.3) before declaring Phase 2 complete.
 
-# חלק ל"ב — דפים מלאים (React Pages)
-
-## 32.1 `src/pages/admin/AuditLandingPage.tsx`
-
-```tsx
-// src/pages/admin/AuditLandingPage.tsx
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Plus, FileText, Calendar, ChevronLeft, Filter } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Input } from '@/components/ui/input'
-import { auditApi } from '@/lib/api/auditApi'
-import { useActiveAudit } from '@/hooks/useActiveAudit'
-import type { AuditSession, AuditMode } from '@/types/audit'
-
-export default function AuditLandingPage() {
-  const { session } = useActiveAudit()
-  const [past, setPast] = useState<AuditSession[]>([])
-  const [filterMode, setFilterMode] = useState<AuditMode | 'ALL'>('ALL')
-  const [search, setSearch] = useState('')
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    auditApi
-      .listPastAudits({ mode: filterMode === 'ALL' ? undefined : filterMode })
-      .then(setPast)
-      .finally(() => setLoading(false))
-  }, [filterMode])
-
-  const filtered = past.filter(s => {
-    if (!search) return true
-    return (
-      s.notes?.includes(search) ||
-      s.startedBy.includes(search) ||
-      s.classIds.some(c => c.includes(search))
-    )
-  })
-
-  const byDay = filtered.reduce<Record<string, AuditSession[]>>((acc, s) => {
-    const day = new Date(s.startedAt).toLocaleDateString('he-IL')
-    ;(acc[day] ??= []).push(s)
-    return acc
-  }, {})
-
-  return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-3xl font-bold">ביקורת פנימית</h1>
-        <Link to="/admin/audit/new">
-          <Button size="lg" className="gap-2">
-            <Plus size={20} />
-            פתח ביקורת חדשה
-          </Button>
-        </Link>
-      </div>
-
-      {session && session.status === 'ACTIVE' && (
-        <Card className="bg-amber-50 dark:bg-amber-950 border-amber-500 border-2 p-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-semibold">ביקורת פעילה כעת</div>
-              <div className="text-sm text-muted-foreground">
-                {session.mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} •
-                החלה ב-{new Date(session.startedAt).toLocaleTimeString('he-IL')}
-              </div>
-            </div>
-            <Link to={`/admin/audit/${session.id}/live`}>
-              <Button>חזור לסשן <ChevronLeft size={18} /></Button>
-            </Link>
-          </div>
-        </Card>
-      )}
-
-      <div className="flex gap-3 mb-4">
-        <Select value={filterMode} onValueChange={(v: any) => setFilterMode(v)}>
-          <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">כל המצבים</SelectItem>
-            <SelectItem value="MANUAL">מהירה</SelectItem>
-            <SelectItem value="LOCATION">מיקום</SelectItem>
-          </SelectContent>
-        </Select>
-        <Input
-          placeholder="חפש..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="max-w-sm"
-        />
-      </div>
-
-      {loading && <div className="text-center py-12">טוען...</div>}
-
-      {Object.entries(byDay).map(([day, list]) => (
-        <div key={day} className="mb-6">
-          <h2 className="flex items-center gap-2 text-lg font-semibold text-muted-foreground mb-3">
-            <Calendar size={16} /> {day}
-          </h2>
-          <div className="grid gap-3">
-            {list.map(s => <PastAuditRow key={s.id} s={s} />)}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function PastAuditRow({ s }: { s: AuditSession }) {
-  const duration = s.closedAt
-    ? ((new Date(s.closedAt).getTime() - new Date(s.startedAt).getTime()) / 60000).toFixed(1) + ' דק'
-    : '—'
-  return (
-    <Link to={`/admin/audit/${s.id}/summary`}>
-      <Card className="p-4 hover:bg-accent transition-colors">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="font-medium">
-              {s.mode === 'MANUAL' ? '⚡ מהירה' : '📍 מיקום'} • {new Date(s.startedAt).toLocaleTimeString('he-IL')}
-            </div>
-            <div className="text-sm text-muted-foreground">
-              {s.totalStudents} תלמידים • {s.classIds.length} כיתות • משך: {duration}
-            </div>
-            {s.notes && <div className="text-xs text-muted-foreground mt-1">"{s.notes}"</div>}
-          </div>
-          <div className="text-end">
-            <span className={`text-xs px-2 py-1 rounded-full ${
-              s.status === 'CLOSED' ? 'bg-emerald-100 text-emerald-800' :
-              s.status === 'TIMED_OUT' ? 'bg-amber-100 text-amber-800' :
-              s.status === 'ABORTED' ? 'bg-red-100 text-red-800' :
-              'bg-blue-100 text-blue-800'
-            }`}>
-              {s.status}
-            </span>
-          </div>
-        </div>
-      </Card>
-    </Link>
-  )
-}
-```
+## 23.4 Phase 3 — Location mode (Week 4)
 
-## 32.2 `src/pages/admin/AuditNewPage.tsx`
-
-```tsx
-// src/pages/admin/AuditNewPage.tsx
-import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { ChevronRight, ChevronLeft, AlertCircle } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Textarea } from '@/components/ui/textarea'
-import { AuditModeSelector } from '@/components/audit/AuditModeSelector'
-import { AuditClassSelector } from '@/components/audit/AuditClassSelector'
-import { AuditLocationSettings } from '@/components/audit/AuditLocationSettings'
-import { useAuditStore } from '@/store/auditStore'
-import { useStudentsStore } from '@/store/studentsStore'
-import type { AuditMode, AuditSessionSettings } from '@/types/audit'
-import { toast } from 'sonner'
-
-type Step = 'mode' | 'classes' | 'settings' | 'confirm'
-
-export default function AuditNewPage() {
-  const navigate = useNavigate()
-  const [step, setStep] = useState<Step>('mode')
-  const [mode, setMode] = useState<AuditMode | null>(null)
-  const [classIds, setClassIds] = useState<string[]>([])
-  const [settings, setSettings] = useState<AuditSessionSettings>({
-    timeoutSec: 120,
-    sensitivity: 'MEDIUM',
-    pushTarget: 'STUDENTS',
-    showMap: true,
-  })
-  const [notes, setNotes] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-
-  const allClasses = useStudentsStore(s => s.allClassIds)
-  const openAudit = useAuditStore(s => s.open)
-
-  const totalStudents = useStudentsStore(s => s.students)
-    .filter(st => classIds.includes(st.classId)).length
-
-  async function handleSubmit() {
-    if (!mode || classIds.length === 0) return
-    setSubmitting(true)
-    try {
-      const sid = await openAudit(mode, classIds, 'ADMIN', settings, notes)
-      toast.success('ביקורת נפתחה!')
-      navigate(`/admin/audit/${sid}/live`)
-    } catch (e: any) {
-      toast.error(e?.message ?? 'נכשל בפתיחה')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <div className="p-6 max-w-4xl mx-auto">
-      <div className="flex items-center gap-3 mb-6">
-        <Link to="/admin/audit"><ChevronRight size={20} /></Link>
-        <h1 className="text-2xl font-bold">פתיחת ביקורת חדשה</h1>
-      </div>
-
-      <Stepper step={step} />
-
-      <Card className="mt-6 p-6">
-        {step === 'mode' && (
-          <>
-            <h2 className="text-xl font-semibold mb-4">בחר מצב</h2>
-            <AuditModeSelector value={mode} onChange={setMode} />
-            <div className="flex justify-end mt-6">
-              <Button disabled={!mode} onClick={() => setStep('classes')}>
-                המשך <ChevronLeft size={18} />
-              </Button>
-            </div>
-          </>
-        )}
-
-        {step === 'classes' && (
-          <>
-            <h2 className="text-xl font-semibold mb-4">בחר כיתות</h2>
-            <AuditClassSelector
-              allClassIds={allClasses}
-              selected={classIds}
-              onChange={setClassIds}
-            />
-            <div className="text-sm text-muted-foreground mt-3">
-              סה"כ: {totalStudents} תלמידים ב-{classIds.length} כיתות
-            </div>
-            <div className="flex justify-between mt-6">
-              <Button variant="outline" onClick={() => setStep('mode')}>חזור</Button>
-              <Button
-                disabled={classIds.length === 0}
-                onClick={() => setStep(mode === 'LOCATION' ? 'settings' : 'confirm')}
-              >
-                המשך <ChevronLeft size={18} />
-              </Button>
-            </div>
-          </>
-        )}
-
-        {step === 'settings' && mode === 'LOCATION' && (
-          <>
-            <h2 className="text-xl font-semibold mb-4">הגדרות איסוף מיקום</h2>
-            <AuditLocationSettings value={settings} onChange={setSettings} />
-            <div className="flex justify-between mt-6">
-              <Button variant="outline" onClick={() => setStep('classes')}>חזור</Button>
-              <Button onClick={() => setStep('confirm')}>
-                המשך <ChevronLeft size={18} />
-              </Button>
-            </div>
-          </>
-        )}
-
-        {step === 'confirm' && (
-          <>
-            <h2 className="text-xl font-semibold mb-4">סיכום ופתיחה</h2>
-            <div className="space-y-3 mb-4">
-              <SummaryRow label="מצב" value={mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} />
-              <SummaryRow label="כיתות" value={classIds.length.toString()} />
-              <SummaryRow label="תלמידים" value={totalStudents.toString()} />
-              {mode === 'LOCATION' && (
-                <>
-                  <SummaryRow label="זמן המתנה" value={`${settings.timeoutSec} שניות`} />
-                  <SummaryRow label="רגישות אזעקות" value={settings.sensitivity ?? 'MEDIUM'} />
-                  <SummaryRow label="מטרת push" value={settings.pushTarget ?? 'STUDENTS'} />
-                </>
-              )}
-            </div>
-            <Textarea
-              placeholder="הערה (אופציונלי)"
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              maxLength={500}
-            />
-            <div className="bg-amber-50 dark:bg-amber-950 border-2 border-amber-300 rounded-lg p-3 mt-4 flex gap-2">
-              <AlertCircle size={18} className="text-amber-600 shrink-0 mt-0.5" />
-              <div className="text-sm">
-                לאחר פתיחת הביקורת, הרכזים יקבלו push מיידי.
-                {mode === 'LOCATION' && ' כל התלמידים יקבלו בקשת מיקום.'}
-                לא ניתן לבטל אחרי הפתיחה — רק לסגור.
-              </div>
-            </div>
-            <div className="flex justify-between mt-6">
-              <Button variant="outline" onClick={() => setStep(mode === 'LOCATION' ? 'settings' : 'classes')}>
-                חזור
-              </Button>
-              <Button
-                onClick={handleSubmit}
-                disabled={submitting}
-                className="bg-emerald-600 hover:bg-emerald-700"
-              >
-                {submitting ? 'פותח...' : 'פתח ביקורת ⚡'}
-              </Button>
-            </div>
-          </>
-        )}
-      </Card>
-    </div>
-  )
-}
-
-function Stepper({ step }: { step: Step }) {
-  const steps: Step[] = ['mode', 'classes', 'settings', 'confirm']
-  const labels: Record<Step, string> = {
-    mode: 'מצב', classes: 'כיתות', settings: 'הגדרות', confirm: 'אישור',
-  }
-  const idx = steps.indexOf(step)
-  return (
-    <div className="flex items-center gap-2">
-      {steps.map((s, i) => (
-        <div key={s} className="flex items-center gap-2 flex-1">
-          <div className={`flex items-center justify-center w-8 h-8 rounded-full font-semibold ${
-            i < idx ? 'bg-emerald-500 text-white' :
-            i === idx ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-600'
-          }`}>
-            {i + 1}
-          </div>
-          <div className={i === idx ? 'font-semibold' : 'text-muted-foreground'}>
-            {labels[s]}
-          </div>
-          {i < steps.length - 1 && <div className="flex-1 h-px bg-gray-300" />}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between items-baseline">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-semibold">{value}</span>
-    </div>
-  )
-}
-```
+**Goal:** Full LOCATION-mode audits, including push notifications, GPS, alerts, and the map view.
 
-## 32.3 `src/pages/admin/AuditLivePage.tsx`
-
-```tsx
-// src/pages/admin/AuditLivePage.tsx
-import { useEffect, useState } from 'react'
-import { useParams, useNavigate, Navigate } from 'react-router-dom'
-import { Monitor, X, Volume2, VolumeX } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuditUiStore } from '@/store/auditUiStore'
-import { useActiveAudit } from '@/hooks/useActiveAudit'
-import { useProjectionRotation } from '@/hooks/useProjectionRotation'
-import { AuditKpiRow } from '@/components/audit/AuditKpiRow'
-import { AuditMap } from '@/components/audit/AuditMap'
-import { AuditHeatmap } from '@/components/audit/AuditHeatmap'
-import { AuditClassGrid } from '@/components/audit/AuditClassGrid'
-import { AuditActivityFeed } from '@/components/audit/AuditActivityFeed'
-import { AuditAlertList } from '@/components/audit/AuditAlertList'
-import { AuditCloseModal } from '@/components/audit/AuditCloseModal'
-import { AuditProjectionMode } from '@/components/audit/AuditProjectionMode'
-import { AuditHeader } from '@/components/audit/AuditHeader'
-import { setGlobalMute, isMuted, preloadAll } from '@/lib/audit/soundManager'
-
-export default function AuditLivePage() {
-  const { id } = useParams<{ id: string }>()
-  const navigate = useNavigate()
-  const { session } = useActiveAudit()
-  const activeTab = useAuditUiStore(s => s.activeTab)
-  const setTab = useAuditUiStore(s => s.setTab)
-  const projection = useAuditUiStore(s => s.projectionMode)
-  const enterProj = useAuditUiStore(s => s.enterProjection)
-  const exitProj = useAuditUiStore(s => s.exitProjection)
-  const soundOn = useAuditUiStore(s => s.soundEnabled)
-  const setSoundOn = useAuditUiStore(s => s.setSoundEnabled)
-  const [closeOpen, setCloseOpen] = useState(false)
-
-  useProjectionRotation()
-
-  useEffect(() => { preloadAll() }, [])
-  useEffect(() => { setGlobalMute(!soundOn) }, [soundOn])
-
-  if (!session) return <div className="p-8 text-center">טוען ביקורת...</div>
-  if (id !== session.id) return <Navigate to={`/admin/audit/${session.id}/live`} replace />
-  if (session.status !== 'ACTIVE') return <Navigate to={`/admin/audit/${session.id}/summary`} replace />
-
-  return (
-    <div className={projection ? 'audit-projection-mode min-h-screen p-8' : 'p-6 max-w-7xl mx-auto'}>
-      {projection && (
-        <Button
-          className="fixed top-4 end-4 z-50"
-          variant="outline"
-          onClick={() => { exitProj(); document.exitFullscreen?.() }}
-        >
-          <X size={20} /> יציאה מהקרנה
-        </Button>
-      )}
-
-      <AuditHeader session={session} />
-
-      <div className="my-6">
-        <AuditKpiRow />
-      </div>
-
-      <div className="flex items-center justify-between mb-4">
-        <Tabs value={activeTab} onValueChange={(v: any) => setTab(v)} className="flex-1">
-          <TabsList>
-            <TabsTrigger value="grid">🟢 Grid</TabsTrigger>
-            <TabsTrigger value="heatmap">🔥 Heatmap</TabsTrigger>
-            {session.mode === 'LOCATION' && <TabsTrigger value="map">🗺 מפה</TabsTrigger>}
-            <TabsTrigger value="feed">📜 פיד</TabsTrigger>
-          </TabsList>
-        </Tabs>
-
-        <div className="flex gap-2">
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => setSoundOn(!soundOn)}
-            title={soundOn ? 'השתק' : 'הפעל סאונד'}
-          >
-            {soundOn ? <Volume2 /> : <VolumeX />}
-          </Button>
-
-          <Button
-            variant="outline"
-            onClick={() => {
-              document.documentElement.requestFullscreen?.()
-              enterProj()
-            }}
-          >
-            <Monitor size={18} className="me-2" /> הקרנה
-          </Button>
-
-          <Button
-            variant="destructive"
-            onClick={() => setCloseOpen(true)}
-          >
-            סיים ביקורת
-          </Button>
-        </div>
-      </div>
-
-      <Tabs value={activeTab} onValueChange={(v: any) => setTab(v)}>
-        <TabsContent value="grid"><AuditClassGrid /></TabsContent>
-        <TabsContent value="heatmap"><AuditHeatmap /></TabsContent>
-        <TabsContent value="map">
-          {session.mode === 'LOCATION' ? <AuditMap /> : <div>מצב MANUAL — אין מפה</div>}
-        </TabsContent>
-        <TabsContent value="feed"><AuditActivityFeed /></TabsContent>
-      </Tabs>
-
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div>
-          <h3 className="font-semibold mb-2">אזעקות</h3>
-          <AuditAlertList />
-        </div>
-        <div>
-          <h3 className="font-semibold mb-2">פעילות</h3>
-          <AuditActivityFeed />
-        </div>
-      </div>
-
-      <AuditCloseModal
-        open={closeOpen}
-        onClose={() => setCloseOpen(false)}
-        onConfirm={async (notes) => {
-          await useAuditStore.getState().close('ADMIN', notes)
-          navigate(`/admin/audit/${session.id}/summary`)
-        }}
-        sessionId={session.id}
-      />
-
-      {projection && <AuditProjectionMode />}
-    </div>
-  )
-}
-```
+**Deliverables:**
 
-## 32.4 `src/pages/admin/AuditSummaryPage.tsx`
-
-```tsx
-// src/pages/admin/AuditSummaryPage.tsx
-import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { ChevronRight, Download, FileText, BarChart3 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { auditApi } from '@/lib/api/auditApi'
-import { AuditCategoryChip } from '@/components/audit/AuditCategoryChip'
-import { AuditDistanceBadge } from '@/components/audit/AuditDistanceBadge'
-import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
-import { exportAuditPdf } from '@/lib/audit/exportPdf'
-import { exportAuditExcel } from '@/lib/audit/exportExcel'
-
-export default function AuditSummaryPage() {
-  const { id } = useParams<{ id: string }>()
-  const [data, setData] = useState<{
-    session: AuditSession
-    responses: AuditResponse[]
-    alerts: AuditAlert[]
-    kpis: AuditKpis
-  } | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    if (!id) return
-    auditApi.getAuditFull(id).then(setData).finally(() => setLoading(false))
-  }, [id])
-
-  if (loading) return <div className="p-8 text-center">טוען...</div>
-  if (!data) return <div className="p-8 text-center">לא נמצאה ביקורת</div>
-
-  const { session, responses, alerts, kpis } = data
-  const duration = session.closedAt
-    ? Math.round((new Date(session.closedAt).getTime() - new Date(session.startedAt).getTime()) / 60000)
-    : null
-
-  const inYeshiva = kpis.byCategory.IN_YESHIVA ?? 0
-  const outPermit = kpis.byCategory.OUT_PERMIT ?? 0
-  const outNoPermit = kpis.byCategory.OUT_NO_PERMIT ?? 0
-  const unknown = kpis.byCategory.UNKNOWN ?? 0
-  const total = session.totalStudents
-  const presentPct = total > 0 ? Math.round((inYeshiva / total) * 100) : 0
-
-  return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <Link to="/admin/audit"><ChevronRight size={20} /></Link>
-          <h1 className="text-2xl font-bold">סיכום ביקורת</h1>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => exportAuditPdf(data)}>
-            <FileText size={18} className="me-2" /> ייצא PDF
-          </Button>
-          <Button variant="outline" onClick={() => exportAuditExcel(data)}>
-            <Download size={18} className="me-2" /> ייצא Excel
-          </Button>
-        </div>
-      </div>
-
-      <Card className="p-6 mb-6 bg-emerald-50 dark:bg-emerald-950 border-emerald-500 border-2">
-        <div className="text-center">
-          <div className="text-7xl font-black tabular-nums">{presentPct}%</div>
-          <div className="text-2xl mt-2">בישיבה ({inYeshiva}/{total})</div>
-          {duration && <div className="text-sm text-muted-foreground mt-1">משך: {duration} דקות</div>}
-        </div>
-      </Card>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <Card className="p-4 text-center">
-          <div className="text-3xl font-bold text-emerald-600">{inYeshiva}</div>
-          <AuditCategoryChip category="IN_YESHIVA" size="sm" />
-        </Card>
-        <Card className="p-4 text-center">
-          <div className="text-3xl font-bold text-blue-600">{outPermit}</div>
-          <AuditCategoryChip category="OUT_PERMIT" size="sm" />
-        </Card>
-        <Card className="p-4 text-center">
-          <div className="text-3xl font-bold text-red-600">{outNoPermit}</div>
-          <AuditCategoryChip category="OUT_NO_PERMIT" size="sm" />
-        </Card>
-        <Card className="p-4 text-center">
-          <div className="text-3xl font-bold text-amber-600">{unknown}</div>
-          <AuditCategoryChip category="UNKNOWN" size="sm" />
-        </Card>
-      </div>
-
-      {alerts.length > 0 && (
-        <Card className="p-4 mb-6 border-red-500 border-2 bg-red-50 dark:bg-red-950">
-          <h2 className="font-semibold text-red-700 mb-3">🚨 אזעקות ({alerts.length})</h2>
-          <div className="space-y-2">
-            {alerts.map(a => (
-              <div key={a.id} className="flex items-center gap-3 text-sm">
-                <span className="font-mono">{new Date(a.triggeredAt).toLocaleTimeString('he-IL')}</span>
-                <span>{a.studentId.slice(0, 8)}</span>
-                <AuditDistanceBadge bucket={a.distanceM > 5000 ? 'RED' : 'ORANGE'} distanceM={a.distanceM} />
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      <Card className="p-4">
-        <h2 className="font-semibold mb-3 flex items-center gap-2">
-          <BarChart3 size={20} /> פירוט לפי כיתה
-        </h2>
-        <table className="w-full text-sm">
-          <thead className="text-start">
-            <tr className="border-b">
-              <th className="text-start py-2">כיתה</th>
-              <th className="text-end">סה"כ</th>
-              <th className="text-end">נוכח</th>
-              <th className="text-end">עם אישור</th>
-              <th className="text-end">ללא אישור</th>
-              <th className="text-end">לא ידוע</th>
-              <th className="text-end">%</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(kpis.byClass).map(([cid, s]) => {
-              const pct = s.total > 0 ? Math.round((s.in_yeshiva / s.total) * 100) : 0
-              return (
-                <tr key={cid} className="border-b">
-                  <td className="py-2">{cid}</td>
-                  <td className="text-end tabular-nums">{s.total}</td>
-                  <td className="text-end tabular-nums text-emerald-700">{s.in_yeshiva}</td>
-                  <td className="text-end tabular-nums text-blue-700">{s.out_permit}</td>
-                  <td className="text-end tabular-nums text-red-700">{s.out_no_permit}</td>
-                  <td className="text-end tabular-nums text-amber-700">{s.unknown}</td>
-                  <td className="text-end tabular-nums font-bold">{pct}%</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </Card>
-    </div>
-  )
-}
-```
+- `send-audit-push` Edge Function deployed.
+- Service worker updated to handle audit pushes.
+- Student bottom sheet component.
+- GPS collector library with all status codes.
+- Map view with markers, clusters, range circles.
+- Alert list and alert modal.
+- Sound manager and chime/alert sounds.
+- Notification deep-linking.
 
-## 32.5 `src/pages/admin/AuditComparePage.tsx`
-
-```tsx
-// src/pages/admin/AuditComparePage.tsx
-import { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { Card } from '@/components/ui/card'
-import { auditApi } from '@/lib/api/auditApi'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
-import type { AuditSession, AuditKpis } from '@/types/audit'
-
-interface AuditEntry {
-  session: AuditSession
-  kpis: AuditKpis
-}
-
-export default function AuditComparePage() {
-  const [params] = useSearchParams()
-  const ids = (params.get('ids') ?? '').split(',').filter(Boolean)
-  const [entries, setEntries] = useState<AuditEntry[]>([])
-
-  useEffect(() => {
-    Promise.all(ids.map(id => auditApi.getAuditFull(id))).then(rs => {
-      setEntries(rs.map(r => ({ session: r.session, kpis: r.kpis })))
-    })
-  }, [ids.join(',')])
-
-  if (entries.length === 0) {
-    return <div className="p-8 text-center">בחר 2-5 ביקורות להשוואה</div>
-  }
-
-  const chartData = entries.map(e => ({
-    label: new Date(e.session.startedAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }),
-    inYeshiva: e.kpis.byCategory.IN_YESHIVA ?? 0,
-    outPermit: e.kpis.byCategory.OUT_PERMIT ?? 0,
-    outNoPermit: e.kpis.byCategory.OUT_NO_PERMIT ?? 0,
-  }))
-
-  return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">השוואה בין ביקורות</h1>
-
-      <Card className="p-4 mb-6">
-        <h2 className="font-semibold mb-3">נוכחות לפי זמן</h2>
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={chartData}>
-            <XAxis dataKey="label" />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="inYeshiva" stroke="#10b981" name="נוכח" />
-            <Line type="monotone" dataKey="outPermit" stroke="#3b82f6" name="עם אישור" />
-            <Line type="monotone" dataKey="outNoPermit" stroke="#ef4444" name="ללא אישור" />
-          </LineChart>
-        </ResponsiveContainer>
-      </Card>
-
-      <Card className="p-4">
-        <h2 className="font-semibold mb-3">טבלת השוואה</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b">
-                <th className="text-start py-2">KPI</th>
-                {entries.map(e => (
-                  <th key={e.session.id} className="text-end p-2">
-                    {new Date(e.session.startedAt).toLocaleString('he-IL', {
-                      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-                    })}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              <CompareRow label="מצב" entries={entries}
-                value={e => e.session.mode === 'MANUAL' ? 'מהירה' : 'מיקום'} />
-              <CompareRow label="כיתות" entries={entries}
-                value={e => e.session.classIds.length.toString()} />
-              <CompareRow label="תלמידים" entries={entries}
-                value={e => e.session.totalStudents.toString()} />
-              <CompareRow label="נוכח" entries={entries} color="emerald"
-                value={e => (e.kpis.byCategory.IN_YESHIVA ?? 0).toString()} />
-              <CompareRow label="עם אישור" entries={entries} color="blue"
-                value={e => (e.kpis.byCategory.OUT_PERMIT ?? 0).toString()} />
-              <CompareRow label="ללא אישור" entries={entries} color="red"
-                value={e => (e.kpis.byCategory.OUT_NO_PERMIT ?? 0).toString()} />
-              <CompareRow label="לא ידוע" entries={entries} color="amber"
-                value={e => (e.kpis.byCategory.UNKNOWN ?? 0).toString()} />
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
-  )
-}
-
-function CompareRow({
-  label, entries, value, color,
-}: {
-  label: string
-  entries: AuditEntry[]
-  value: (e: AuditEntry) => string
-  color?: 'emerald' | 'blue' | 'red' | 'amber'
-}) {
-  const colorClass = color ? `text-${color}-700 dark:text-${color}-400` : ''
-  return (
-    <tr className="border-b">
-      <td className="py-2 font-medium">{label}</td>
-      {entries.map(e => (
-        <td key={e.session.id} className={`text-end p-2 tabular-nums ${colorClass}`}>
-          {value(e)}
-        </td>
-      ))}
-    </tr>
-  )
-}
-```
+**Acceptance gate:** UC-2, UC-6, UC-7, UC-8 pass. A real student device receives a push and successfully completes the flow.
 
----
+**Risks:** iOS push setup. Mitigation: test on a real iOS device, in Hebrew, by an iOS user. Allocate a day for iOS-specific debugging if needed.
 
-# חלק ל"ג — Supervisor & Student components (קוד מלא)
-
-## 33.1 `src/components/audit/SupervisorAuditPanel.tsx`
-
-```tsx
-// src/components/audit/SupervisorAuditPanel.tsx
-import { useMemo, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Bell } from 'lucide-react'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuthStore } from '@/store/authStore'
-import { useStudentsStore } from '@/store/studentsStore'
-import { SupervisorStudentRow } from './SupervisorStudentRow'
-import { Card } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
-
-export function SupervisorAuditPanel() {
-  const session = useAuditStore(s => s.session)
-  const responses = useAuditStore(s => s.responses)
-  const classId = useAuthStore(s => s.classId)
-  const students = useStudentsStore(s => s.students)
-  const [search, setSearch] = useState('')
-
-  if (!session || session.status !== 'ACTIVE' || !classId) return null
-  if (!session.classIds.includes(classId)) return null
-
-  const classStudents = useMemo(
-    () => students.filter(s => s.classId === classId),
-    [students, classId],
-  )
-
-  const studentRows = useMemo(() => {
-    const list = classStudents.map(s => ({
-      student: s,
-      response: responses.get(s.id),
-    }))
-    if (search) {
-      return list.filter(r => r.student.fullName.includes(search))
-    }
-    // Sort: PENDING first, then UNKNOWN, then by name
-    return list.sort((a, b) => {
-      const ac = a.response?.category ?? 'PENDING'
-      const bc = b.response?.category ?? 'PENDING'
-      const rank = (c: string) => c === 'PENDING' ? 0 : c === 'UNKNOWN' ? 1 : 2
-      const r = rank(ac) - rank(bc)
-      if (r !== 0) return r
-      return a.student.fullName.localeCompare(b.student.fullName, 'he')
-    })
-  }, [classStudents, responses, search])
-
-  const stats = useMemo(() => {
-    const total = classStudents.length
-    let marked = 0, inYeshiva = 0, outPermit = 0, outNoPermit = 0, unknown = 0
-    for (const { response } of studentRows) {
-      const c = response?.category ?? 'PENDING'
-      if (c !== 'PENDING') marked++
-      if (c === 'IN_YESHIVA') inYeshiva++
-      if (c === 'OUT_PERMIT') outPermit++
-      if (c === 'OUT_NO_PERMIT') outNoPermit++
-      if (c === 'UNKNOWN') unknown++
-    }
-    return { total, marked, inYeshiva, outPermit, outNoPermit, unknown, pending: total - marked }
-  }, [classStudents, studentRows])
-
-  return (
-    <Card className="border-4 border-amber-400 bg-amber-50 dark:bg-amber-950 p-4 mb-6">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Bell className="text-amber-600 animate-bounce" />
-          <h2 className="font-bold text-lg">
-            {session.mode === 'MANUAL' ? 'ביקורת מהירה פעילה' : 'ביקורת מיקום פעילה'}
-          </h2>
-        </div>
-        <div className="text-sm font-semibold">
-          סומן {stats.marked} / {stats.total}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 gap-2 text-xs mb-3">
-        <Pill bg="bg-emerald-100" text="text-emerald-800" count={stats.inYeshiva} label="נוכח" />
-        <Pill bg="bg-blue-100" text="text-blue-800" count={stats.outPermit} label="עם אישור" />
-        <Pill bg="bg-red-100" text="text-red-800" count={stats.outNoPermit} label="ללא אישור" />
-        <Pill bg="bg-amber-100" text="text-amber-800" count={stats.unknown} label="לא ידוע" />
-      </div>
-
-      <Input
-        placeholder="חפש תלמיד..."
-        value={search}
-        onChange={e => setSearch(e.target.value)}
-        className="mb-3"
-      />
-
-      <div className="space-y-2 max-h-[600px] overflow-y-auto">
-        <AnimatePresence>
-          {studentRows.map(({ student, response }) => (
-            <motion.div
-              key={student.id}
-              layout
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-            >
-              <SupervisorStudentRow student={student} response={response} />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
-
-      {stats.pending === 0 && (
-        <div className="mt-3 text-center text-emerald-700 font-semibold">
-          ✓ סימנת את כל התלמידים. ההנהלה תסיים את הביקורת.
-        </div>
-      )}
-    </Card>
-  )
-}
-
-function Pill({ bg, text, count, label }: { bg: string; text: string; count: number; label: string }) {
-  return (
-    <div className={`rounded-lg ${bg} ${text} p-2 text-center`}>
-      <div className="text-xl font-bold tabular-nums">{count}</div>
-      <div className="text-[10px]">{label}</div>
-    </div>
-  )
-}
-```
+## 23.5 Phase 4 — Polish, projection, exports, history (Week 5)
 
-## 33.2 `src/components/audit/SupervisorStudentRow.tsx`
-
-```tsx
-// src/components/audit/SupervisorStudentRow.tsx
-import { useState } from 'react'
-import { Check, LogOut, AlertOctagon, MessageSquare, MapPin } from 'lucide-react'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuthStore } from '@/store/authStore'
-import { AuditCategoryChip } from './AuditCategoryChip'
-import { AuditDistanceBadge } from './AuditDistanceBadge'
-import type { AuditResponse, AuditCategory } from '@/types/audit'
-import type { Student } from '@/types'
-import { Button } from '@/components/ui/button'
-import { toast } from 'sonner'
-
-interface Props {
-  student: Student
-  response?: AuditResponse
-}
-
-export function SupervisorStudentRow({ student, response }: Props) {
-  const submit = useAuditStore(s => s.submitResponse)
-  const supervisorPin = useAuthStore(s => s.supervisorPin)
-  const [submitting, setSubmitting] = useState<AuditCategory | null>(null)
-  const [showNote, setShowNote] = useState(false)
-  const [note, setNote] = useState(response?.note ?? '')
-
-  const category = response?.category ?? 'PENDING'
-  const isAuto = response?.markedBy === 'AUTO_DEPARTURE' || response?.markedBy === 'AUTO_GPS'
-
-  async function pick(c: AuditCategory) {
-    setSubmitting(c)
-    try {
-      await submit(student.id, {
-        category: c,
-        markedBy: `SUPERVISOR:${supervisorPin ?? '?'}`,
-      } as any)
-    } catch (e: any) {
-      toast.error(e?.message ?? 'נכשל')
-    } finally {
-      setSubmitting(null)
-    }
-  }
-
-  async function saveNote() {
-    try {
-      await submit(student.id, { note } as any)
-      setShowNote(false)
-      toast.success('הערה נשמרה')
-    } catch (e) {
-      toast.error('נכשל')
-    }
-  }
-
-  const bgClass =
-    category === 'IN_YESHIVA' ? 'bg-emerald-50 dark:bg-emerald-950 border-emerald-300' :
-    category === 'OUT_PERMIT' ? 'bg-blue-50 dark:bg-blue-950 border-blue-300' :
-    category === 'OUT_NO_PERMIT' ? 'bg-red-50 dark:bg-red-950 border-red-300' :
-    category === 'UNKNOWN' ? 'bg-amber-50 dark:bg-amber-950 border-amber-300' :
-    'bg-white dark:bg-gray-900 border-gray-200'
-
-  return (
-    <div className={`rounded-xl border-2 p-3 ${bgClass}`}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="font-semibold">{student.fullName}</div>
-        <div className="flex items-center gap-2">
-          {response?.distanceBucket && (
-            <AuditDistanceBadge
-              bucket={response.distanceBucket}
-              distanceM={response.distanceFromCampusM}
-              size="sm"
-            />
-          )}
-          {category !== 'PENDING' && <AuditCategoryChip category={category} size="sm" />}
-        </div>
-      </div>
-
-      {isAuto && response && (
-        <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-          <MapPin size={12} />
-          {response.markedBy === 'AUTO_DEPARTURE'
-            ? 'אוטומטית: יציאה מאושרת'
-            : response.markedBy === 'AUTO_GPS'
-              ? 'אוטומטית: GPS'
-              : ''}
-        </div>
-      )}
-
-      {category === 'PENDING' && (
-        <div className="grid grid-cols-3 gap-2">
-          <ActionBtn
-            icon={Check}
-            label="נוכח"
-            color="emerald"
-            onClick={() => pick('IN_YESHIVA')}
-            loading={submitting === 'IN_YESHIVA'}
-          />
-          <ActionBtn
-            icon={LogOut}
-            label="עם אישור"
-            color="blue"
-            onClick={() => pick('OUT_PERMIT')}
-            loading={submitting === 'OUT_PERMIT'}
-          />
-          <ActionBtn
-            icon={AlertOctagon}
-            label="ללא אישור"
-            color="red"
-            onClick={() => pick('OUT_NO_PERMIT')}
-            loading={submitting === 'OUT_NO_PERMIT'}
-          />
-        </div>
-      )}
-
-      {category !== 'PENDING' && !showNote && (
-        <div className="flex justify-between mt-1">
-          <Button size="sm" variant="ghost" onClick={() => setShowNote(true)}>
-            <MessageSquare size={12} className="me-1" />
-            {response?.note ? 'ערוך הערה' : 'הוסף הערה'}
-          </Button>
-          <div className="flex gap-1">
-            {(['IN_YESHIVA', 'OUT_PERMIT', 'OUT_NO_PERMIT'] as AuditCategory[]).map(c =>
-              c !== category && (
-                <button
-                  key={c}
-                  onClick={() => pick(c)}
-                  className="text-xs text-muted-foreground hover:underline"
-                >
-                  שנה ל-{c === 'IN_YESHIVA' ? 'נוכח' : c === 'OUT_PERMIT' ? 'עם אישור' : 'ללא אישור'}
-                </button>
-              )
-            )}
-          </div>
-        </div>
-      )}
-
-      {showNote && (
-        <div className="mt-2">
-          <textarea
-            value={note}
-            onChange={e => setNote(e.target.value)}
-            maxLength={200}
-            rows={2}
-            placeholder="הערה (למשל: חולה, הלוויה)"
-            className="w-full rounded-lg border p-2 text-sm"
-          />
-          <div className="flex gap-2 mt-2">
-            <Button size="sm" onClick={saveNote}>שמור</Button>
-            <Button size="sm" variant="ghost" onClick={() => setShowNote(false)}>ביטול</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ActionBtn({ icon: Icon, label, color, onClick, loading }: any) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={loading}
-      className={`flex flex-col items-center gap-1 rounded-lg p-2 text-sm font-medium
-        bg-${color}-100 text-${color}-800 border-2 border-${color}-300 hover:bg-${color}-200
-        disabled:opacity-50 active:scale-95 transition-all`}
-    >
-      <Icon size={20} />
-      <span>{label}</span>
-    </button>
-  )
-}
-```
+**Goal:** The product feels finished. Everything from §22 passes.
 
----
+**Deliverables:**
 
-# חלק ל"ד — Class Drawer / Detail View
-
-## 34.1 `src/components/audit/AuditClassDrawer.tsx`
-
-```tsx
-// src/components/audit/AuditClassDrawer.tsx
-import { useMemo } from 'react'
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { useAuditStore } from '@/store/auditStore'
-import { useStudentsStore } from '@/store/studentsStore'
-import { AuditCategoryChip } from './AuditCategoryChip'
-import { AuditDistanceBadge } from './AuditDistanceBadge'
-import { Clock } from 'lucide-react'
-
-interface Props {
-  classId: string
-  open: boolean
-  onClose: () => void
-}
-
-export function AuditClassDrawer({ classId, open, onClose }: Props) {
-  const responses = useAuditStore(s => s.responses)
-  const students = useStudentsStore(s => s.students)
-
-  const items = useMemo(() => {
-    const classStudents = students.filter(s => s.classId === classId)
-    return classStudents.map(s => ({ student: s, response: responses.get(s.id) }))
-  }, [students, responses, classId])
-
-  return (
-    <Sheet open={open} onOpenChange={v => !v && onClose()}>
-      <SheetContent side="end" className="w-[400px] sm:w-[500px]">
-        <SheetHeader>
-          <SheetTitle>{classId}</SheetTitle>
-        </SheetHeader>
-
-        <div className="mt-4 space-y-2 overflow-y-auto max-h-[calc(100vh-120px)]">
-          {items.map(({ student, response }) => (
-            <div key={student.id} className="border rounded-xl p-3">
-              <div className="flex justify-between items-center mb-1">
-                <div className="font-semibold">{student.fullName}</div>
-                <AuditCategoryChip category={response?.category ?? 'PENDING'} size="sm" />
-              </div>
-              <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                {response?.markedAt && (
-                  <span className="flex items-center gap-1">
-                    <Clock size={12} />
-                    {new Date(response.markedAt).toLocaleTimeString('he-IL')}
-                  </span>
-                )}
-                {response?.markedBy && <span>{response.markedBy}</span>}
-                {response?.distanceBucket && (
-                  <AuditDistanceBadge
-                    bucket={response.distanceBucket}
-                    distanceM={response.distanceFromCampusM}
-                    size="sm"
-                  />
-                )}
-              </div>
-              {response?.note && (
-                <div className="text-xs mt-1 text-muted-foreground italic">"{response.note}"</div>
-              )}
-            </div>
-          ))}
-        </div>
-      </SheetContent>
-    </Sheet>
-  )
-}
-```
+- Projection mode.
+- PDF export.
+- Excel export.
+- Compare page.
+- All animations refined.
+- All accessibility checks pass.
+- Full Playwright suite green.
+- Hebrew copy reviewed by rosh yeshiva.
 
----
+**Acceptance gate:** All twelve use cases pass. All QA checklists from §22 pass. Privacy review complete.
 
-# חלק ל"ה — Projection Mode (קוד מלא)
-
-## 35.1 `src/components/audit/AuditProjectionMode.tsx`
-
-```tsx
-// src/components/audit/AuditProjectionMode.tsx
-import { useAuditUiStore } from '@/store/auditUiStore'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuditStats } from '@/hooks/useAuditStats'
-import { motion, AnimatePresence } from 'framer-motion'
-import CountUp from 'react-countup'
-import { AuditMap } from './AuditMap'
-import { AuditHeatmap } from './AuditHeatmap'
-import { AuditClassGrid } from './AuditClassGrid'
-import { AuditActivityFeed } from './AuditActivityFeed'
-
-export function AuditProjectionMode() {
-  const activeTab = useAuditUiStore(s => s.activeTab)
-  const session = useAuditStore(s => s.session)
-  const stats = useAuditStats()
-
-  if (!session) return null
-
-  return (
-    <div className="fixed inset-0 bg-black text-white z-50 p-12 audit-projection-mode overflow-hidden">
-      <div className="grid grid-cols-12 gap-8 h-full">
-        {/* Left: massive KPI numbers */}
-        <div className="col-span-3 flex flex-col justify-center gap-6">
-          <ProjKpi label="נוכח" value={stats.byCategory.IN_YESHIVA} color="text-emerald-400" />
-          <ProjKpi label="עם אישור" value={stats.byCategory.OUT_PERMIT} color="text-blue-400" />
-          <ProjKpi label="ללא אישור" value={stats.byCategory.OUT_NO_PERMIT} color="text-red-400 animate-pulse" />
-          <ProjKpi label="לא ידוע" value={stats.byCategory.UNKNOWN} color="text-amber-400" />
-        </div>
-
-        {/* Right: rotating tab content */}
-        <div className="col-span-9 rounded-3xl bg-gray-900 p-6 overflow-hidden">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeTab}
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              transition={{ duration: 0.4 }}
-              className="h-full"
-            >
-              {activeTab === 'grid' && <AuditClassGrid />}
-              {activeTab === 'heatmap' && <AuditHeatmap />}
-              {activeTab === 'map' && session.mode === 'LOCATION' && <AuditMap />}
-              {activeTab === 'feed' && <AuditActivityFeed />}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </div>
-
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-center text-sm opacity-50">
-        ביקורת {session.mode === 'MANUAL' ? 'מהירה' : 'מיקום'} • החלה ב-{new Date(session.startedAt).toLocaleTimeString('he-IL')}
-      </div>
-    </div>
-  )
-}
-
-function ProjKpi({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div>
-      <div className={`text-[8rem] font-black leading-none tabular-nums ${color}`}>
-        <CountUp end={value} duration={0.6} preserveValue />
-      </div>
-      <div className="text-2xl uppercase tracking-wide text-gray-400 mt-2">{label}</div>
-    </div>
-  )
-}
-```
+## 23.6 Phase 5 — Rollout (Week 6)
 
----
+**Goal:** Deployed to production safely.
 
-# חלק ל"ו — Export PDF / Excel (קוד מלא)
-
-## 36.1 `src/lib/audit/exportPdf.ts`
-
-```ts
-// src/lib/audit/exportPdf.ts
-import jsPDF from 'jspdf'
-import autoTable from 'jspdf-autotable'
-import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
-
-const HEBREW_HELLO = 'עברית' // placeholder
-
-export function exportAuditPdf(data: {
-  session: AuditSession
-  responses: AuditResponse[]
-  alerts: AuditAlert[]
-  kpis: AuditKpis
-}) {
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' })
-
-  // RTL via 'rtl' flag in autotable
-  doc.setLanguage('he-IL')
-  doc.setFontSize(18)
-  doc.text('דוח ביקורת פנימית', 300, 50, { align: 'center' })
-
-  doc.setFontSize(10)
-  doc.text(
-    `מצב: ${data.session.mode === 'MANUAL' ? 'מהיר' : 'מיקום'} | החלה: ${new Date(data.session.startedAt).toLocaleString('he-IL')}`,
-    300, 70, { align: 'center' }
-  )
-
-  // KPIs
-  autoTable(doc, {
-    startY: 90,
-    head: [['קטגוריה', 'מספר']],
-    body: [
-      ['נוכח',          (data.kpis.byCategory.IN_YESHIVA ?? 0).toString()],
-      ['בחוץ עם אישור', (data.kpis.byCategory.OUT_PERMIT ?? 0).toString()],
-      ['בחוץ ללא אישור',(data.kpis.byCategory.OUT_NO_PERMIT ?? 0).toString()],
-      ['לא ידוע',       (data.kpis.byCategory.UNKNOWN ?? 0).toString()],
-      ['ממתין',         (data.kpis.byCategory.PENDING ?? 0).toString()],
-    ],
-    theme: 'striped',
-  })
-
-  // By class
-  autoTable(doc, {
-    head: [['כיתה', 'סה"כ', 'נוכח', 'עם אישור', 'ללא אישור', 'לא ידוע']],
-    body: Object.entries(data.kpis.byClass).map(([cid, s]) => [
-      cid, String(s.total), String(s.in_yeshiva), String(s.out_permit),
-      String(s.out_no_permit), String(s.unknown),
-    ]),
-    theme: 'grid',
-  })
-
-  // Alerts
-  if (data.alerts.length > 0) {
-    doc.addPage()
-    doc.setFontSize(14)
-    doc.text('אזעקות', 300, 50, { align: 'center' })
-    autoTable(doc, {
-      startY: 70,
-      head: [['זמן', 'תלמיד', 'מרחק', 'סטטוס']],
-      body: data.alerts.map(a => [
-        new Date(a.triggeredAt).toLocaleTimeString('he-IL'),
-        a.studentId.slice(0, 8),
-        `${Math.round(a.distanceM)}m`,
-        a.acknowledgedAt ? 'טופלה' : 'פתוחה',
-      ]),
-    })
-  }
-
-  doc.save(`audit-${data.session.id.slice(0, 8)}-${new Date(data.session.startedAt).toISOString().slice(0, 10)}.pdf`)
-}
-```
+**Deliverables:**
 
-## 36.2 `src/lib/audit/exportExcel.ts`
-
-```ts
-// src/lib/audit/exportExcel.ts
-import * as XLSX from 'xlsx'
-import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
-
-export function exportAuditExcel(data: {
-  session: AuditSession
-  responses: AuditResponse[]
-  alerts: AuditAlert[]
-  kpis: AuditKpis
-}) {
-  const wb = XLSX.utils.book_new()
-
-  // Sheet: Summary
-  const summary = [
-    ['ID', data.session.id],
-    ['מצב', data.session.mode],
-    ['החלה', data.session.startedAt],
-    ['הסתיימה', data.session.closedAt ?? '—'],
-    ['כיתות', data.session.classIds.join(', ')],
-    ['סה"כ תלמידים', data.session.totalStudents],
-    [],
-    ['קטגוריה', 'מספר'],
-    ['נוכח',          data.kpis.byCategory.IN_YESHIVA ?? 0],
-    ['בחוץ עם אישור', data.kpis.byCategory.OUT_PERMIT ?? 0],
-    ['בחוץ ללא אישור',data.kpis.byCategory.OUT_NO_PERMIT ?? 0],
-    ['לא ידוע',       data.kpis.byCategory.UNKNOWN ?? 0],
-  ]
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), 'סיכום')
-
-  // Sheet: By class
-  const byClass = [
-    ['כיתה', 'סה"כ', 'נוכח', 'עם אישור', 'ללא אישור', 'לא ידוע', 'ממתין'],
-    ...Object.entries(data.kpis.byClass).map(([cid, s]) =>
-      [cid, s.total, s.in_yeshiva, s.out_permit, s.out_no_permit, s.unknown, s.pending]
-    ),
-  ]
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(byClass), 'לפי כיתה')
-
-  // Sheet: Responses (raw)
-  const respRows = [
-    ['תלמיד ID', 'כיתה', 'קטגוריה', 'סומן ע"י', 'זמן סימון', 'מרחק (m)', 'GPS status'],
-    ...data.responses.map(r => [
-      r.studentId, r.classId, r.category, r.markedBy ?? '',
-      r.markedAt ?? '', r.distanceFromCampusM ?? '', r.gpsStatus ?? '',
-    ]),
-  ]
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(respRows), 'תגובות מלאות')
-
-  // Sheet: Alerts
-  if (data.alerts.length > 0) {
-    const alertRows = [
-      ['זמן', 'תלמיד ID', 'מרחק (m)', 'חומרה', 'נצפה ע"י', 'זמן צפייה'],
-      ...data.alerts.map(a => [
-        a.triggeredAt, a.studentId, a.distanceM, a.severity,
-        a.acknowledgedBy ?? '', a.acknowledgedAt ?? '',
-      ]),
-    ]
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(alertRows), 'אזעקות')
-  }
-
-  XLSX.writeFile(wb, `audit-${data.session.id.slice(0, 8)}.xlsx`)
-}
-```
+- Production migration applied (with backup).
+- Edge Function deployed to production.
+- Frontend deployed to production behind a feature flag.
+- Flag enabled for admin first; one audit run in production with monitoring active.
+- Flag enabled for all users.
+- Old RollCall route redirected to new audit landing.
+- Old RollCall code marked deprecated (not deleted; cleanup in a later sprint).
+- Training session with admin (30 min).
+- Training notes sent to supervisors (in-app and WhatsApp).
+- Student onboarding card added to the student home.
 
----
+**Acceptance gate:** 48 hours of production operation with no Sev-1 incidents and at least three real audits completed successfully.
 
-# חלק ל"ז — Vitest Test Files (קוד מלא)
-
-## 37.1 `src/lib/audit/__tests__/haversine.test.ts`
-
-```ts
-// src/lib/audit/__tests__/haversine.test.ts
-import { describe, test, expect } from 'vitest'
-import { haversineMeters, distanceFromCampus, CAMPUS_LAT, CAMPUS_LNG } from '../haversine'
-
-describe('haversine', () => {
-  test('returns 0 for same point', () => {
-    expect(haversineMeters(31.5, 35.1, 31.5, 35.1)).toBe(0)
-  })
-
-  test('returns positive for different points', () => {
-    expect(haversineMeters(CAMPUS_LAT, CAMPUS_LNG, 31.5, 35.0)).toBeGreaterThan(0)
-  })
-
-  test('symmetric', () => {
-    const a = haversineMeters(31.5, 35.1, 32.0, 34.8)
-    const b = haversineMeters(32.0, 34.8, 31.5, 35.1)
-    expect(a).toBeCloseTo(b, 0)
-  })
-
-  test('distanceFromCampus returns 0 for campus coords', () => {
-    expect(distanceFromCampus(CAMPUS_LAT, CAMPUS_LNG)).toBe(0)
-  })
-
-  test('returns NaN for invalid inputs', () => {
-    expect(haversineMeters(NaN, 0, 0, 0)).toBeNaN()
-  })
-
-  test('matches expected distance Hebron→Jerusalem (~30km)', () => {
-    const d = haversineMeters(CAMPUS_LAT, CAMPUS_LNG, 31.7833, 35.2167)
-    expect(d).toBeGreaterThan(25000)
-    expect(d).toBeLessThan(40000)
-  })
-})
-```
+## 23.7 What is explicitly deferred to post-launch
 
-## 37.2 `src/lib/audit/__tests__/distanceBuckets.test.ts`
-
-```ts
-// src/lib/audit/__tests__/distanceBuckets.test.ts
-import { describe, test, expect } from 'vitest'
-import { bucketFromMeters, formatDistance, getBucketMeta } from '../distanceBuckets'
-
-describe('distanceBuckets', () => {
-  test.each([
-    [0,    'GREEN'],
-    [100,  'GREEN'],
-    [300,  'GREEN'],
-    [301,  'BLUE'],
-    [500,  'BLUE'],
-    [1000, 'BLUE'],
-    [1001, 'ORANGE'],
-    [3000, 'ORANGE'],
-    [5000, 'ORANGE'],
-    [5001, 'RED'],
-    [50000,'RED'],
-  ])('%i m → %s', (m, expected) => {
-    expect(bucketFromMeters(m)).toBe(expected)
-  })
-
-  test('null/undefined → null', () => {
-    expect(bucketFromMeters(null)).toBeNull()
-    expect(bucketFromMeters(undefined)).toBeNull()
-    expect(bucketFromMeters(-5)).toBeNull()
-    expect(bucketFromMeters(NaN)).toBeNull()
-  })
-
-  test('formatDistance', () => {
-    expect(formatDistance(null)).toBe('—')
-    expect(formatDistance(99)).toBe('99m')
-    expect(formatDistance(1234)).toBe('1.2 ק"מ')
-  })
-
-  test('getBucketMeta returns correct color', () => {
-    expect(getBucketMeta('GREEN').color).toBe('#10b981')
-    expect(getBucketMeta('RED').color).toBe('#ef4444')
-  })
-})
-```
+- Slack/email notifications for CRITICAL alerts (would be Phase 6).
+- Audit templates (saved presets).
+- Automatic recurring audits.
+- Parent-facing summary.
+- RLS migration.
+- 2FA for admin.
+- Native app.
+- Geofence polygons (currently circles).
+- Geographic heatmap.
+- Trend dashboards.
 
-## 37.3 `src/lib/audit/__tests__/gpsCollector.test.ts`
-
-```ts
-// src/lib/audit/__tests__/gpsCollector.test.ts
-import { describe, test, expect, beforeEach, vi } from 'vitest'
-import { collectGps } from '../gpsCollector'
-
-beforeEach(() => {
-  // @ts-ignore
-  global.navigator = { geolocation: undefined, onLine: true, permissions: undefined }
-})
-
-describe('collectGps', () => {
-  test('returns UNAVAILABLE if no geolocation', async () => {
-    const r = await collectGps()
-    expect(r.status).toBe('UNAVAILABLE')
-  })
-
-  test('returns OFFLINE when navigator.onLine = false', async () => {
-    // @ts-ignore
-    global.navigator = {
-      geolocation: { getCurrentPosition: vi.fn() },
-      onLine: false,
-    }
-    const r = await collectGps()
-    expect(r.status).toBe('OFFLINE')
-  })
-
-  test('returns OK on success', async () => {
-    // @ts-ignore
-    global.navigator = {
-      onLine: true,
-      geolocation: {
-        getCurrentPosition: (success: any) =>
-          success({ coords: { latitude: 31.5, longitude: 35.1, accuracy: 10 }, timestamp: 1 }),
-      },
-    }
-    const r = await collectGps()
-    expect(r.status).toBe('OK')
-    if (r.status === 'OK') {
-      expect(r.lat).toBe(31.5)
-      expect(r.lng).toBe(35.1)
-      expect(r.accuracyM).toBe(10)
-    }
-  })
-
-  test('returns LOW_ACCURACY when accuracy > threshold', async () => {
-    // @ts-ignore
-    global.navigator = {
-      onLine: true,
-      geolocation: {
-        getCurrentPosition: (success: any) =>
-          success({ coords: { latitude: 31.5, longitude: 35.1, accuracy: 5000 }, timestamp: 1 }),
-      },
-    }
-    const r = await collectGps({ maxAccuracyM: 1000 })
-    expect(r.status).toBe('LOW_ACCURACY')
-  })
-
-  test('returns DENIED on PERMISSION_DENIED', async () => {
-    // @ts-ignore
-    global.navigator = {
-      onLine: true,
-      geolocation: {
-        getCurrentPosition: (_s: any, fail: any) => fail({ code: 1, message: 'denied' }),
-      },
-    }
-    const r = await collectGps()
-    expect(r.status).toBe('DENIED')
-  })
-})
-```
+## 23.8 Total budget
 
-## 37.4 `src/store/__tests__/auditStore.test.ts`
-
-```ts
-// src/store/__tests__/auditStore.test.ts
-import { describe, test, expect, beforeEach, vi } from 'vitest'
-import { useAuditStore } from '../auditStore'
-import type { AuditSession, AuditResponse } from '@/types/audit'
-
-vi.mock('@/lib/api', () => ({
-  api: {
-    openAudit: vi.fn(),
-    getActiveAudit: vi.fn(),
-    getAuditFull: vi.fn(),
-    closeAudit: vi.fn(),
-    abortAudit: vi.fn(),
-    submitAuditResponse: vi.fn(),
-    acknowledgeAuditAlert: vi.fn(),
-  },
-}))
-
-const sampleSession = (overrides?: Partial<AuditSession>): AuditSession => ({
-  id: 's1', mode: 'MANUAL', status: 'ACTIVE',
-  classIds: ['א'], totalStudents: 10, startedBy: 'admin',
-  startedAt: new Date().toISOString(),
-  closedAt: null, closedBy: null, notes: null, settings: {},
-  createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-  ...overrides,
-})
-
-describe('auditStore', () => {
-  beforeEach(() => {
-    useAuditStore.getState().reset()
-  })
-
-  test('initial state', () => {
-    const s = useAuditStore.getState()
-    expect(s.session).toBeNull()
-    expect(s.responses.size).toBe(0)
-    expect(s.alerts).toEqual([])
-  })
-
-  test('upsertResponse adds and updates by studentId', () => {
-    const r: AuditResponse = {
-      id: 'r1', sessionId: 's1', studentId: 'stu1', classId: 'א',
-      category: 'PENDING', markedBy: null, markedAt: null,
-      gpsLat: null, gpsLng: null, gpsAccuracyM: null,
-      distanceFromCampusM: null, distanceBucket: null, gpsStatus: null,
-      departureId: null, note: null,
-      createdAt: '', updatedAt: '',
-    }
-    useAuditStore.getState().upsertResponse(r)
-    expect(useAuditStore.getState().responses.get('stu1')?.category).toBe('PENDING')
-
-    useAuditStore.getState().upsertResponse({ ...r, category: 'IN_YESHIVA' })
-    expect(useAuditStore.getState().responses.get('stu1')?.category).toBe('IN_YESHIVA')
-    expect(useAuditStore.getState().responses.size).toBe(1)
-  })
-
-  test('insertAlert prepends', () => {
-    const a = { id: 'a1', sessionId: 's1', studentId: 'st1', triggeredAt: 't',
-                distanceM: 6000, gpsLat: null, gpsLng: null, severity: 'CRITICAL' as const,
-                acknowledgedBy: null, acknowledgedAt: null, note: null }
-    useAuditStore.getState().insertAlert(a)
-    expect(useAuditStore.getState().alerts).toHaveLength(1)
-  })
-})
-```
+160-200 engineer-hours, 4-6 calendar weeks. The range reflects honest uncertainty about iOS quirks and Hebrew typography refinement.
 
 ---
-
-# חלק ל"ח — Wireframes נוספים (ASCII art מפורט)
 
-## 38.1 דף Landing — Past Audits
+# Part 24 — Rollout Strategy
 
-```
-╔══════════════════════════════════════════════════════════════════════╗
-║  ← אדמין › ביקורת פנימית                              [+ פתח חדשה]  ║
-║                                                                      ║
-║  ┌────────────────────────────────────────────────────────────────┐ ║
-║  │ ⚡ ביקורת פעילה כעת — ביקורת מהירה                              │ ║
-║  │ החלה ב-09:15. 8 דקות עברו. [חזור לסשן →]                       │ ║
-║  └────────────────────────────────────────────────────────────────┘ ║
-║                                                                      ║
-║  [סנן: כל המצבים ▼]   [חפש...                       ]                ║
-║                                                                      ║
-║  ─────────────── 15/05/2026 (שני) ───────────────                    ║
-║  ┌────────────────────────────────────────────────────────────────┐ ║
-║  │ 📍 ביקורת מיקום   13:30   16 כיתות   381 תלמידים   [CLOSED ✓]  │ ║
-║  │ "ביקורת אחר צהריים"                                            │ ║
-║  └────────────────────────────────────────────────────────────────┘ ║
-║  ┌────────────────────────────────────────────────────────────────┐ ║
-║  │ ⚡ ביקורת מהירה   09:15   16 כיתות   381 תלמידים   [ACTIVE]    │ ║
-║  └────────────────────────────────────────────────────────────────┘ ║
-║                                                                      ║
-║  ─────────────── 14/05/2026 (ראשון) ───────────────                  ║
-║  ┌────────────────────────────────────────────────────────────────┐ ║
-║  │ 📍 ביקורת מיקום   16:00   16 כיתות   381 תלמידים   [CLOSED ✓]  │ ║
-║  └────────────────────────────────────────────────────────────────┘ ║
-║                                                                      ║
-║  ─────────────── 13/05/2026 (ש') ───────────────                     ║
-║   (אין ביקורות)                                                      ║
-║                                                                      ║
-╚══════════════════════════════════════════════════════════════════════╝
-```
-
-## 38.2 דף Live — מסך מלא במצב LOCATION
-
-```
-╔════════════════════════════════════════════════════════════════════════════╗
-║ ← אדמין › ביקורת › פעילה                                                   ║
-║                                                                            ║
-║ 📍 ביקורת מיקום                       ⏱ 02:34 / 02:00       🔊 📺 [סיים]  ║
-║ החלה: 09:15  |  סוג: LOCATION  |  16 כיתות  |  381 תלמידים                ║
-║                                                                            ║
-║ ╔═════════ KPIs ═════════════════════════════════════════════════════════╗ ║
-║ ║ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                       ║ ║
-║ ║ │ 312 │ │  18 │ │  11 │ │   3 │ │  37 │ │  3⚠ │                       ║ ║
-║ ║ │נוכח │ │עם א'│ │קרוב │ │רחוק │ │ ??? │ │אזעקה│                       ║ ║
-║ ║ └─────┘ └─────┘ └─────┘ └─────┘ └─────┘ └─────┘                       ║ ║
-║ ╚════════════════════════════════════════════════════════════════════════╝ ║
-║                                                                            ║
-║ [🟢 Grid] [🔥 Heatmap] [🗺 מפה] [📜 פיד]                                  ║
-║                                                                            ║
-║ ╔══════════════════════════════════════════════════════════════════════╗  ║
-║ ║                                                                      ║  ║
-║ ║                    🗺  Map View                                       ║  ║
-║ ║                                                                      ║  ║
-║ ║       ┌────────────────────────────────────────┐  ┌──────────────┐  ║  ║
-║ ║       │                                        │  │  מקרא        │  ║  ║
-║ ║       │       🟢                               │  │  🟢 בישיבה   │  ║  ║
-║ ║       │      🟢🟢   🟢                          │  │  🔵 קרוב     │  ║  ║
-║ ║       │      🟢🏫🟢                            │  │  🟠 חברון    │  ║  ║
-║ ║       │     🟢🟢🟢🟢                            │  │  🔴 רחוק     │  ║  ║
-║ ║       │      🟢🔵                              │  └──────────────┘  ║  ║
-║ ║       │         🟠                             │                    ║  ║
-║ ║       │                              🔴 (פולס)│                    ║  ║
-║ ║       └────────────────────────────────────────┘                    ║  ║
-║ ║                                                                      ║  ║
-║ ╚══════════════════════════════════════════════════════════════════════╝  ║
-║                                                                            ║
-║ ┌─── אזעקות ──────────┐  ┌─── פעילות חי ────────────────────────────────┐ ║
-║ │ ⚠ יהושע — 38km     │  │ 🟢 09:17:42 הרב יעקב סימן את דוד — נוכח      │ ║
-║ │   09:17 [סמן כנצפה]│  │ 🟢 09:17:40 GPS: יוסף — בישיבה (218m)         │ ║
-║ │                    │  │ 🔴 09:17:38 GPS: יהושע — מחוץ לטווח! (38km)   │ ║
-║ │ ✓ 0 אזעקות נצפו    │  │ 🔵 09:17:35 AUTO: נחמן — יציאה מאושרת          │ ║
-║ └────────────────────┘  └────────────────────────────────────────────────┘ ║
-╚════════════════════════════════════════════════════════════════════════════╝
-```
+## 24.1 Why a phased rollout
 
-## 38.3 דף Live — Tab Grid
+The audit subsystem affects three user groups simultaneously. A bug that breaks an audit is highly visible. The rollout reduces blast radius.
 
-```
-╔════════════════════════════════════════════════════════════════════════╗
-║ [🟢 Grid] [🔥 Heatmap] [🗺 מפה] [📜 פיד]                              ║
-║                                                                        ║
-║  ┌─────────────────────────────────────────────────────────────────┐  ║
-║  │ 🔴 כיתה הרב יעקב                                                 │  ║
-║  │ 21/25 (84%)        ───────────────────████░░░                   │  ║
-║  │ ✅ 19  🔵 1  🔴 1  ⚪ 0                                          │  ║
-║  │ ⚠ אזעקה: 1 תלמיד מחוץ לטווח                                     │  ║
-║  └─────────────────────────────────────────────────────────────────┘  ║
-║  ┌─────────────────────────────────────────────────────────────────┐  ║
-║  │ ⏳ כיתה הרב משה                                                  │  ║
-║  │ 0/20 (0%)           ░░░░░░░░░░░░░░░░░░░░░░                      │  ║
-║  │ הרכז עוד לא הגיב — [שלח push חוזר]                              │  ║
-║  └─────────────────────────────────────────────────────────────────┘  ║
-║  ┌─────────────────────────────────────────────────────────────────┐  ║
-║  │ ✓ כיתה הרב הלל                                                   │  ║
-║  │ 16/16 (100%)        ████████████████████████                    │  ║
-║  │ ✅ 14  🔵 2  🔴 0  ⚪ 0                                          │  ║
-║  └─────────────────────────────────────────────────────────────────┘  ║
-║                                                                        ║
-║  ... עוד 13 כיתות                                                      ║
-║                                                                        ║
-╚════════════════════════════════════════════════════════════════════════╝
-```
+## 24.2 The rollout sequence
 
-## 38.4 מסך תלמיד — Sheet GPS
+**Stage 1 — Internal validation (1 day, end of Phase 4).** Engineer-driven. Run UC-1 through UC-12 on staging with engineering team acting as users. Fix anything that doesn't pass.
 
-```
-═══════════════════════════════════════
-                                       
-              📍                       
-                                       
-       בקרת מיקום מהירה                
-                                       
-   ההנהלה מבקשת לוודא שאתה            
-   בישיבה.                            
-                                       
-   האפליקציה תשלח את מיקומך הנוכחי.   
-                                       
-   ┌─────────────────────────────────┐ 
-   │                                 │ 
-   │      ✓ אשר ושלח מיקום           │ 
-   │                                 │ 
-   └─────────────────────────────────┘ 
-                                       
-   ┌─────────────────────────────────┐ 
-   │      ✗ אני לא יכול / לא בישיבה  │ 
-   └─────────────────────────────────┘ 
-                                       
-   המיקום ישמר רק במהלך הביקורת.      
-                                       
-═══════════════════════════════════════
-```
+**Stage 2 — Admin-only soft launch (2 days, start of Phase 5).** Production deployment with feature flag enabled for the admin's user ID only. Admin runs 2-3 audits with the new system, but the **old RollCall remains the official mechanism**. New audit results are observed but not relied upon for institutional decisions. The admin's job during this stage is to find friction points.
 
----
+**Stage 3 — Real audit in production (1 day).** The admin runs a real audit using the new system. The rosh yeshiva uses the result. The team monitors closely.
 
-# חלק ל"ט — Accessibility Audit Checklist
-
-| בדיקה | מצב נדרש | רכיב |
-|--------|------------|------|
-| כפתורים עם `aria-label` בעברית | ✓ | כל הכפתורים |
-| Sufficient color contrast (WCAG AA ≥ 4.5:1) | ✓ | כל הטקסטים |
-| גודל target ≥ 44px | ✓ | כפתורי "נוכח" / "עם אישור" / "ללא אישור" |
-| תמיכה ב-screen reader | ✓ | אזעקות יקראו "התראה: תלמיד X במרחק Y" |
-| Focus indicator ברור | ✓ | כל הרכיבים האינטראקטיביים |
-| Keyboard navigation | ✓ | Tab, Enter, ESC עובדים |
-| `role="alert"` על אזעקות | ✓ | AuditAlertList |
-| `aria-live="polite"` על KPIs | ✓ | AuditKpiRow |
-| `prefers-reduced-motion` מכובד | ✓ | אנימציות נמוכות אם נדרש |
-| RTL נכון בכל הטקסטים | ✓ | dir="rtl" על html |
-| Numbers ב-LTR enclave | ✓ | `<span dir="ltr">` סביב מספרים |
-| Skip links | ✓ | "דלג לתוכן" |
-| Color != only signal | ✓ | תמיד יש גם אייקון / טקסט |
+**Stage 4 — Full enablement (1 day).** Feature flag turned on for everyone. RollCall is redirected to the new landing. Communication sent to supervisors and students.
 
----
+**Stage 5 — Stabilization (1 week).** Monitoring active. Any bug reports treated as Sev-2+ until proven otherwise.
 
-# חלק מ' — Performance Budget
-
-| מדד | יעד | מימוש |
-|------|-----|--------|
-| Largest Contentful Paint (LCP) | < 2.5s | code splitting + lazy load של Leaflet |
-| First Input Delay (FID) | < 100ms | Zustand בלי middleware כבד |
-| Cumulative Layout Shift (CLS) | < 0.1 | קומפוננטים עם min-height |
-| Total JS bundle gzip | < 350KB | code splitting per route |
-| Time to Interactive | < 3s | preload critical fonts |
-| Realtime → UI update | < 800ms | direct postgres_changes filter |
-| RPC open_audit | p95 < 500ms | index on status, JSONB GIN |
-| RPC submit_audit_response | p95 < 200ms | UPDATE WHERE PK |
-| Map render (50 markers) | < 200ms | MarkerCluster |
-| Map render (300 markers) | < 600ms | MarkerCluster + canvas |
-| Memory consumption (live) | < 100MB | proper cleanup of subscriptions |
+## 24.3 The kill switch
 
----
+A feature flag exists for the entire audit subsystem. If a Sev-1 issue is found in stages 3, 4, or 5:
 
-# חלק מ"א — Migration Sequence ו-Rollback
+1. Flip the flag off.
+2. The audit landing page reverts to the old RollCall page.
+3. Active sessions: closed administratively via SQL.
+4. Communicate to users.
+5. Engineer fixes; re-run rollout.
 
-## 41.1 סדר מיגרציה (forward)
+The kill switch is reachable in under 60 seconds.
 
-```
-ORDER 1: pgcrypto, pg_cron, pg_trgm extensions
-ORDER 2: audit_sessions table
-ORDER 3: audit_responses table (depends on audit_sessions, students)
-ORDER 4: audit_response_log table
-ORDER 5: audit_alerts table
-ORDER 6: audit_push_log table
-ORDER 7: indices
-ORDER 8: triggers (tg_audit_sessions_updated_at, tg_audit_responses_log_change, tg_audit_responses_alert)
-ORDER 9: helper functions (fn_haversine_m, fn_distance_bucket)
-ORDER 10: RPCs (8 functions)
-ORDER 11: cron schedule
-ORDER 12: publication setup
-```
+## 24.4 Communication plan
 
-## 41.2 Rollback SQL (DANGEROUS — לא להשתמש אלא אם בטוח)
-
-```sql
--- ⚠ זה ימחק את כל היסטוריית הביקורות. אסור להריץ ב-production
--- בלי backup מוכן.
-BEGIN;
-
--- Remove cron
-SELECT cron.unschedule('tick_audit_timeout');
-
--- Drop publication members
-ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_sessions;
-ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_responses;
-ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_alerts;
-
--- Drop RPCs
-DROP FUNCTION IF EXISTS public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT);
-DROP FUNCTION IF EXISTS public.submit_audit_response(UUID, UUID, TEXT, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.close_audit(UUID, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.abort_audit(UUID, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.get_active_audit();
-DROP FUNCTION IF EXISTS public.get_audit_full(UUID);
-DROP FUNCTION IF EXISTS public.compute_audit_kpis(UUID);
-DROP FUNCTION IF EXISTS public.acknowledge_audit_alert(UUID, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.list_past_audits(TEXT, TIMESTAMPTZ, TIMESTAMPTZ, INT);
-DROP FUNCTION IF EXISTS public.tick_audit_timeout();
-DROP FUNCTION IF EXISTS public.fn_distance_bucket(DOUBLE PRECISION);
-DROP FUNCTION IF EXISTS public.fn_haversine_m(DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION);
-
--- Drop triggers (auto-dropped with tables, but explicit for safety)
-DROP TRIGGER IF EXISTS tr_audit_responses_alert ON public.audit_responses;
-DROP TRIGGER IF EXISTS tr_audit_responses_log_change ON public.audit_responses;
-DROP TRIGGER IF EXISTS tr_audit_sessions_updated_at ON public.audit_sessions;
-
--- Drop tables
-DROP TABLE IF EXISTS public.audit_push_log;
-DROP TABLE IF EXISTS public.audit_alerts;
-DROP TABLE IF EXISTS public.audit_response_log;
-DROP TABLE IF EXISTS public.audit_responses;
-DROP TABLE IF EXISTS public.audit_sessions;
-
-COMMIT;
-```
+- **Admin:** 1:1 training, 30 min. Walkthrough of UC-1, UC-2, UC-7. Hand off a one-page reference card in Hebrew.
+- **Supervisors:** Asynchronous WhatsApp message in Hebrew, plus a 90-second in-app video the first time they open the supervisor panel. Plus a 15-min Q&A at the next staff meeting.
+- **Students:** A first-launch in-app card: "אנחנו עוברים למערכת חדשה לבקרת מיקום. הנה איך זה עובד..." with two screenshots.
+- **Rosh yeshiva:** A short briefing from the admin, with this document (Pass 1 sections) as backup.
+- **Parents:** No proactive communication. If they ask, the admin uses the privacy diagnostic page.
 
----
+## 24.5 Success criteria for declaring rollout complete
 
-# חלק מ"ב — RLS Policies (תוכנית עתידית)
-
-לאחר שתוכרז RLS לכלל הפרויקט (TODO ב־CLAUDE.md):
-
-```sql
--- Sessions: readable by all authenticated; writable only by admin role
-ALTER TABLE public.audit_sessions ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY audit_sessions_read
-  ON public.audit_sessions FOR SELECT
-  USING (true);
-
-CREATE POLICY audit_sessions_write_admin
-  ON public.audit_sessions FOR ALL
-  USING (auth.jwt() ->> 'role' = 'admin')
-  WITH CHECK (auth.jwt() ->> 'role' = 'admin');
-
--- Responses: read by all authenticated; write own (student) OR same-class (supervisor) OR admin
-ALTER TABLE public.audit_responses ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY audit_responses_read
-  ON public.audit_responses FOR SELECT
-  USING (true);
-
-CREATE POLICY audit_responses_write_own_student
-  ON public.audit_responses FOR UPDATE
-  USING (
-    student_id::text = auth.jwt() ->> 'student_id'
-    OR auth.jwt() ->> 'role' IN ('admin', 'supervisor')
-  );
-
--- Alerts: admin-only acknowledge
-ALTER TABLE public.audit_alerts ENABLE ROW LEVEL SECURITY;
-CREATE POLICY audit_alerts_admin
-  ON public.audit_alerts FOR ALL
-  USING (auth.jwt() ->> 'role' IN ('admin','supervisor'));
-```
+- 7 days of production operation.
+- ≥5 successful audits completed.
+- 0 Sev-1 incidents.
+- ≤2 Sev-2 incidents, all resolved.
+- ≥4/5 satisfaction rating from the admin.
+- No formal complaint from students or parents.
 
 ---
-
-# חלק מ"ג — CI / GitHub Actions
-
-```yaml
-# .github/workflows/audit-tests.yml
-name: Audit Module Tests
-
-on:
-  pull_request:
-    paths:
-      - 'src/lib/audit/**'
-      - 'src/components/audit/**'
-      - 'src/store/audit*.ts'
-      - 'src/hooks/useAudit*.ts'
-      - 'src/pages/admin/Audit*.tsx'
-      - 'src/types/audit.ts'
-      - 'supabase/migrations/*audit*.sql'
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint -- src/{lib,components,store,hooks,pages,types}/audit*
-      - run: npm run test -- src/lib/audit
-      - run: npm run build
-      - name: Bundle size check
-        run: |
-          test $(stat -c%s dist/assets/*.js | sort -n | tail -1) -lt 400000
-
-  e2e:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm ci
-      - run: npx playwright install --with-deps
-      - run: npm run e2e -- audit
-```
 
----
+# Part 25 — Risks and Mitigations
 
-# חלק מ"ד — Playwright E2E Tests (קוד מלא)
-
-## 44.1 `e2e/audit/manual-mode.spec.ts`
-
-```ts
-// e2e/audit/manual-mode.spec.ts
-import { test, expect } from '@playwright/test'
-
-test.describe('Manual audit happy path', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/admin/login')
-    await page.fill('input[type="password"]', process.env.E2E_ADMIN_PIN ?? '1234')
-    await page.click('text=כניסה')
-  })
-
-  test('admin opens manual audit, marks students, closes', async ({ page }) => {
-    await page.goto('/admin/audit')
-    await page.click('text=פתח ביקורת חדשה')
-
-    // Step 1: mode
-    await page.click('text=ביקורת מהירה')
-    await page.click('text=המשך')
-
-    // Step 2: classes
-    await page.check('input[id="select-all-classes"]')
-    await page.click('text=המשך')
-
-    // Step 3: confirm
-    await page.click('text=פתח ביקורת ⚡')
-
-    await expect(page).toHaveURL(/\/admin\/audit\/[a-f0-9-]+\/live/)
-    await expect(page.locator('text=ביקורת פעילה')).toBeVisible()
-
-    // KPIs should show
-    await expect(page.getByTestId('kpi-pending')).toContainText(/\d+/)
-
-    // Open class drawer
-    await page.locator('[data-testid="class-card"]').first().click()
-    await expect(page.locator('text=כיתה')).toBeVisible()
-
-    // Close session
-    await page.click('text=סיים ביקורת')
-    await page.click('text=אישור')
-    await expect(page).toHaveURL(/\/summary/)
-    await expect(page.locator('text=סיכום ביקורת')).toBeVisible()
-  })
-
-  test('refresh during active session preserves state', async ({ page }) => {
-    await page.goto('/admin/audit/new')
-    await page.click('text=ביקורת מהירה')
-    await page.click('text=המשך')
-    await page.check('input[id="select-all-classes"]')
-    await page.click('text=המשך')
-    await page.click('text=פתח ביקורת')
-
-    const url = page.url()
-    await page.reload()
-    expect(page.url()).toBe(url)
-    await expect(page.locator('text=ביקורת פעילה')).toBeVisible()
-  })
-
-  test('two admins cannot open concurrently', async ({ browser }) => {
-    const ctx1 = await browser.newContext()
-    const ctx2 = await browser.newContext()
-    const p1 = await ctx1.newPage()
-    const p2 = await ctx2.newPage()
-
-    // both login
-    for (const p of [p1, p2]) {
-      await p.goto('/admin/login')
-      await p.fill('input[type="password"]', '1234')
-      await p.click('text=כניסה')
-    }
-
-    // p1 opens audit
-    await p1.goto('/admin/audit/new')
-    await p1.click('text=ביקורת מהירה')
-    await p1.click('text=המשך')
-    await p1.check('input[id="select-all-classes"]')
-    await p1.click('text=המשך')
-    await p1.click('text=פתח ביקורת')
-    await expect(p1).toHaveURL(/\/live/)
-
-    // p2 tries to open another
-    await p2.goto('/admin/audit/new')
-    await p2.click('text=ביקורת מהירה')
-    await p2.click('text=המשך')
-    await p2.check('input[id="select-all-classes"]')
-    await p2.click('text=המשך')
-    await p2.click('text=פתח ביקורת')
-
-    await expect(p2.locator('text=AUDIT_ACTIVE').or(p2.locator('text=ביקורת פעילה כעת'))).toBeVisible()
-  })
-})
-```
+A real risk register. Risks are scored on likelihood (L), impact (I), and the resulting attention they warrant.
 
----
+## 25.1 Top risks
 
-# חלק מ"ה — Slack/Discord Notifications (אופציונלי)
-
-```ts
-// supabase/functions/notify-audit-alert/index.ts
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-const SLACK_WEBHOOK = Deno.env.get('SLACK_AUDIT_WEBHOOK')!
-
-interface AlertEvent {
-  alert_id: string
-  session_id: string
-  student_id: string
-  distance_m: number
-  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
-}
-
-Deno.serve(async (req) => {
-  const evt = (await req.json()) as AlertEvent
-  if (evt.severity !== 'CRITICAL') return new Response('ok')
-
-  const message = {
-    text: `🚨 Critical audit alert`,
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Critical:* Student \`${evt.student_id}\` is *${(evt.distance_m / 1000).toFixed(1)} km* from campus.`,
-        },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Open dashboard' },
-            url: `https://shavey-hevron.vercel.app/admin/audit/${evt.session_id}/live`,
-          },
-        ],
-      },
-    ],
-  }
-
-  await fetch(SLACK_WEBHOOK, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(message),
-  })
-
-  return new Response('sent')
-})
-```
+**R1. iOS Web Push reliability is below 95%.**
+L: Medium. I: High. iOS Safari Web Push requires "Add to Home Screen". Many students will not do this even after instruction.
+*Mitigation:* The system does not depend on push for correctness; it depends on push for *prompt notification*. If a student doesn't get the push, the supervisor manually marks them. The supervisor flow is the safety net.
+*Detection:* Monitor `audit_push_log.success` rate; if iOS specifically is <80%, escalate to UX review.
 
----
+**R2. GPS accuracy is unusable inside the main building.**
+L: Medium. I: High. The yeshiva's main beit midrash has thick stone walls. GPS in stone buildings is often poor.
+*Mitigation:* Set `maxAccuracyM=1000`; anything worse becomes `UNKNOWN`. Don't trust precise location indoors. The system is designed assuming GPS will be unreliable for ~10-20% of students.
+*Detection:* Track median `gpsAccuracyM`; if median is >500 m, location mode is degraded.
 
-# חלק מ"ו — Disaster Recovery Plan
+**R3. The admin doesn't adopt the new system.**
+L: Low (admin pushed for this). I: Critical (entire investment wasted).
+*Mitigation:* The admin co-designs the live dashboard. Their feedback in Stage 2 is incorporated. The 1:1 training is in person.
+*Detection:* Number of audits run in week 1, 2, 4, 8. If declining, intervene.
 
-## 46.1 תרחישים
+**R4. Supervisors find the panel slower than informal methods.**
+L: Medium. I: High. Some supervisors will prefer "I'll just text the admin who's missing".
+*Mitigation:* The supervisor experience is optimized for speed. 90 seconds is the budget. If real measurements show >180 seconds, the design has failed and needs rework.
+*Detection:* Measure median time-to-complete per supervisor; track per-supervisor adoption.
 
-| תרחיש | RTO | RPO | פעולה |
-|--------|-----|-----|--------|
-| Vercel down | 5 min | 0 | DNS switch ל-backup deployment |
-| Supabase DB down | 30 min | 5 min | Restore from latest backup |
-| מיגרציה הרסה data | 1h | 1h | Restore from snapshot |
-| VAPID key compromised | 1h | 0 | rotate keys, all students re-subscribe |
-| 50% מהתלמידים לא בקשה | 5 min | 0 | check push_token validity, run manual mode |
+**R5. Real-time data feels overwhelming to the admin.**
+L: Medium. I: Medium. A flood of updates is a real risk on the live dashboard.
+*Mitigation:* Animation discipline (§9.7); restrained KPI strip; explicit per-update animation budget.
+*Detection:* Subjective. Three reviewers rate "calmness" of the dashboard before launch.
 
-## 46.2 גיבויים
+**R6. Halachic-privacy concern is raised post-launch.**
+L: Low. I: Critical.
+*Mitigation:* Halachic review pre-launch by the rosh yeshiva. The 90-day retention, the consent flow, the no-photos policy all support this review.
+*Detection:* Listen for parent complaints; revisit data policy at 30, 60, 90 days post-launch.
 
-- **Supabase auto-backup:** daily snapshot, kept 7 days
-- **Manual snapshot:** לפני כל מיגרציה major
-- **Code:** git on GitHub
-- **Environment vars:** sealed in 1Password vault
-- **VAPID keys:** export to encrypted file in safe place
+**R7. Push notification rate limits hit (Apple specifically caps sender rate at ~20/sec).**
+L: Medium. I: Medium.
+*Mitigation:* Edge Function batches with concurrency 20. Logs each send to `audit_push_log`. Retries with backoff for 429 responses.
+*Detection:* `audit_push_log.error_message LIKE '%429%'` count.
 
----
+**R8. The 24-hour timeout closes a real audit prematurely.**
+L: Very low. I: Low (admin sees TIMED_OUT and opens a new one). Acceptable risk.
 
-# חלק מ"ז — Capacity Planning
+**R9. Concurrent admins step on each other's actions.**
+L: Low. I: Low.
+*Mitigation:* Single-active-session mutex; advisory locks in RPCs; last-write-wins with audit log.
 
-| מטריקה | היום | שנה הבאה | 3 שנים |
-|---------|------|-----------|---------|
-| תלמידים | 381 | ~450 | ~600 |
-| ביקורות / שבוע | 0 (חדש) | ~20 | ~30 |
-| Push notifications / חודש | 0 | ~20K | ~40K |
-| DB size (audit tables) | 0 | ~50MB | ~200MB |
-| Concurrent realtime users | 0 | 30 | 60 |
-| Edge function invocations / חודש | 0 | ~20K | ~40K |
+**R10. Supabase outage during a critical audit.**
+L: Very low. I: Critical (entire product offline).
+*Mitigation:* Acknowledged. Supabase's SLA is the bound. No app-level mitigation possible.
+*Detection:* Existing infrastructure monitoring.
 
-**Supabase free tier:** 500MB DB, 2GB egress. עד 600 תלמידים — סבבה. אחרי — Pro plan ($25/mo).
+**R11. The new system reveals an existing bug in `students` or `departures`.**
+L: Medium. I: Low to medium.
+*Mitigation:* The audit subsystem reads from those tables; it doesn't depend on them being perfect. Bugs discovered are handled as separate work items.
 
----
+**R12. Migration deployment fails halfway through.**
+L: Low. I: Medium.
+*Mitigation:* Migration runs in a transaction (BEGIN/COMMIT). Idempotent (IF NOT EXISTS throughout). Tested on staging first.
 
-# חלק מ"ח — Migration from current RollCall (Cleanup Tasks)
+**R13. The Hebrew rendering in PDF/Excel is wrong.**
+L: Medium. I: Low.
+*Mitigation:* Test PDF in modern Acrobat and Excel before launch. If pdf rendering is bad, fallback to Excel-only export in v1.
 
-הקוד הישן של RollCall שצריך להסיר אחרי deploy של החדש:
+## 25.2 Risk monitoring post-launch
 
-| קובץ / function | פעולה |
-|------------------|---------|
-| `src/pages/admin/RollCallPage.tsx` | DELETE |
-| Route `/admin/rollcall` ב-App.tsx | REPLACE → redirect to `/admin/audit` |
-| Realtime channel `location-requests` | DELETE listener בכל לקוח |
-| Realtime channel `audit-control` | DELETE listener |
-| HomePage hook listener `location-requests` | DELETE |
-| `ClassSupervisorDashboard.tsx` audit panel | REPLACE with new `SupervisorAuditPanel` |
-| `updateStudentLocation` RPC | KEEP (אחרים משתמשים), אבל לא בשימוש ל-audit |
-| `students.lastLocation` column | KEEP (תאימות לאחור) |
+A simple dashboard tracks the top risk indicators weekly:
 
----
+- Audit count
+- Push success rate
+- Median supervisor mark time
+- Median student response time
+- `UNKNOWN` rate per audit (high = many failures)
+- Alerts per audit (steady = healthy; spike = either an event or a bug)
+- Median GPS accuracy
+- Realtime disconnect events
 
-# חלק מ"ט — Internationalization Considerations
-
-המערכת כיום עברית בלבד. אם בעתיד תוסיף אנגלית:
-
-```ts
-// src/lib/audit/i18n.ts
-export const STRINGS = {
-  he: {
-    audit_title: 'ביקורת פנימית',
-    audit_open_new: 'פתח ביקורת חדשה',
-    mode_manual: 'ביקורת מהירה',
-    mode_location: 'ביקורת מיקום',
-    category_in_yeshiva: 'נוכח',
-    category_out_permit: 'בחוץ עם אישור',
-    category_out_no_permit: 'בחוץ ללא אישור',
-    category_unknown: 'לא ידוע',
-    // ... ~50 keys
-  },
-  en: {
-    audit_title: 'Internal Audit',
-    // ...
-  },
-}
-```
+Anomalies trigger investigation.
 
 ---
 
-# חלק נ' — תוכנית פיתוח של 30 ימים (gantt)
+# Part 26 — Alternative Approaches Considered
 
-```
-Day 1-2:   DB schema + RPC stubs
-Day 3-4:   RPC full implementations + tests
-Day 5:     Edge function send-audit-push
-Day 6-7:   TypeScript types + lib modules + tests
-Day 8-9:   Zustand stores + hooks + tests
-Day 10-12: Components: KPI, Class card/grid, Heatmap
-Day 13-14: Components: Map, Activity feed, Alerts
-Day 15-16: Pages: New + Live
-Day 17:    Pages: Summary + Compare + Landing
-Day 18:    Supervisor panel + Student sheet
-Day 19:    Projection mode + sounds
-Day 20:    Service worker integration
-Day 21:    Export PDF / Excel
-Day 22:    Design polish (colors, animations)
-Day 23:    Accessibility audit + fixes
-Day 24:    Performance optimization
-Day 25:    E2E tests
-Day 26:    Manual QA all flows
-Day 27:    Staging deploy + smoke test
-Day 28:    Production deploy
-Day 29:    Monitor + fix critical bugs
-Day 30:    User training + handoff
-```
-
----
-
-# חלק נ"א — Pitfalls נפוצים (וכיצד להימנע)
-
-1. **לא לשמור session_id ב-localStorage** — תמיד מ-DB.
-2. **לא לסמוך על Realtime לבד** — תמיד יש polling fallback של 30s.
-3. **לא לקרוא ל-RPC ב-loop** — Batch UPDATEs במקום.
-4. **לא להשתמש ב-`maximumAge` ב-getCurrentPosition** — תמיד `0`, אחרת ה-GPS חוזר מקאש.
-5. **לא לשמור GPS coords ב-clientside־only** — תמיד שלח ל-RPC, לא תרצה אחר כך לחפש את זה.
-6. **לא להריץ מיגרציה בלי backup** — חובה.
-7. **לא להוסיף indices כשהטבלה גדולה** — תמיד יוצר ל-CREATE INDEX CONCURRENTLY ב-production.
-8. **לא לשכוח לעדכן CLAUDE.md** — הקוד נוטה ל-rot ללא תיעוד.
-9. **לא להריץ test session ב-production** — תמיד staging.
-10. **לא לשכוח של pg_cron schedule** — יש מקרים בהם הוא נמחק.
+For posterity and to demonstrate the recommendation is informed:
 
----
+## 26.1 Pure-broadcast (current RollCall, refined)
 
-# חלק נ"ב — Code Review Checklist
-
-לפני merge:
-- [ ] כל המיגרציה idempotent (`IF NOT EXISTS`)
-- [ ] כל RPC עם `SECURITY DEFINER` + `GRANT EXECUTE`
-- [ ] כל hook עם cleanup ב־unmount
-- [ ] כל Zustand store תקין (לא mutating)
-- [ ] כל component עם `data-testid` למקומות קריטיים
-- [ ] כל באג מ-QA יש לו test
-- [ ] CLAUDE.md מעודכן
-- [ ] PR description ברור עם screenshots
-- [ ] No console.log / TODO
-- [ ] עברית בכל המלים בUI
-- [ ] dark mode עובד
-- [ ] ב-mobile עובד
+*Approach:* Keep the broadcast model but make the admin's screen better.
 
----
+*Rejected because:* The fundamental flaws — no persistence, no replay, single admin — are not fixable on the broadcast architecture. They are *features* of broadcasts.
 
-# חלק נ"ג — מסקנה
-
-**זהו מסמך תכנון מקיף.** כשנהיה מוכן להתחיל לכתוב קוד, הצעדים הם:
-
-1. **שלב 0:** branch חדש (`claude/internal-audit-v2`).
-2. **שלב 1:** הרץ את ה-SQL ב-staging Supabase.
-3. **שלב 2:** ודא טבלאות + RPCs עובדים ב-psql.
-4. **שלב 3:** הוסף Edge function + deploy.
-5. **שלב 4:** הוסף types + lib modules + tests.
-6. **שלב 5:** הוסף stores + hooks + tests.
-7. **שלב 6:** בנה components מלמטה למעלה (KPI → Card → Grid → Pages).
-8. **שלב 7:** הוסף pages + routing.
-9. **שלב 8:** הוסף SW integration.
-10. **שלב 9:** סיכומים + export.
-11. **שלב 10:** Polish (animations, sounds, projection).
-12. **שלב 11:** Tests E2E.
-13. **שלב 12:** Deploy ל-staging → QA → Production.
+## 26.2 Pure-polling
 
----
+*Approach:* Don't use realtime. The admin's dashboard polls `get_active_audit` every 2 seconds.
 
-**מסמך זה מקיף ~9,000+ שורות**, כולל קוד מלא של:
-- 4 טבלאות SQL
-- 8 RPCs PL/pgSQL
-- 6+ Edge Functions
-- 10+ TypeScript modules
-- 2 Zustand stores
-- 5+ React hooks
-- 15+ React components
-- 5 Pages
-- Service worker
-- CSS / Tailwind
-- E2E tests
-- Unit tests
-- ASCII wireframes
-- API contracts
-- Migration scripts
-- Rollback scripts
-- Deployment runbook
-- Monitoring plan
-- Training scripts
-- FAQ
-- Glossary
-
-**זה מסמך אחד שלם שמספיק כדי לתת לכל developer לבנות את הפיצ'ר שלם בלי שום context אחר.**
-
-# חלק נ"ד — רכיבי UI נוספים (קוד מלא)
-
-## 54.1 `src/components/audit/AuditHeader.tsx`
-
-```tsx
-// src/components/audit/AuditHeader.tsx
-// Persistent header for the live audit page. Shows elapsed time,
-// mode, started-by, and a quick visual progress bar.
-
-import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
-import { Clock, User, Zap, MapPin, AlertCircle } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
-import { useAuditStats } from '@/hooks/useAuditStats'
-import type { AuditSession } from '@/types/audit'
-import { cn } from '@/lib/utils'
-
-interface Props {
-  session: AuditSession
-}
-
-export function AuditHeader({ session }: Props) {
-  const { progressPct, alertsOpen, total } = useAuditStats()
-  const [elapsed, setElapsed] = useState(elapsedSec(session.startedAt))
-
-  useEffect(() => {
-    const id = window.setInterval(() => setElapsed(elapsedSec(session.startedAt)), 1000)
-    return () => window.clearInterval(id)
-  }, [session.startedAt])
-
-  const minutes = Math.floor(elapsed / 60)
-  const seconds = elapsed % 60
-  const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-
-  const ModeIcon = session.mode === 'MANUAL' ? Zap : MapPin
-
-  return (
-    <div className="rounded-2xl border-2 p-4 bg-gradient-to-r from-blue-50 to-emerald-50 dark:from-blue-950 dark:to-emerald-950">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <div className={cn(
-            'rounded-full p-3',
-            session.mode === 'MANUAL' ? 'bg-amber-200 dark:bg-amber-900' : 'bg-blue-200 dark:bg-blue-900'
-          )}>
-            <ModeIcon size={24} />
-          </div>
-          <div>
-            <div className="font-bold text-xl">
-              {session.mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} — פעיל
-            </div>
-            <div className="text-sm text-muted-foreground flex items-center gap-3 mt-1">
-              <span className="flex items-center gap-1">
-                <Clock size={14} /> <span dir="ltr">{timeStr}</span>
-              </span>
-              <span className="flex items-center gap-1">
-                <User size={14} /> {session.startedBy}
-              </span>
-              <span>{session.classIds.length} כיתות</span>
-              <span>{total} תלמידים</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {alertsOpen > 0 && (
-            <Badge variant="destructive" className="text-base px-3 py-1 animate-pulse">
-              <AlertCircle size={14} className="me-1" />
-              {alertsOpen} אזעקות
-            </Badge>
-          )}
-          <Badge variant="outline" className="text-base px-3 py-1">
-            {progressPct}% הושלם
-          </Badge>
-        </div>
-      </div>
-
-      <div className="mt-3 h-2 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
-        <motion.div
-          initial={{ width: 0 }}
-          animate={{ width: `${progressPct}%` }}
-          transition={{ duration: 0.6 }}
-          className="h-full bg-gradient-to-r from-blue-500 to-emerald-500"
-        />
-      </div>
-    </div>
-  )
-}
-
-function elapsedSec(startIso: string): number {
-  return Math.max(0, Math.floor((Date.now() - new Date(startIso).getTime()) / 1000))
-}
-```
+*Rejected because:* Higher latency (felt as 1-2 second lag), higher database load, and no advantage over the realtime+polling-fallback approach. Realtime is already in the stack and free.
 
-## 54.2 `src/components/audit/AuditClassSelector.tsx`
-
-```tsx
-// src/components/audit/AuditClassSelector.tsx
-// A grouped class selector with select-all-per-grade and select-all-global.
-
-import { useMemo, useState } from 'react'
-import { Check, ChevronDown } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { useStudentsStore } from '@/store/studentsStore'
-import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
-
-interface Props {
-  allClassIds: string[]
-  selected: string[]
-  onChange: (ids: string[]) => void
-}
-
-export function AuditClassSelector({ allClassIds, selected, onChange }: Props) {
-  const students = useStudentsStore(s => s.students)
-
-  const grouped = useMemo(() => {
-    const map: Record<string, { id: string; count: number }[]> = {}
-    for (const grade of GRADE_LEVELS) {
-      map[grade] = getClasses(grade).map(cid => ({
-        id: cid,
-        count: students.filter(s => s.classId === cid).length,
-      }))
-    }
-    return map
-  }, [students])
-
-  function toggle(id: string) {
-    onChange(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id])
-  }
-
-  function toggleGrade(ids: string[], checkAll: boolean) {
-    if (checkAll) {
-      const merged = new Set([...selected, ...ids])
-      onChange([...merged])
-    } else {
-      onChange(selected.filter(x => !ids.includes(x)))
-    }
-  }
-
-  const allSelected = allClassIds.every(id => selected.includes(id))
-
-  return (
-    <div className="space-y-3">
-      <Button
-        variant="outline"
-        onClick={() => onChange(allSelected ? [] : allClassIds)}
-        className="w-full justify-between"
-        id="select-all-classes"
-      >
-        <span>{allSelected ? 'בטל הכל' : 'בחר הכל'}</span>
-        <Checkbox checked={allSelected} />
-      </Button>
-
-      {Object.entries(grouped).map(([grade, classes]) => {
-        const ids = classes.map(c => c.id)
-        const selectedInGrade = ids.filter(id => selected.includes(id))
-        const allInGrade = selectedInGrade.length === ids.length && ids.length > 0
-        const someInGrade = selectedInGrade.length > 0 && !allInGrade
-
-        return (
-          <Collapsible key={grade} defaultOpen>
-            <div className="border rounded-xl">
-              <div className="flex items-center justify-between p-3">
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    checked={allInGrade ? true : someInGrade ? 'indeterminate' : false}
-                    onCheckedChange={(v) => toggleGrade(ids, !!v)}
-                  />
-                  <span className="font-semibold">{grade}</span>
-                  <span className="text-xs text-muted-foreground">
-                    ({selectedInGrade.length}/{ids.length})
-                  </span>
-                </div>
-                <CollapsibleTrigger asChild>
-                  <Button variant="ghost" size="sm">
-                    <ChevronDown size={16} />
-                  </Button>
-                </CollapsibleTrigger>
-              </div>
-              <CollapsibleContent>
-                <div className="border-t p-3 grid grid-cols-2 md:grid-cols-3 gap-2">
-                  {classes.map(c => (
-                    <label
-                      key={c.id}
-                      className="flex items-center gap-2 cursor-pointer hover:bg-accent rounded-lg p-2"
-                    >
-                      <Checkbox
-                        checked={selected.includes(c.id)}
-                        onCheckedChange={() => toggle(c.id)}
-                      />
-                      <div className="flex-1">
-                        <div className="text-sm">{c.id}</div>
-                        <div className="text-xs text-muted-foreground">{c.count} תלמידים</div>
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              </CollapsibleContent>
-            </div>
-          </Collapsible>
-        )
-      })}
-    </div>
-  )
-}
-```
+## 26.3 WebSocket server outside Supabase
 
-## 54.3 `src/components/audit/AuditLocationSettings.tsx`
-
-```tsx
-// src/components/audit/AuditLocationSettings.tsx
-// Settings panel for LOCATION-mode audits.
-
-import { Label } from '@/components/ui/label'
-import { Slider } from '@/components/ui/slider'
-import { Switch } from '@/components/ui/switch'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import type { AuditSessionSettings, PushTarget, Sensitivity } from '@/types/audit'
-
-interface Props {
-  value: AuditSessionSettings
-  onChange: (v: AuditSessionSettings) => void
-}
-
-export function AuditLocationSettings({ value, onChange }: Props) {
-  function set<K extends keyof AuditSessionSettings>(k: K, v: AuditSessionSettings[K]) {
-    onChange({ ...value, [k]: v })
-  }
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <Label className="font-semibold mb-2 block">זמן המתנה לתגובה (שניות)</Label>
-        <Slider
-          min={60}
-          max={300}
-          step={30}
-          value={[value.timeoutSec ?? 120]}
-          onValueChange={(v) => set('timeoutSec', v[0])}
-        />
-        <div className="flex justify-between text-xs text-muted-foreground mt-1">
-          <span>60s</span>
-          <span className="font-semibold">{value.timeoutSec ?? 120}s</span>
-          <span>5 דק</span>
-        </div>
-        <p className="text-xs text-muted-foreground mt-2">
-          אחרי זמן זה, תלמידים שלא הגיבו יסומנו "לא ידוע" והרכז יקבל push.
-        </p>
-      </div>
-
-      <div>
-        <Label className="font-semibold mb-2 block">רגישות אזעקות</Label>
-        <RadioGroup
-          value={value.sensitivity ?? 'MEDIUM'}
-          onValueChange={(v) => set('sensitivity', v as Sensitivity)}
-          className="grid grid-cols-3 gap-2"
-        >
-          <SensitivityCard value="LOW" label="נמוכה" desc="רק > 5km מקבל אזעקה" />
-          <SensitivityCard value="MEDIUM" label="בינונית" desc="> 1km כתום, > 5km אדום" />
-          <SensitivityCard value="HIGH" label="גבוהה" desc="> 300m כבר אזעקה" />
-        </RadioGroup>
-      </div>
-
-      <div>
-        <Label className="font-semibold mb-2 block">למי לשלוח push</Label>
-        <RadioGroup
-          value={value.pushTarget ?? 'STUDENTS'}
-          onValueChange={(v) => set('pushTarget', v as PushTarget)}
-          className="space-y-2"
-        >
-          <div className="flex items-center gap-2"><RadioGroupItem value="STUDENTS" /> תלמידים בלבד (שולחים GPS אוטומטית)</div>
-          <div className="flex items-center gap-2"><RadioGroupItem value="SUPERVISORS" /> רכזים בלבד (סמנים ידנית את הכיתה)</div>
-          <div className="flex items-center gap-2"><RadioGroupItem value="BOTH" /> שניהם</div>
-        </RadioGroup>
-      </div>
-
-      <div className="flex items-center justify-between border rounded-xl p-3">
-        <div>
-          <div className="font-semibold">הצג מפה כברירת מחדל</div>
-          <p className="text-xs text-muted-foreground">פתח tab "מפה" אוטומטית במצב Live</p>
-        </div>
-        <Switch
-          checked={value.showMap ?? true}
-          onCheckedChange={(v) => set('showMap', v)}
-        />
-      </div>
-    </div>
-  )
-}
-
-function SensitivityCard({ value, label, desc }: { value: string; label: string; desc: string }) {
-  return (
-    <label className="border rounded-xl p-3 cursor-pointer hover:bg-accent has-[:checked]:bg-blue-50 has-[:checked]:border-blue-500 dark:has-[:checked]:bg-blue-950">
-      <div className="flex items-center gap-2 mb-1">
-        <RadioGroupItem value={value} />
-        <span className="font-semibold">{label}</span>
-      </div>
-      <p className="text-xs text-muted-foreground">{desc}</p>
-    </label>
-  )
-}
-```
+*Approach:* Run a custom Node websocket server for audit-specific events.
 
-## 54.4 `src/components/audit/AuditCloseModal.tsx`
-
-```tsx
-// src/components/audit/AuditCloseModal.tsx
-// Confirmation modal shown before closing an audit session.
-
-import { useEffect, useState } from 'react'
-import { AlertTriangle } from 'lucide-react'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
-  DialogDescription, DialogFooter,
-} from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
-import { useAuditStore } from '@/store/auditStore'
-import { useAuditStats } from '@/hooks/useAuditStats'
-
-interface Props {
-  open: boolean
-  sessionId: string
-  onClose: () => void
-  onConfirm: (notes?: string) => Promise<void>
-}
-
-export function AuditCloseModal({ open, sessionId, onClose, onConfirm }: Props) {
-  const stats = useAuditStats()
-  const [notes, setNotes] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const pending = stats.byCategory.PENDING ?? 0
-
-  useEffect(() => { if (open) setNotes('') }, [open])
-
-  async function handleConfirm() {
-    setSubmitting(true)
-    try {
-      await onConfirm(notes || undefined)
-    } finally {
-      setSubmitting(false)
-      onClose()
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>סיום ביקורת</DialogTitle>
-          <DialogDescription>האם אתה בטוח שברצונך לסיים את הביקורת כעת?</DialogDescription>
-        </DialogHeader>
-
-        {pending > 0 && (
-          <div className="bg-amber-50 dark:bg-amber-950 border-2 border-amber-400 rounded-xl p-3 flex gap-2">
-            <AlertTriangle className="text-amber-600 shrink-0" />
-            <div>
-              <div className="font-semibold">יש עדיין {pending} תלמידים לא סומנו</div>
-              <div className="text-sm text-muted-foreground">
-                בסגירת הביקורת הם יסומנו אוטומטית "לא ידוע".
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-1">
-          <label className="text-sm font-medium">הערה (אופציונלי)</label>
-          <Textarea
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
-            placeholder="למשל: 'ביקורת אחר ערבית' / 'הרבה לא הגיבו כי לא הביאו פלאפון'"
-            maxLength={500}
-          />
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={submitting}>ביטול</Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={submitting}
-            className="bg-emerald-600 hover:bg-emerald-700"
-          >
-            {submitting ? 'מסיים...' : 'אישור — סיים ביקורת'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-```
+*Rejected because:* Operational complexity. Supabase Realtime is sufficient. The custom server would require its own deploy pipeline, scaling, monitoring.
 
-## 54.5 `src/components/audit/AuditAlertModal.tsx`
-
-```tsx
-// src/components/audit/AuditAlertModal.tsx
-// Pop-up modal when a CRITICAL alert is triggered. Shown to admin only.
-// Plays sound, flashes red, requires acknowledgement.
-
-import { useEffect, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, MapPin, Phone } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { useAuditStore } from '@/store/auditStore'
-import { useStudentsStore } from '@/store/studentsStore'
-import { formatDistance, getBucketMeta } from '@/lib/audit/distanceBuckets'
-import * as sound from '@/lib/audit/soundManager'
-
-export function AuditAlertModal() {
-  const alerts = useAuditStore(s => s.alerts)
-  const acknowledge = useAuditStore(s => s.acknowledgeAlert)
-  const students = useStudentsStore(s => s.students)
-  const [shownIds, setShownIds] = useState<Set<string>>(new Set())
-
-  const unshownCritical = alerts.find(
-    a => a.severity === 'CRITICAL' && !a.acknowledgedAt && !shownIds.has(a.id)
-  )
-
-  useEffect(() => {
-    if (unshownCritical) sound.play('alert')
-  }, [unshownCritical?.id])
-
-  if (!unshownCritical) return null
-  const student = students.find(s => s.id === unshownCritical.studentId)
-  const bucketMeta = getBucketMeta(unshownCritical.distanceM > 5000 ? 'RED' : 'ORANGE')
-
-  return (
-    <AnimatePresence>
-      <motion.div
-        className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-6"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-      >
-        <motion.div
-          className="bg-white dark:bg-gray-900 rounded-3xl border-4 border-red-500 shadow-2xl p-8 max-w-md w-full"
-          initial={{ scale: 0.7, y: -50 }}
-          animate={{
-            scale: 1, y: 0,
-            boxShadow: ['0 0 0 0 rgba(239,68,68,0.4)', '0 0 0 20px rgba(239,68,68,0)'],
-          }}
-          transition={{ duration: 0.4 }}
-        >
-          <div className="flex items-center gap-3 mb-4">
-            <AlertTriangle className="text-red-500" size={48} />
-            <div>
-              <div className="text-3xl font-black">אזעקה!</div>
-              <div className="text-muted-foreground">תלמיד מחוץ לטווח קריטי</div>
-            </div>
-          </div>
-
-          <div className="space-y-3 my-6">
-            <div>
-              <div className="text-xs text-muted-foreground">תלמיד</div>
-              <div className="text-2xl font-bold">{student?.fullName ?? unshownCritical.studentId.slice(0, 8)}</div>
-              <div className="text-sm">{student?.classId}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted-foreground">מרחק מהישיבה</div>
-              <div className="text-3xl font-bold tabular-nums" style={{ color: bucketMeta.color }}>
-                <MapPin className="inline" size={28} />
-                <span dir="ltr">{formatDistance(unshownCritical.distanceM)}</span>
-              </div>
-            </div>
-            {student?.phone && (
-              <div>
-                <div className="text-xs text-muted-foreground">טלפון</div>
-                <a href={`tel:${student.phone}`} className="text-blue-600 underline text-lg">
-                  <Phone className="inline" size={18} /> {student.phone}
-                </a>
-              </div>
-            )}
-          </div>
-
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setShownIds(new Set([...shownIds, unshownCritical.id]))}
-            >
-              דחיה
-            </Button>
-            <Button
-              className="flex-1 bg-red-600 hover:bg-red-700"
-              onClick={async () => {
-                await acknowledge(unshownCritical.id, 'ADMIN')
-                setShownIds(new Set([...shownIds, unshownCritical.id]))
-              }}
-            >
-              סמן כנצפה
-            </Button>
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
-  )
-}
-```
+## 26.4 Native mobile app
 
----
+*Approach:* Capacitor or React Native to get push reliability and offline support.
 
-# חלק נ"ה — Realtime Channel Manager (קוד מלא)
-
-```ts
-// src/lib/audit/realtimeManager.ts
-// Single connection, multiple subscribers. Reconnects with exponential backoff.
-
-import { supabase } from '@/lib/api/supabase'
-import type { RealtimeChannel } from '@supabase/supabase-js'
-import type { AuditResponse, AuditAlert, AuditSession } from '@/types/audit'
-
-type Handler<T> = (event: 'INSERT' | 'UPDATE' | 'DELETE', row: T, old?: T) => void
-
-class AuditRealtimeManager {
-  private channel: RealtimeChannel | null = null
-  private currentSessionId: string | null = null
-  private responseHandlers = new Set<Handler<AuditResponse>>()
-  private alertHandlers = new Set<Handler<AuditAlert>>()
-  private sessionHandlers = new Set<Handler<AuditSession>>()
-  private reconnectAttempt = 0
-  private reconnectTimer: number | null = null
-
-  attach(sessionId: string) {
-    if (this.currentSessionId === sessionId && this.channel) return
-    this.detach()
-    this.currentSessionId = sessionId
-    this.connect()
-  }
-
-  detach() {
-    if (this.channel) {
-      supabase.removeChannel(this.channel)
-      this.channel = null
-    }
-    if (this.reconnectTimer) {
-      window.clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = null
-    }
-    this.currentSessionId = null
-    this.reconnectAttempt = 0
-  }
-
-  private connect() {
-    if (!this.currentSessionId) return
-    const sid = this.currentSessionId
-
-    this.channel = supabase
-      .channel(`audit_v2:${sid}`)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'audit_responses', filter: `session_id=eq.${sid}` },
-        (payload) => this.broadcastResponse(payload.eventType as any, payload.new, payload.old))
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'audit_alerts', filter: `session_id=eq.${sid}` },
-        (payload) => this.broadcastAlert(payload.eventType as any, payload.new, payload.old))
-      .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` },
-        (payload) => this.broadcastSession('UPDATE', payload.new, payload.old))
-      .subscribe(status => {
-        if (status === 'SUBSCRIBED') {
-          this.reconnectAttempt = 0
-        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          this.scheduleReconnect()
-        }
-      })
-  }
-
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return
-    const delay = Math.min(30000, 1000 * Math.pow(2, this.reconnectAttempt))
-    this.reconnectAttempt++
-    this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectTimer = null
-      if (this.channel) {
-        supabase.removeChannel(this.channel)
-        this.channel = null
-      }
-      this.connect()
-    }, delay)
-  }
-
-  private broadcastResponse(evt: any, row: any, old?: any) {
-    for (const h of this.responseHandlers) h(evt, row, old)
-  }
-  private broadcastAlert(evt: any, row: any, old?: any) {
-    for (const h of this.alertHandlers) h(evt, row, old)
-  }
-  private broadcastSession(evt: any, row: any, old?: any) {
-    for (const h of this.sessionHandlers) h(evt, row, old)
-  }
-
-  onResponse(h: Handler<AuditResponse>): () => void {
-    this.responseHandlers.add(h)
-    return () => { this.responseHandlers.delete(h) }
-  }
-  onAlert(h: Handler<AuditAlert>): () => void {
-    this.alertHandlers.add(h)
-    return () => { this.alertHandlers.delete(h) }
-  }
-  onSession(h: Handler<AuditSession>): () => void {
-    this.sessionHandlers.add(h)
-    return () => { this.sessionHandlers.delete(h) }
-  }
-}
-
-export const auditRealtimeManager = new AuditRealtimeManager()
-```
+*Rejected because:* The development cost is 3-5× the PWA cost, the audience is reachable via PWA, the iOS push limitation is acknowledged and worked around with the manual fallback.
 
----
+## 26.5 Outsourced attendance vendor (e.g. ClassDojo, SchoolMint)
 
-# חלק נ"ו — Loading, Empty, Error States
-
-## 56.1 `src/components/audit/AuditEmptyState.tsx`
-
-```tsx
-// src/components/audit/AuditEmptyState.tsx
-import { ClipboardList } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Link } from 'react-router-dom'
-
-export function AuditEmptyState() {
-  return (
-    <div className="text-center py-16 px-6">
-      <div className="inline-flex w-24 h-24 rounded-full bg-blue-100 dark:bg-blue-950 items-center justify-center mb-6">
-        <ClipboardList size={48} className="text-blue-600" />
-      </div>
-      <h2 className="text-2xl font-bold mb-2">עדיין אין ביקורת פעילה</h2>
-      <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-        פתח ביקורת חדשה כדי לדעת בזמן אמת מי בישיבה, מי בחוץ, ומי במצב לא ידוע.
-      </p>
-      <Link to="/admin/audit/new">
-        <Button size="lg" className="bg-blue-600 hover:bg-blue-700">
-          פתח ביקורת ראשונה
-        </Button>
-      </Link>
-    </div>
-  )
-}
-```
+*Approach:* Don't build this.
 
-## 56.2 `src/components/audit/AuditLoadingSkeleton.tsx`
-
-```tsx
-// src/components/audit/AuditLoadingSkeleton.tsx
-import { Skeleton } from '@/components/ui/skeleton'
-
-export function AuditLoadingSkeleton() {
-  return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
-      <Skeleton className="h-20 w-full rounded-2xl" />
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-        {[...Array(6)].map((_, i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {[...Array(8)].map((_, i) => <Skeleton key={i} className="h-44 rounded-2xl" />)}
-      </div>
-    </div>
-  )
-}
-```
+*Rejected because:* Vendor products do not handle Hebrew RTL, do not handle the supervisor-as-rabbi authority model, do not honor halachic privacy norms, and would require integrating with the existing student data which is in Google Sheets in Hebrew. The integration cost is comparable to the build cost without the customization benefit.
 
-## 56.3 `src/components/audit/AuditErrorBoundary.tsx`
-
-```tsx
-// src/components/audit/AuditErrorBoundary.tsx
-import React from 'react'
-import { AlertCircle, RefreshCcw } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-
-interface State {
-  hasError: boolean
-  error: Error | null
-}
-
-export class AuditErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  State
-> {
-  state: State = { hasError: false, error: null }
-
-  static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error }
-  }
-
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('[AuditErrorBoundary]', error, info)
-    // Optional: send to error tracking service
-  }
-
-  render() {
-    if (!this.state.hasError) return this.props.children
-
-    return (
-      <div className="p-8 text-center max-w-md mx-auto">
-        <AlertCircle size={48} className="text-red-500 mx-auto mb-4" />
-        <h2 className="text-xl font-bold mb-2">משהו השתבש</h2>
-        <p className="text-sm text-muted-foreground mb-4">
-          {this.state.error?.message ?? 'שגיאה לא ידועה'}
-        </p>
-        <Button
-          onClick={() => this.setState({ hasError: false, error: null })}
-        >
-          <RefreshCcw size={16} className="me-2" /> נסה שוב
-        </Button>
-      </div>
-    )
-  }
-}
-```
+## 26.6 Single mode (location only)
 
----
+*Approach:* Don't bother with manual mode.
 
-# חלק נ"ז — Mobile-specific Polish
-
-## 57.1 Pull-to-refresh
-
-```tsx
-// src/components/audit/PullToRefresh.tsx
-import { useState, useRef, ReactNode } from 'react'
-import { RefreshCw } from 'lucide-react'
-
-interface Props {
-  onRefresh: () => Promise<void>
-  children: ReactNode
-}
-
-export function PullToRefresh({ onRefresh, children }: Props) {
-  const [pulling, setPulling] = useState(0)
-  const [refreshing, setRefreshing] = useState(false)
-  const startY = useRef(0)
-
-  function handleTouchStart(e: React.TouchEvent) {
-    if (window.scrollY > 0) return
-    startY.current = e.touches[0].clientY
-  }
-
-  function handleTouchMove(e: React.TouchEvent) {
-    if (refreshing || window.scrollY > 0) return
-    const delta = e.touches[0].clientY - startY.current
-    if (delta > 0) setPulling(Math.min(120, delta))
-  }
-
-  async function handleTouchEnd() {
-    if (pulling > 80 && !refreshing) {
-      setRefreshing(true)
-      try { await onRefresh() } finally {
-        setRefreshing(false)
-        setPulling(0)
-      }
-    } else {
-      setPulling(0)
-    }
-  }
-
-  return (
-    <div
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-    >
-      <div
-        className="flex items-center justify-center transition-all"
-        style={{ height: pulling, overflow: 'hidden' }}
-      >
-        <RefreshCw
-          className={refreshing ? 'animate-spin' : ''}
-          style={{ transform: `rotate(${pulling * 3}deg)` }}
-        />
-      </div>
-      {children}
-    </div>
-  )
-}
-```
+*Rejected because:* Discussed in §5.1. Single-mode is too brittle.
 
-## 57.2 Swipe gestures על תלמיד (Supervisor)
-
-```tsx
-// src/components/audit/SwipeableStudentRow.tsx
-import { useState, useRef, ReactNode } from 'react'
-import { motion, useMotionValue, useTransform } from 'framer-motion'
-import { Check, AlertOctagon } from 'lucide-react'
-
-interface Props {
-  children: ReactNode
-  onSwipeRight: () => void   // mark IN_YESHIVA
-  onSwipeLeft: () => void    // mark OUT_NO_PERMIT
-}
-
-export function SwipeableStudentRow({ children, onSwipeRight, onSwipeLeft }: Props) {
-  const x = useMotionValue(0)
-  const rightOpacity = useTransform(x, [0, 100], [0, 1])
-  const leftOpacity = useTransform(x, [-100, 0], [1, 0])
-  const bgColor = useTransform(x, [-150, 0, 150], ['#ef4444', '#fff', '#10b981'])
-
-  return (
-    <motion.div
-      className="relative overflow-hidden rounded-xl"
-      style={{ backgroundColor: bgColor }}
-    >
-      <motion.div
-        className="absolute inset-y-0 start-3 flex items-center"
-        style={{ opacity: rightOpacity }}
-      >
-        <Check className="text-white" size={32} />
-      </motion.div>
-      <motion.div
-        className="absolute inset-y-0 end-3 flex items-center"
-        style={{ opacity: leftOpacity }}
-      >
-        <AlertOctagon className="text-white" size={32} />
-      </motion.div>
-
-      <motion.div
-        drag="x"
-        dragConstraints={{ left: -200, right: 200 }}
-        style={{ x }}
-        onDragEnd={(_, info) => {
-          if (info.offset.x > 100) onSwipeRight()
-          else if (info.offset.x < -100) onSwipeLeft()
-          x.set(0)
-        }}
-        className="bg-white dark:bg-gray-900"
-      >
-        {children}
-      </motion.div>
-    </motion.div>
-  )
-}
-```
+## 26.7 Five or more categories
 
----
+*Approach:* Add `EXCUSED_SICK`, `EXCUSED_FAMILY`, `LATE`, etc.
 
-# חלק נ"ח — Optimistic Updates Pattern
-
-```ts
-// src/store/auditStore.ts — extension showing the full optimistic pattern
-
-// Inside submitResponse implementation:
-submitResponse: async (studentId, payload) => {
-  const s = get().session
-  if (!s) throw new Error('no_active_session')
-
-  // 1. Save previous state for rollback
-  const previous = get().responses.get(studentId)
-  if (!previous) throw new Error('response_missing')
-
-  // 2. Optimistic update
-  const optimistic = {
-    ...previous,
-    ...payload,
-    markedAt: new Date().toISOString(),
-    markedBy: payload.markedBy ?? previous.markedBy,
-  } as AuditResponse
-
-  const next = new Map(get().responses)
-  next.set(studentId, optimistic)
-  set({ responses: next })
-
-  // 3. Network call
-  try {
-    const result = await api.submitAuditResponse({
-      sessionId: s.id,
-      studentId,
-      ...payload,
-    })
-    // 4a. realtime will eventually push the canonical row; we don't need to do
-    //     anything here unless we want to confirm with the server's choice of
-    //     category (e.g. server chose UNKNOWN due to low accuracy).
-    if ('category' in result && result.category !== optimistic.category) {
-      const corrected = new Map(get().responses)
-      corrected.set(studentId, { ...optimistic, category: result.category })
-      set({ responses: corrected })
-    }
-  } catch (e) {
-    // 4b. Rollback on failure
-    const rolledBack = new Map(get().responses)
-    rolledBack.set(studentId, previous)
-    set({ responses: rolledBack, error: (e as Error).message })
-    throw e
-  }
-},
-```
+*Rejected because:* Discussed in §5.2. Cognitive overhead exceeds the value.
 
----
+## 26.8 No GPS, RFID badges instead
 
-# חלק נ"ט — Auth Integration
-
-```ts
-// src/lib/audit/auditAuth.ts
-// Permission checks for audit operations.
-
-import type { AuditSession } from '@/types/audit'
-import { useAuthStore } from '@/store/authStore'
-
-export type AuditAction = 'open' | 'close' | 'abort' | 'override' | 'view' | 'export'
-
-export function canPerformAuditAction(
-  action: AuditAction,
-  session: AuditSession | null,
-): { allowed: boolean; reason?: string } {
-  const auth = useAuthStore.getState()
-  const role = auth.role
-
-  if (role === 'admin') return { allowed: true }
-
-  if (role === 'supervisor') {
-    if (action === 'view') return { allowed: true }
-    if (action === 'override') {
-      if (!session) return { allowed: false, reason: 'NO_SESSION' }
-      if (!auth.classId) return { allowed: false, reason: 'NO_CLASS' }
-      if (!session.classIds.includes(auth.classId))
-        return { allowed: false, reason: 'CLASS_NOT_IN_AUDIT' }
-      return { allowed: true }
-    }
-    return { allowed: false, reason: 'ROLE_FORBIDDEN' }
-  }
-
-  if (role === 'student') {
-    if (action === 'view') return { allowed: true }
-    return { allowed: false, reason: 'STUDENTS_CANNOT_MANAGE' }
-  }
-
-  return { allowed: false, reason: 'UNAUTHENTICATED' }
-}
-
-export function assertCanPerform(
-  action: AuditAction,
-  session: AuditSession | null,
-): void {
-  const result = canPerformAuditAction(action, session)
-  if (!result.allowed) {
-    throw new Error(`Permission denied: ${result.reason}`)
-  }
-}
-```
+*Approach:* Issue a badge to each student; scanners at the door.
 
----
+*Rejected because:* Hardware cost. Failure modes (forgot badge, lost badge) are worse than GPS failures. No retrofit path on existing student devices.
 
-# חלק ס' — Sync Engine Integration (offline support for supervisors)
-
-```ts
-// src/lib/sync/auditSync.ts
-// Queue audit responses when offline. Replay on reconnect.
-
-import { db } from '@/lib/db/schema'
-import { api } from '@/lib/api'
-import type { SubmitAuditResponsePayload } from '@/types/audit'
-
-interface QueuedSubmit {
-  id?: number
-  payload: SubmitAuditResponsePayload
-  attemptedAt: number
-  attempts: number
-}
-
-const STORE = 'audit_submit_queue'
-
-export async function queueAuditSubmit(payload: SubmitAuditResponsePayload) {
-  await db.table(STORE).add({
-    payload,
-    attemptedAt: Date.now(),
-    attempts: 0,
-  } as QueuedSubmit)
-}
-
-export async function flushAuditQueue(): Promise<{ sent: number; failed: number }> {
-  if (!navigator.onLine) return { sent: 0, failed: 0 }
-  const queue = await db.table<QueuedSubmit>(STORE).toArray()
-  let sent = 0, failed = 0
-  for (const item of queue) {
-    try {
-      await api.submitAuditResponse(item.payload)
-      await db.table(STORE).delete(item.id!)
-      sent++
-    } catch {
-      failed++
-      await db.table(STORE).update(item.id!, { attempts: item.attempts + 1 })
-    }
-  }
-  return { sent, failed }
-}
-
-// Auto-flush on reconnect
-window.addEventListener('online', () => {
-  flushAuditQueue().catch(console.error)
-})
-
-// Periodic retry every 30s
-setInterval(() => {
-  if (navigator.onLine) flushAuditQueue().catch(console.error)
-}, 30000)
-```
+## 26.9 QR codes posted in classrooms
 
----
+*Approach:* Student scans a QR every morning to declare presence.
 
-# חלק ס"א — Animation Library reference
-
-```ts
-// src/lib/audit/animations.ts
-// Reusable Framer Motion variants for the audit UI.
-
-import type { Variants } from 'framer-motion'
-
-export const cardEnter: Variants = {
-  initial: { opacity: 0, y: 10, scale: 0.95 },
-  animate: { opacity: 1, y: 0, scale: 1 },
-  exit:    { opacity: 0, y: -10, scale: 0.95 },
-}
-
-export const slideInFromRight: Variants = {
-  initial: { x: 100, opacity: 0 },
-  animate: { x: 0, opacity: 1 },
-  exit:    { x: -100, opacity: 0 },
-}
-
-export const fadeIn: Variants = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1 },
-  exit:    { opacity: 0 },
-}
-
-export const popIn: Variants = {
-  initial: { scale: 0, opacity: 0 },
-  animate: { scale: 1, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 22 } },
-  exit:    { scale: 0, opacity: 0 },
-}
-
-export const pulseAlert: Variants = {
-  animate: {
-    scale: [1, 1.05, 1],
-    boxShadow: [
-      '0 0 0 0 rgba(239,68,68,0.6)',
-      '0 0 0 20px rgba(239,68,68,0)',
-      '0 0 0 0 rgba(239,68,68,0)',
-    ],
-    transition: { duration: 1.2, repeat: Infinity },
-  },
-}
-
-export const flashGreen: Variants = {
-  animate: {
-    backgroundColor: ['#fff', '#d1fae5', '#fff'],
-    transition: { duration: 0.5 },
-  },
-}
-```
+*Rejected because:* QR systems are gameable (anyone can scan the QR) and require the student to actively initiate. The product needs an admin-initiated capability.
 
 ---
-
-# חלק ס"ב — Hebrew typography & RTL helpers
-
-```css
-/* src/styles/hebrew.css */
-:root {
-  /* Hebrew-friendly stacks */
-  --font-hebrew-sans: 'Heebo', 'Rubik', 'Assistant', system-ui, -apple-system, sans-serif;
-  --font-hebrew-display: 'Frank Ruhl Libre', 'David Libre', Georgia, serif;
-  --font-hebrew-mono: 'Cousine', ui-monospace, monospace;
-}
-
-html[dir="rtl"] {
-  font-family: var(--font-hebrew-sans);
-}
-
-/* Numbers should always render LTR */
-.num, [dir="ltr"] {
-  direction: ltr;
-  unicode-bidi: isolate;
-}
-
-/* Mixed text helper */
-.he-en-mix {
-  unicode-bidi: plaintext;
-}
-
-/* Hebrew punctuation should sit on the left of numbers */
-.km::after {
-  content: ' ק"מ';
-}
-
-/* Heading spacing — Hebrew often needs less line-height */
-h1, h2, h3 { line-height: 1.25; }
-```
 
-```tsx
-// src/components/ui/Num.tsx
-// Small wrapper to force LTR rendering on numbers.
+# Part 27 — Recommended Final Approach
 
-import { cn } from '@/lib/utils'
+This is the headline. Everything above supports this.
 
-export function Num({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <span dir="ltr" className={cn('tabular-nums', className)}>{children}</span>
-}
-```
+## 27.1 What we are building
 
----
+A **persistent, real-time, role-aware attendance auditing subsystem** that lives inside the existing Yeshivat Shavi Hevron application. It has two modes (manual, location), three pickable categories (present, out-with-permit, out-without-permit), and five user roles consuming it (admin, supervisor, student, plus implicit rosh yeshiva and parent).
 
-# חלק ס"ג — Configurable Feature Flags
-
-```ts
-// src/lib/audit/flags.ts
-// Allow turning features on/off without a redeploy.
-
-export interface AuditFlags {
-  enableLocationMode: boolean
-  enableProjectionMode: boolean
-  enableHeatmap: boolean
-  enableMap: boolean
-  enableExportPdf: boolean
-  enableExportExcel: boolean
-  enableSlackAlerts: boolean
-  enableAiAnomalyDetection: boolean
-  maxConcurrentSessions: number
-}
-
-const DEFAULT_FLAGS: AuditFlags = {
-  enableLocationMode: true,
-  enableProjectionMode: true,
-  enableHeatmap: true,
-  enableMap: true,
-  enableExportPdf: true,
-  enableExportExcel: true,
-  enableSlackAlerts: false,
-  enableAiAnomalyDetection: false,
-  maxConcurrentSessions: 1,
-}
-
-let cached: AuditFlags | null = null
-
-export async function loadFlags(): Promise<AuditFlags> {
-  if (cached) return cached
-  try {
-    const res = await fetch('/api/audit-flags', { credentials: 'include' })
-    if (res.ok) {
-      cached = { ...DEFAULT_FLAGS, ...(await res.json()) }
-      return cached
-    }
-  } catch {}
-  cached = DEFAULT_FLAGS
-  return cached
-}
-
-export function useFlag(k: keyof AuditFlags): boolean | number {
-  return (cached ?? DEFAULT_FLAGS)[k]
-}
-```
+The product centerpiece is a **live dashboard** for the administrator, with four restrained views (grid, heatmap, map, feed) and a persistent KPI strip. The dashboard is replay-safe: any refresh, any reconnect, any device-swap renders identical state.
 
----
+Push notifications fan out via a Supabase Edge Function. Realtime updates propagate via `postgres_changes` with a 30-second polling fallback. All audit data lives in five Postgres tables, with the database as the sole source of truth.
 
-# חלק ס"ד — Routing diagram (full)
+GPS data is consented, narrow-purpose, and time-limited (raw coordinates nulled after 90 days; bucketed distance survives).
 
-```
-/                                                 [Home / Login]
-├── /admin                                        [Admin shell]
-│   ├── /admin/dashboard                          [Existing dashboard]
-│   ├── /admin/students                           [Existing]
-│   ├── /admin/audit                              [Landing]
-│   │   ├── /admin/audit/new                      [4-step wizard]
-│   │   ├── /admin/audit/:id/live                 [Active session]
-│   │   ├── /admin/audit/:id/summary              [Post-mortem]
-│   │   └── /admin/audit/compare?ids=A,B,C        [Comparison]
-│   ├── /admin/settings                           [Existing]
-│   └── /admin/audit-log                          [Existing]
-│
-├── /class-supervisor                             [Supervisor shell]
-│   ├── /class-supervisor/dashboard               [Existing + audit banner]
-│   └── /class-supervisor/audit                   [Supervisor audit panel (active session)]
-│
-└── /student                                      [Student shell]
-    ├── /student                                  [Home + audit sheet if active]
-    ├── /student/requests                         [Existing]
-    └── /student/history                          [Existing]
-```
+The product replaces the existing RollCall feature.
 
----
+## 27.2 Why this approach and not another
 
-# חלק ס"ה — App.tsx Routes Patch
-
-```tsx
-// src/App.tsx — Routes additions
-import { lazy } from 'react'
-
-const AuditLandingPage = lazy(() => import('./pages/admin/AuditLandingPage'))
-const AuditNewPage     = lazy(() => import('./pages/admin/AuditNewPage'))
-const AuditLivePage    = lazy(() => import('./pages/admin/AuditLivePage'))
-const AuditSummaryPage = lazy(() => import('./pages/admin/AuditSummaryPage'))
-const AuditComparePage = lazy(() => import('./pages/admin/AuditComparePage'))
-const SupervisorAuditPage = lazy(() => import('./pages/class-supervisor/AuditPage'))
-
-function AppRoutes() {
-  return (
-    <Routes>
-      {/* existing routes */}
-      <Route path="/admin" element={<AdminShell />}>
-        <Route path="audit" element={<AuditLandingPage />} />
-        <Route path="audit/new" element={<AuditNewPage />} />
-        <Route path="audit/:id/live" element={<AuditLivePage />} />
-        <Route path="audit/:id/summary" element={<AuditSummaryPage />} />
-        <Route path="audit/compare" element={<AuditComparePage />} />
-      </Route>
-      <Route path="/class-supervisor" element={<SupervisorShell />}>
-        <Route path="audit" element={<SupervisorAuditPage />} />
-      </Route>
-    </Routes>
-  )
-}
-```
+It is the simplest design that satisfies all the goals in §4.1, respects the constraints in §16, fits within the budget in §23.8, and accommodates the future evolution sketched in §5.4 and §23.7 without rework.
 
----
+## 27.3 What the team commits to
 
-# חלק ס"ו — Storybook stories (for design review)
-
-```tsx
-// src/components/audit/AuditClassCard.stories.tsx
-import type { Meta, StoryObj } from '@storybook/react'
-import { AuditClassCard } from './AuditClassCard'
-import { useAuditStore } from '@/store/auditStore'
-
-const meta: Meta<typeof AuditClassCard> = {
-  component: AuditClassCard,
-  title: 'Audit/ClassCard',
-  decorators: [(Story) => {
-    useAuditStore.setState({
-      responses: new Map([
-        ['s1', { id: 'r1', sessionId: 'sess1', studentId: 's1', classId: 'כיתה א', category: 'IN_YESHIVA' } as any],
-        ['s2', { id: 'r2', sessionId: 'sess1', studentId: 's2', classId: 'כיתה א', category: 'OUT_PERMIT' } as any],
-        ['s3', { id: 'r3', sessionId: 'sess1', studentId: 's3', classId: 'כיתה א', category: 'PENDING' } as any],
-      ]),
-    })
-    return <div className="p-4 max-w-sm"><Story /></div>
-  }],
-}
-export default meta
-
-type Story = StoryObj<typeof AuditClassCard>
-
-export const Default: Story = {
-  args: { classId: 'כיתה א' },
-}
-
-export const AlertActive: Story = {
-  args: { classId: 'כיתה א' },
-  decorators: [(Story) => {
-    useAuditStore.setState({
-      responses: new Map([
-        ['s1', { id: 'r1', sessionId: 'sess1', studentId: 's1', classId: 'כיתה א', category: 'OUT_NO_PERMIT' } as any],
-      ]),
-    })
-    return <Story />
-  }],
-}
-
-export const Complete: Story = {
-  args: { classId: 'כיתה א' },
-  decorators: [(Story) => {
-    useAuditStore.setState({
-      responses: new Map(
-        Array.from({ length: 25 }, (_, i) => [`s${i}`, {
-          id: `r${i}`, sessionId: 'sess1', studentId: `s${i}`,
-          classId: 'כיתה א', category: 'IN_YESHIVA',
-        } as any])
-      ),
-    })
-    return <Story />
-  }],
-}
-```
+- Replay-safety guaranteed by §13.2.
+- Latency budgets met per §17.2.
+- Accessibility AA per §18.
+- Privacy practices per §16.5.
+- Communication plan per §24.4.
 
----
+## 27.4 What the team explicitly does not commit to in v1
 
-# חלק ס"ז — Browser support matrix
-
-| דפדפן | Min version | Notes |
-|--------|-------------|-------|
-| Chrome | 90+ | Full support (Realtime, Web Push, GPS) |
-| Firefox | 90+ | Full support; Push works with VAPID |
-| Edge | 90+ | Same as Chrome |
-| Safari (Mac) | 16+ | Web Push from 16.4 |
-| Safari (iOS) | 16.4+ | Push works only after "Add to Home Screen" |
-| Samsung Internet | 18+ | Full support |
-| Chrome Android | 90+ | Full support |
-| Firefox Android | 90+ | Full support |
-| Old Android Browser | — | Not supported. Fallback: poll every 30s instead of Realtime. |
+The non-goals in §4.2. Stated plainly: no parent portal, no continuous tracking, no fraud detection, no native app, no multi-tenant, no RLS in v1, no automatic disciplinary actions.
 
 ---
 
-# חלק ס"ח — Internationalization Strings (טבלה מלאה)
-
-```ts
-// src/lib/audit/strings.ts
-export const HEBREW_STRINGS = {
-  // Common actions
-  'audit.action.open':       'פתח ביקורת',
-  'audit.action.close':      'סגור ביקורת',
-  'audit.action.abort':      'בטל ביקורת',
-  'audit.action.refresh':    'רענן',
-  'audit.action.export':     'ייצא',
-  'audit.action.cancel':     'בטל',
-  'audit.action.confirm':    'אישור',
-  'audit.action.back':       'חזור',
-  'audit.action.next':       'הבא',
-
-  // Modes
-  'audit.mode.manual':       'ביקורת מהירה',
-  'audit.mode.location':     'ביקורת מיקום',
-  'audit.mode.manual.desc':  'הרכזים מסמנים ידנית את כיתתם',
-  'audit.mode.location.desc':'הסלולרים שולחים GPS אוטומטית',
-
-  // Categories
-  'audit.cat.pending':       'ממתין',
-  'audit.cat.in_yeshiva':    'נוכח',
-  'audit.cat.out_permit':    'בחוץ עם אישור',
-  'audit.cat.out_no_permit': 'בחוץ ללא אישור',
-  'audit.cat.unknown':       'לא ידוע',
-
-  // Distance buckets
-  'audit.bucket.green':      'בישיבה',
-  'audit.bucket.blue':       'באזור',
-  'audit.bucket.orange':     'אזור חברון',
-  'audit.bucket.red':        'מחוץ לטווח',
-
-  // Status messages
-  'audit.status.active':     'פעילה',
-  'audit.status.closed':     'הסתיימה',
-  'audit.status.aborted':    'בוטלה',
-  'audit.status.timed_out':  'פג תוקף',
-
-  // Alerts
-  'audit.alert.critical':    'אזעקה קריטית!',
-  'audit.alert.medium':      'התראה',
-  'audit.alert.acknowledge': 'סמן כנצפה',
-
-  // KPIs
-  'audit.kpi.total':         'סה"כ',
-  'audit.kpi.marked':        'סומנו',
-  'audit.kpi.pending':       'ממתין',
-  'audit.kpi.alerts_open':   'אזעקות פתוחות',
-  'audit.kpi.progress':      'התקדמות',
-
-  // Wizard steps
-  'audit.wizard.step1':      'בחר מצב',
-  'audit.wizard.step2':      'בחר כיתות',
-  'audit.wizard.step3':      'הגדרות',
-  'audit.wizard.step4':      'אישור',
-
-  // Errors
-  'audit.error.AUDIT_ACTIVE':              'יש כבר ביקורת פעילה',
-  'audit.error.INVALID_MODE':              'מצב לא חוקי',
-  'audit.error.NO_CLASSES_SELECTED':       'יש לבחור לפחות כיתה אחת',
-  'audit.error.SESSION_NOT_FOUND':         'הסשן לא נמצא',
-  'audit.error.SESSION_NOT_ACTIVE':        'הסשן כבר נסגר',
-  'audit.error.RESPONSE_NOT_FOUND':        'תלמיד לא נמצא בביקורת',
-  'audit.error.PERMISSION_DENIED':         'אין הרשאה',
-  'audit.error.NETWORK':                   'שגיאת רשת',
-  'audit.error.GPS_DENIED':                'הרשאת GPS נדחתה',
-  'audit.error.GPS_TIMEOUT':               'איסוף GPS לקח יותר מדי זמן',
-  'audit.error.GPS_UNAVAILABLE':           'GPS לא זמין במכשיר זה',
-
-  // Student-facing
-  'student.audit.title':     'בקרת מיקום מהירה',
-  'student.audit.desc':      'ההנהלה מבקשת לוודא שאתה בישיבה',
-  'student.audit.confirm':   'אשר ושלח מיקום',
-  'student.audit.refuse':    'אני לא יכול / לא בישיבה',
-  'student.audit.collecting':'מתבצע איסוף מיקום…',
-  'student.audit.submitting':'שולח לשרת…',
-  'student.audit.thanks':    'תודה! הנתון נשלח.',
-
-  // Supervisor-facing
-  'supervisor.audit.banner.active': 'ביקורת פעילה — סמן את התלמידים',
-  'supervisor.audit.button.in_yeshiva':    'נוכח',
-  'supervisor.audit.button.out_permit':    'עם אישור',
-  'supervisor.audit.button.out_no_permit': 'ללא אישור',
-  'supervisor.audit.note_placeholder':     'הערה (חולה, הלוויה...)',
-  'supervisor.audit.all_done':             'סימנת את כולם — תודה!',
-}
-
-export function t(key: keyof typeof HEBREW_STRINGS): string {
-  return HEBREW_STRINGS[key] ?? key
-}
-```
-
----
+# Part 28 — Open Questions
 
-# חלק ס"ט — Analytics Events
-
-```ts
-// src/lib/audit/analytics.ts
-// Wrapper around analytics provider (Vercel Analytics / posthog).
-
-import { track } from '@vercel/analytics'
-
-export const auditEvents = {
-  openClicked(mode: 'MANUAL' | 'LOCATION') {
-    track('audit.open.clicked', { mode })
-  },
-  opened(sessionId: string, mode: string, classCount: number, studentCount: number) {
-    track('audit.opened', { sessionId, mode, classCount, studentCount })
-  },
-  responseSubmitted(sessionId: string, category: string, source: 'GPS' | 'MANUAL') {
-    track('audit.response.submitted', { sessionId, category, source })
-  },
-  alertTriggered(sessionId: string, severity: string, distanceM: number) {
-    track('audit.alert.triggered', { sessionId, severity, distanceM })
-  },
-  closed(sessionId: string, durationMin: number) {
-    track('audit.closed', { sessionId, durationMin })
-  },
-  projectionEntered() {
-    track('audit.projection.entered')
-  },
-  exportRequested(format: 'pdf' | 'excel') {
-    track('audit.export.requested', { format })
-  },
-}
-```
+These are decisions that **need to be made before implementation begins**. They are not edge cases; they are commitments not yet made.
 
----
+**Q1. Does pg_cron exist on the current Supabase instance?**
+The cron-based timeout depends on it. If pg_cron isn't available, an alternative (a GitHub Actions schedule that calls a `tick_audit_timeout` RPC every 5 minutes) is acceptable but requires a separate deploy step.
+*Recommended check:* `SELECT installed_version FROM pg_available_extensions WHERE name='pg_cron';`
 
-# חלק ע' — מבט סופי על מבנה הקבצים החדש
+**Q2. Are the existing VAPID keys the keys we want to keep?**
+If they were generated for a previous developer and the private key is uncertain, push will fail silently. The keys must be present, matching between the frontend `.env` and the Edge Function secrets, and known to the rosh yeshiva as the encryption keys for student notifications.
+*Recommended action:* Audit the VAPID keys before Phase 3. Rotate if uncertain.
 
-```
-src/
-├── pages/
-│   ├── admin/
-│   │   ├── AuditLandingPage.tsx          ← NEW
-│   │   ├── AuditNewPage.tsx              ← NEW
-│   │   ├── AuditLivePage.tsx             ← NEW
-│   │   ├── AuditSummaryPage.tsx          ← NEW
-│   │   └── AuditComparePage.tsx          ← NEW
-│   └── class-supervisor/
-│       └── AuditPage.tsx                 ← NEW
-├── components/
-│   └── audit/                            ← NEW (whole folder)
-│       ├── AuditHeader.tsx
-│       ├── AuditKpiRow.tsx
-│       ├── AuditCategoryChip.tsx
-│       ├── AuditDistanceBadge.tsx
-│       ├── AuditClassCard.tsx
-│       ├── AuditClassGrid.tsx
-│       ├── AuditClassDrawer.tsx
-│       ├── AuditHeatmap.tsx
-│       ├── AuditMap.tsx
-│       ├── AuditActivityFeed.tsx
-│       ├── AuditAlertList.tsx
-│       ├── AuditAlertModal.tsx
-│       ├── AuditModeSelector.tsx
-│       ├── AuditClassSelector.tsx
-│       ├── AuditLocationSettings.tsx
-│       ├── AuditCloseModal.tsx
-│       ├── AuditProjectionMode.tsx
-│       ├── AuditEmptyState.tsx
-│       ├── AuditLoadingSkeleton.tsx
-│       ├── AuditErrorBoundary.tsx
-│       ├── StudentAuditSheet.tsx
-│       ├── SupervisorAuditPanel.tsx
-│       ├── SupervisorStudentRow.tsx
-│       ├── PullToRefresh.tsx
-│       └── SwipeableStudentRow.tsx
-├── store/
-│   ├── auditStore.ts                     ← NEW
-│   └── auditUiStore.ts                   ← NEW
-├── hooks/
-│   ├── useActiveAudit.ts                 ← NEW
-│   ├── useAuditStats.ts                  ← NEW
-│   ├── useAuditLocationCollector.ts      ← NEW
-│   └── useProjectionRotation.ts          ← NEW
-├── lib/
-│   ├── audit/                            ← NEW (whole folder)
-│   │   ├── categories.ts
-│   │   ├── distanceBuckets.ts
-│   │   ├── haversine.ts
-│   │   ├── gpsCollector.ts
-│   │   ├── soundManager.ts
-│   │   ├── exportPdf.ts
-│   │   ├── exportExcel.ts
-│   │   ├── animations.ts
-│   │   ├── auditAuth.ts
-│   │   ├── realtimeManager.ts
-│   │   ├── flags.ts
-│   │   ├── strings.ts
-│   │   ├── analytics.ts
-│   │   └── __tests__/
-│   │       ├── haversine.test.ts
-│   │       ├── distanceBuckets.test.ts
-│   │       └── gpsCollector.test.ts
-│   └── api/
-│       └── auditApi.ts                   ← NEW
-├── types/
-│   └── audit.ts                          ← NEW
-└── lib/sync/
-    └── auditSync.ts                      ← NEW
-supabase/
-├── migrations/
-│   └── 20260516000000_internal_audit_v2.sql  ← NEW
-└── functions/
-    ├── send-audit-push/                   ← NEW
-    │   ├── index.ts
-    │   └── webPush.ts
-    └── notify-audit-alert/                ← NEW
-        └── index.ts
-public/
-├── sw.js                                  ← MODIFIED
-└── sounds/                                ← NEW
-    ├── chime-soft.mp3
-    ├── ding.mp3
-    ├── alert.mp3
-    ├── notification.mp3
-    └── complete.mp3
-e2e/
-└── audit/                                 ← NEW
-    └── manual-mode.spec.ts
-```
+**Q3. What is the supervisor-class mapping today?**
+The system has class codes per class in `app_settings`. Are all 16 classes currently mapped? Is each class's mapping pointing to a real, active, in-the-building supervisor?
+*Recommended action:* Verify before rolling supervisor flow. The admin should print a list and walk through it.
 
-**סך הכל קבצים חדשים/משונים:** ~55
+**Q4. Is there a backup snapshot policy?**
+Before applying the production migration, a backup is required. Does Supabase auto-backup cover us, or is a manual snapshot needed?
+*Recommended action:* Confirm Supabase tier supports point-in-time recovery; if not, take a manual SQL dump pre-migration.
 
----
+**Q5. Should "sound on" be the default?**
+The admin's live dashboard plays chimes on response arrivals and alert sounds on critical alerts. The default state is "on" in this plan. But in some contexts (open-plan office, vaad meeting), the admin will want sound off by default.
+*Recommendation:* Default sound on for first launch; persist the user's preference; tweak default if feedback says so.
 
-# חלק ע"א — לוח זמנים מפורט יום-יום
-
-| יום | משימה | קבצים | זמן (שעות) |
-|-----|--------|--------|-------------|
-| 1 | מיגרציית DB + RPCs (open, submit, get_active, close) | `20260516000000_internal_audit_v2.sql` | 8 |
-| 2 | RPCs (abort, kpis, alerts, list, tick) + triggers | אותו קובץ | 6 |
-| 3 | Edge function `send-audit-push` + VAPID config | `supabase/functions/send-audit-push/*` | 4 |
-| 4 | TypeScript types + lib/audit modules בסיסי | `types/audit.ts`, `lib/audit/{haversine,distanceBuckets,categories}.ts` | 5 |
-| 5 | lib/audit/gpsCollector.ts + soundManager + tests | `lib/audit/{gpsCollector,soundManager}.ts` + tests | 5 |
-| 6 | Zustand stores | `store/audit{Store,UiStore}.ts` | 5 |
-| 7 | Hooks | `hooks/useActiveAudit.ts`, `useAuditStats.ts`, etc. | 5 |
-| 8 | API client (auditApi.ts) | `lib/api/auditApi.ts` | 4 |
-| 9 | UI primitives (CategoryChip, DistanceBadge, KpiRow) | `components/audit/Audit{CategoryChip,DistanceBadge,KpiRow}.tsx` | 5 |
-| 10 | ClassCard, ClassGrid, ClassDrawer | אותם קבצים | 6 |
-| 11 | Heatmap | `components/audit/AuditHeatmap.tsx` | 4 |
-| 12 | Map (Leaflet integration) | `components/audit/AuditMap.tsx` | 7 |
-| 13 | Activity Feed | `components/audit/AuditActivityFeed.tsx` | 4 |
-| 14 | Alert List + Modal | `components/audit/AuditAlert{List,Modal}.tsx` | 5 |
-| 15 | Mode Selector + Class Selector + Settings | `Audit{Mode,Class}Selector.tsx`, `AuditLocationSettings.tsx` | 6 |
-| 16 | New Page (wizard) | `pages/admin/AuditNewPage.tsx` | 5 |
-| 17 | Landing Page | `pages/admin/AuditLandingPage.tsx` | 4 |
-| 18 | Live Page | `pages/admin/AuditLivePage.tsx` | 6 |
-| 19 | Summary Page + Compare Page | `pages/admin/Audit{Summary,Compare}Page.tsx` | 6 |
-| 20 | Projection Mode | `components/audit/AuditProjectionMode.tsx` | 4 |
-| 21 | Supervisor Panel + Student Row | `components/audit/Supervisor*.tsx` | 6 |
-| 22 | Student Sheet + audio chimes | `components/audit/StudentAuditSheet.tsx` | 4 |
-| 23 | Service Worker integration | `public/sw.js` | 3 |
-| 24 | Export PDF / Excel | `lib/audit/export*.ts` | 5 |
-| 25 | Offline queue (auditSync.ts) | `lib/sync/auditSync.ts` | 4 |
-| 26 | Pull-to-refresh + swipe gestures | `components/audit/{PullToRefresh,SwipeableStudentRow}.tsx` | 4 |
-| 27 | Polish: animations, sound effects, projection rotation | various | 5 |
-| 28 | Unit tests for all lib/audit | `__tests__/*` | 5 |
-| 29 | Storybook stories | `*.stories.tsx` | 4 |
-| 30 | E2E tests (Playwright) | `e2e/audit/*` | 6 |
-| 31 | Bug fixes from QA | various | 8 |
-| 32 | Accessibility audit + fixes | various | 4 |
-| 33 | Performance profiling + opts | various | 4 |
-| 34 | Documentation update (CLAUDE.md) | `CLAUDE.md` | 3 |
-| 35 | Staging deploy + smoke tests | infra | 4 |
-| 36 | Production deploy + monitor | infra | 8 |
-| **סה"כ** | | | **~180 שעות = ~23 ימי עבודה** |
+**Q6. Should the rosh yeshiva have a separate, read-only role?**
+Currently he uses the admin's phone if he wants to see audit data. A read-only "view only" admin role is a small addition (just a flag on `app_settings`). Do we want it in v1?
+*Recommendation:* Defer to v1.1. The admin shares his phone for now.
 
----
+**Q7. What happens to RollCall code post-rollout?**
+We can delete it, deprecate it, or mark it as legacy. Each has implications for routing and minor analytics.
+*Recommendation:* Deprecate (mark unused) for 30 days post-rollout; delete fully in a v1.1 cleanup.
 
-# חלק ע"ב — Risk Register
-
-| סיכון | סבירות | השפעה | מיטיגציה |
-|--------|---------|---------|----------|
-| Web Push לא יעבוד ב-iOS Safari | בינונית | גבוהה | Fallback: Realtime listen. UI: notification banner. |
-| GPS accuracy גרועה בבניין | גבוהה | בינונית | maxAccuracyM=1000, marker `LOW_ACCURACY`, supervisor override |
-| Realtime disconnect | בינונית | בינונית | exponential backoff + polling fallback |
-| מנהל סגר טאב באמצע ביקורת | גבוהה | נמוכה | Session ב-DB; refresh כל מקום ימשיך מהמקום |
-| 50% מהתלמידים לא יסכימו GPS | נמוכה | גבוהה | אזעקת אדמין; אופציה ל-fallback ל-Manual |
-| pg_cron נופל ב-Supabase | נמוכה | נמוכה | Manual cleanup; 24h timeout ידני |
-| מיגרציה הרסה אובייקטים קיימים | נמוכה | קריטית | Backup לפני. הכל idempotent. |
-| Bundle size מתפוצץ עם Leaflet | בינונית | בינונית | lazy import; code split של dashboard |
-| Hebrew text מתרחק ב-PDF | בינונית | נמוכה | jspdf-autotable עם RTL; pre-test |
-| Push spam — 381 push בו זמנית = rate-limit | בינונית | בינונית | batch send בקבוצות של 50, throttle 100ms |
-| מנהל לוחץ "סיים" בטעות | בינונית | גבוהה | Confirm modal עם רשימת PENDING |
-| Two admins clash open | נמוכה | נמוכה | unique index on (status='ACTIVE') |
+**Q8. Do we want the privacy diagnostic page in v1?**
+UC-12 describes it. Implementing it is small (one new admin page, one SQL query). But it adds surface area.
+*Recommendation:* Include in v1; the cost is low and the institutional value is high.
 
----
+**Q9. What is the Hebrew copy for the student consent screen?**
+The draft is in §5.9 (table) but the consent screen specifically needs review by the rosh yeshiva because it touches halachic-privacy framing.
+*Recommendation:* Draft the consent screen text in Hebrew, submit to rosh yeshiva for review during Phase 4.
 
-# חלק ע"ג — Quality Gates (CI passes required)
+**Q10. Should the system retain raw push payloads for debugging?**
+The `audit_push_log` records success/failure but not the payload sent. For debugging push reliability, retaining the payload for a short window (7 days) would help. This is a small data-model decision.
+*Recommendation:* Add a `payload_summary` TEXT field on `audit_push_log`; 7-day retention; not used for normal operations.
 
-לפני merge ל-`main`:
+**Q11. Are class supervisors authorized to see distances/coordinates of their students?**
+A class supervisor sees their students' categories. Should they also see the distance/bucket if it came from GPS? This is a privacy question — the data exists, but exposing it to supervisors creates a higher exposure surface.
+*Recommendation:* In v1, supervisors see the bucket and the category, but **not** the precise distance in meters. The admin sees precise distance. This honors the principle of least exposure.
 
-1. **TypeScript** עובר `npm run typecheck` ללא שגיאות
-2. **ESLint** עובר `npm run lint` ללא warnings
-3. **Unit tests** עוברים 100%
-4. **E2E** at least the smoke suite עובר
-5. **Bundle size** total < 400KB gzipped
-6. **Lighthouse** Performance > 90, Accessibility > 95
-7. **PR description** מתאר מה השתנה, איזה תרחישים נבדקו
-8. **Reviewer approves** (1 minimum)
-9. **No `console.log` / `debugger` / `TODO` ב-diff**
-10. **DB migration sql** רץ מקומית ללא שגיאות
+**Q12. Should the heatmap and map views be available to supervisors?**
+Currently only the admin sees them. Should a supervisor be able to see a map of their own class's GPS responses?
+*Recommendation:* No, in v1. Maintains the supervisor's scope as "marking my class", not "investigating my class". If demanded, add in v1.1.
 
 ---
-
-# חלק ע"ד — Open Questions to confirm before coding
 
-לפני שמתחילים לקודד, יש לוודא:
+# Part 29 — Final Approval Checklist
 
-1. **האם Supabase pg_cron מופעל ב-instance הנוכחי?** — אם לא, חלופה: GitHub Actions cron כל 5 דק.
-2. **כמה תלמידים יש להם push_token תקין כרגע?** — שאילתת DB: `SELECT COUNT(*) FROM students WHERE push_token IS NOT NULL`
-3. **האם יש Slack workspace לקבל webhook התראות?** — אם לא, נדלג.
-4. **מה ה-VAPID keys הנוכחיים?** — לבדוק שהם תואמים בין Edge func ל-frontend.
-5. **האם יש כפתור "fullscreen" שעובד ב-Safari?** — לבדוק. אם לא, projection mode עובד רק ב-Chrome/Edge.
-6. **האם ה-Geo permission ב-PWA נשמרת אחרי refresh?** — לבדוק; אם לא, נצטרך לבקש כל פעם.
-7. **מה ה-admin PIN כיום?** — לוודא שתואם ל-app_settings.
-8. **האם supervisors כבר משתמשים בקודי כיתה?** — אם כן, לוודא שהם ידועים לפני הדוקומנט הזה.
+A senior stakeholder reviewing this plan should be able to sign off after confirming each line.
 
----
-
-# חלק ע"ה — Migration Documentation Template
-
-```markdown
-# Migration: 20260516000000_internal_audit_v2
-
-**Date applied:** YYYY-MM-DD
-**Applied by:** _____________
-**Backup taken:** [YES/NO] — snapshot name: _____________
-**Pre-flight checks:**
-  - [ ] pg_cron extension installed
-  - [ ] pgcrypto extension installed
-  - [ ] supabase_realtime publication exists
-  - [ ] students table has rows (count: ___)
-  - [ ] departures table exists
-
-**Steps:**
-  - [ ] BEGIN
-  - [ ] Tables created
-  - [ ] Indices created
-  - [ ] Triggers created
-  - [ ] Helper functions created
-  - [ ] RPCs created
-  - [ ] cron schedule added
-  - [ ] Publication updated
-  - [ ] COMMIT
-
-**Post-flight verification:**
-  - [ ] `\d audit_sessions` returns expected schema
-  - [ ] `SELECT * FROM cron.job WHERE jobname='tick_audit_timeout'` returns 1 row
-  - [ ] `SELECT * FROM pg_publication_tables WHERE pubname='supabase_realtime'` includes all 3 audit tables
-  - [ ] Test call: `SELECT public.open_audit('MANUAL', ARRAY['כיתה הרב יעקב']::text[], 'TEST', '{}', NULL)` — returns session_id
-  - [ ] Test call: `SELECT public.close_audit(<id>, 'TEST', NULL)` — returns CLOSED
-  - [ ] Cleanup: `DELETE FROM public.audit_sessions WHERE notes='TEST'`
-
-**Issues encountered:** ______________
-
-**Rollback executed?** [YES/NO]
-```
+**Strategic alignment**
+- [ ] The problem statement (§3) matches the institutional priority.
+- [ ] The goals (§4.1) are correct and measurable.
+- [ ] The non-goals (§4.2) are explicit and acceptable.
+- [ ] The success criteria (§4.3) are realistic.
 
----
+**Product decisions**
+- [ ] Two modes (manual, location) is the right scope. (§5.1)
+- [ ] Three pickable categories is the right cardinality. (§5.2)
+- [ ] Admin-only audit initiation is the right authority model. (§5.3)
+- [ ] Single-active-session is the right concurrency model. (§5.4)
+- [ ] 300m / 1km / 5km distance buckets are the right thresholds. (§5.5)
+- [ ] 90-day GPS retention is the right privacy stance. (§5.7)
+- [ ] The Hebrew terminology table is accepted. (§5.9)
 
-# חלק ע"ו — DB Maintenance Queries (אחרי deploy)
-
-```sql
--- 1. כמה סשנים הסתיימו בהצלחה (CLOSED) ב-30 הימים האחרונים
-SELECT mode, COUNT(*) FROM audit_sessions
-WHERE status='CLOSED' AND started_at > NOW() - INTERVAL '30 days'
-GROUP BY mode;
-
--- 2. ממוצע משך ביקורת (דקות) לפי מצב
-SELECT mode, AVG(EXTRACT(EPOCH FROM (closed_at - started_at))/60) AS avg_min
-FROM audit_sessions
-WHERE status='CLOSED'
-GROUP BY mode;
-
--- 3. כמה אזעקות נוצרו בשבוע האחרון
-SELECT severity, COUNT(*) FROM audit_alerts
-WHERE triggered_at > NOW() - INTERVAL '7 days'
-GROUP BY severity;
-
--- 4. אחוז תלמידים שהגיבו ב-LOCATION mode
-SELECT s.id,
-  COUNT(*) FILTER (WHERE r.category <> 'UNKNOWN' AND r.gps_status = 'OK')::float
-  / NULLIF(COUNT(*), 0) AS response_rate
-FROM audit_sessions s
-JOIN audit_responses r ON r.session_id = s.id
-WHERE s.mode = 'LOCATION'
-GROUP BY s.id;
-
--- 5. תלמידים שתמיד מסומנים "ללא אישור"
-SELECT student_id, COUNT(*) AS times
-FROM audit_responses
-WHERE category = 'OUT_NO_PERMIT'
-GROUP BY student_id
-ORDER BY times DESC
-LIMIT 20;
-
--- 6. כיתות עם הכי הרבה אזעקות
-SELECT class_id, COUNT(*) AS alerts_count
-FROM audit_responses r
-JOIN audit_alerts a ON a.student_id = r.student_id AND a.session_id = r.session_id
-GROUP BY class_id
-ORDER BY alerts_count DESC;
-
--- 7. ניקוי ביקורות ישנות (שמירה ל-3 חודשים בלבד)
-DELETE FROM audit_sessions
-WHERE status IN ('CLOSED', 'TIMED_OUT', 'ABORTED')
-  AND closed_at < NOW() - INTERVAL '90 days';
-
--- 8. בדיקת push success rate
-SELECT
-  DATE_TRUNC('day', sent_at) AS day,
-  COUNT(*) FILTER (WHERE success) AS sent,
-  COUNT(*) FILTER (WHERE NOT success) AS failed
-FROM audit_push_log
-WHERE sent_at > NOW() - INTERVAL '30 days'
-GROUP BY day
-ORDER BY day DESC;
-
--- 9. תלמידים ללא push_token
-SELECT COUNT(*) FROM students WHERE push_token IS NULL;
-
--- 10. השלמת ביקורת לפי כיתה ב-7 הימים האחרונים
-SELECT class_id,
-       AVG(CASE WHEN category <> 'PENDING' THEN 1.0 ELSE 0 END) AS marked_rate
-FROM audit_responses r
-JOIN audit_sessions s ON s.id = r.session_id
-WHERE s.started_at > NOW() - INTERVAL '7 days'
-GROUP BY class_id
-ORDER BY marked_rate ASC;
-```
+**Architecture**
+- [ ] The layer breakdown (§10.3) is sound.
+- [ ] The data model (§11) supports the queries that matter.
+- [ ] Database is the sole source of truth. (§13.1)
+- [ ] Replay-safety is a non-negotiable. (§13.2)
 
----
+**Risks**
+- [ ] The top risks (§25.1) are understood.
+- [ ] Mitigations for R1 (iOS push) and R2 (indoor GPS) are accepted.
+- [ ] The kill switch (§24.3) is well-defined.
 
-# חלק ע"ז — Naming Conventions reference
-
-| Type | Pattern | Example |
-|------|---------|---------|
-| Table | snake_case, plural | `audit_responses` |
-| Column | snake_case | `gps_accuracy_m` |
-| RPC | snake_case verb_noun | `submit_audit_response` |
-| Trigger | `tr_<table>_<action>` | `tr_audit_responses_log_change` |
-| Trigger function | `tg_<table>_<action>` | `tg_audit_responses_alert` |
-| Helper function | `fn_<purpose>` | `fn_haversine_m` |
-| Index | `ix_<table>_<columns>` | `ix_audit_responses_session_class` |
-| Unique constraint | `uq_<table>_<columns>` | `uq_audit_responses_student_session` |
-| Check constraint | `chk_<purpose>` | `chk_gps_pair` |
-| TypeScript file | camelCase | `auditStore.ts` |
-| TypeScript type | PascalCase | `AuditSession` |
-| React component file | PascalCase.tsx | `AuditKpiRow.tsx` |
-| Hook | useXxx | `useAuditStats` |
-| Zustand store | useXxxStore | `useAuditStore` |
-| CSS variable | --audit-xxx | `--audit-red` |
-| Tailwind class | bg-audit-xxx | `bg-audit-green` |
-| Test file | xxx.test.ts | `haversine.test.ts` |
-| Stories file | xxx.stories.tsx | `AuditClassCard.stories.tsx` |
+**Implementation**
+- [ ] Five phases (§23) is the right cadence.
+- [ ] 4-6 week budget is acceptable.
+- [ ] The acceptance gate for each phase is clear.
 
----
+**Privacy & security**
+- [ ] The threat model (§16.1) is realistic.
+- [ ] Halachic privacy considerations (§16.5) are addressed.
+- [ ] The auth honest-assessment (§16.3) is acceptable for v1.
 
-# חלק ע"ח — Branching & Workflow
+**Open questions**
+- [ ] The 12 open questions in §28 are assigned to owners.
+- [ ] None of them block Phase 0; all of them have answers before Phase 3.
 
-```
-main                            ← production
-  │
-  ├── claude/internal-audit-v2  ← בתוכנית, יום 1-36
-  │     ├── feature/audit-db        ← יום 1-3
-  │     ├── feature/audit-types     ← יום 4-5
-  │     ├── feature/audit-stores    ← יום 6-7
-  │     ├── feature/audit-components ← יום 8-15
-  │     ├── feature/audit-pages     ← יום 16-22
-  │     ├── feature/audit-polish    ← יום 23-30
-  │     └── feature/audit-tests     ← יום 28-32
-  │
-  └── (hotfix/* — kept separate)
-```
+**Rollout**
+- [ ] The phased rollout (§24.2) is acceptable.
+- [ ] The communication plan (§24.4) is approved.
 
-לכל מיני-feature: branch, PR קטן, ביקורת קוד, merge ל-`claude/internal-audit-v2`.
+**Sign-off**
 
-בסוף: 1 PR אחד גדול ל-`main` עם ה-summary של הכל.
+| Role | Name | Signature | Date |
+|---|---|---|---|
+| Rosh Yeshiva | | | |
+| Administrator | | | |
+| Lead Engineer | | | |
+| Privacy Reviewer | | | |
 
 ---
 
-# חלק ע"ט — מוצרים נוספים שניתן לבנות על גבי
+# Document end
 
-עוד אפשרויות אחרי שיש לנו audit subsystem:
+This document is **the plan**. The implementation reference (`INTERNAL_AUDIT_IMPLEMENTATION_REFERENCE.md`) contains code-level details that follow from this plan but do not define it. If the implementation reference and this document disagree, **this document wins** until amended.
 
-1. **Automatic recurring audits** — cron שכל יום ב-09:00 פותח ביקורת LOCATION אוטומטית
-2. **Audit comparison** — להראות diff בין שני סשנים
-3. **Class trends** — גרף קווי של אחוז נוכחות לכל כיתה לאורך חודש
-4. **Heatmap on real map** — geo-heatmap של איפה התלמידים נוטים להיות
-5. **Predictive alerts** — אם תלמיד לא הגיב 3 פעמים ברצף — שלח לרכז
-6. **Voice notes** — רכז יכול להקליט הערה במקום לכתוב
-7. **Photo upload** — רכז יכול לצלם רשימה ידנית ולהעלות
-8. **QR code check-in** — תלמיד סורק QR ליד הכניסה לישיבה
-9. **NFC tags** — לבעלי מכשירים עם NFC, יכול להחליף את GPS
-10. **Wearables** — אינטגרציה עם שעונים חכמים שמדווחים מיקום אוטומטית
+Amendments to this document must be:
 
----
-
-# חלק פ' — Glossary מורחב
-
-| Term | DB / Code | Hebrew | Notes |
-|------|-----------|---------|-------|
-| Audit Session | `audit_sessions` row | סשן ביקורת | One audit run |
-| Audit Response | `audit_responses` row | תגובת ביקורת | Per-student response |
-| Audit Alert | `audit_alerts` row | אזעקת ביקורת | "Out of range" event |
-| Push Target | `settings.pushTarget` | מי לקבל push | STUDENTS/SUPERVISORS/BOTH |
-| Bucket | `distance_bucket` | קטגוריית מרחק | GREEN/BLUE/ORANGE/RED |
-| Snap | bucketFromMeters() | מיון מרחק | Function to bucket |
-| Sensitivity | `settings.sensitivity` | רגישות | LOW/MEDIUM/HIGH |
-| Timeout | `settings.timeoutSec` | זמן המתנה | Sec before reminder |
-| Projection | `projectionMode` | מצב הקרנה | Fullscreen for big screen |
-| Realtime channel | `audit_v2:<id>` | ערוץ זמן אמת | Per-session channel |
-| Optimistic update | client trick | עדכון מקומי | UI update before server |
-| Backoff | `Math.pow(2, ...)` | השהיה גוברת | Reconnect strategy |
-| Geofence | not implemented | גדר וירטואלית | Future: polygon instead of circle |
-| GPS accuracy | `gps_accuracy_m` | דיוק GPS | meters, lower=better |
-| ETag | not used | תג גרסה | Future: realtime optimization |
-| Activity feed | UI component | פיד פעילות | Live event stream |
-| Heatmap | UI component | מפת חום | Class-by-class % marked |
-| Audit log | `audit_response_log` | יומן ביקורת | Trail of category changes |
-| Acknowledge | API verb | סמן כנצפה | Mark alert as seen |
-| Acknowledge alert | RPC | אישור אזעקה | Mark seen, audit log |
-| Stale state | UI concept | מצב מיושן | > 30s since realtime |
-| Failover | strategy | חירום | Switch from realtime to polling |
-| RTO | recovery | זמן התאוששות | Time to recover from outage |
-| RPO | recovery | נקודת התאוששות | Acceptable data loss window |
-| SLO | objective | יעד שירות | Service level objective |
-
----
+1. Tracked in a changelog at the top (to be added in v1.1).
+2. Initialed by the same reviewers who approved v1.
+3. Reflected in the implementation reference within one week.
 
-# חלק פ"א — Final Submission Checklist
-
-לפני שמכריזים "הפיצ'ר מוכן":
-
-## DB
-- [ ] migration רץ בלי שגיאות ב-staging
-- [ ] migration רץ בלי שגיאות ב-production
-- [ ] כל ה-8 RPCs נבדקו idלית
-- [ ] cron schedule מופעל
-- [ ] indices נוצרו
-- [ ] publication מעודכן
-
-## Backend
-- [ ] Edge function `send-audit-push` deployed
-- [ ] VAPID keys מוגדרים
-- [ ] secrets במקום הנכון
-
-## Frontend
-- [ ] כל ה-components נבנו
-- [ ] כל ה-pages עובדים
-- [ ] routing עודכן ב-App.tsx
-- [ ] Service Worker עדכני
-- [ ] CSS variables מוגדרים
-- [ ] Tailwind extensions מוגדרים
-
-## Tests
-- [ ] Unit tests עוברים ≥90% coverage
-- [ ] E2E tests עוברים (manual + location happy path)
-- [ ] Refresh persistence נבדק
-- [ ] Concurrent admin attempts נבדק
-- [ ] Permissions denied נבדק
-- [ ] GPS denied נבדק
-- [ ] Realtime disconnect נבדק
-
-## Polish
-- [ ] עברית בכל מקום
-- [ ] RTL נכון
-- [ ] Dark mode עובד
-- [ ] Mobile עובד
-- [ ] Accessibility ≥95
-- [ ] Performance LCP <2.5s
-- [ ] Sounds עובדים
-- [ ] Animations עובדות
-- [ ] Projection mode עובד
-
-## Documentation
-- [ ] CLAUDE.md מעודכן עם section "Internal Audit 2.0"
-- [ ] README של supabase/migrations מעודכן
-- [ ] Training scripts זמינים
-- [ ] FAQ מעודכן
-
-## Deployment
-- [ ] Vercel production deploy ירוק
-- [ ] Supabase function logs נקיים
-- [ ] Monitoring dashboard מוגדר
-- [ ] Alerting Slack/email מוגדר
-- [ ] Rollback procedure נבדק
-
-## Communication
-- [ ] צוות ההנהלה הוסבר על השינוי
-- [ ] רכזי הכיתות הודרכו
-- [ ] לתלמידים נשלח push הודעה אינפורמטיבית
-- [ ] תיעוד בפיד פנימי
-
----
+The next document update will be after Phase 5 acceptance, capturing the lessons learned from real production use.
 
-# חלק פ"ב — סיום
-
-**זהו המסמך הסופי.**
-
-הוא מכיל את כל מה שצריך כדי לבנות מערכת ביקורת פנימית 2.0 ברמה מקצועית, כולל:
-
-- **תכנון אדריכלי** מקיף
-- **קוד מלא** של 60+ קבצים
-- **5 דפים** מלאים
-- **25+ רכיבים** מלאים
-- **8 RPCs** SQL מלאים
-- **3 Edge functions** מלאים
-- **טבלאות, indices, triggers** מלאים
-- **טסטים** unit + e2e
-- **wireframes** מפורטים
-- **runbook** deployment
-- **monitoring** plan
-- **training scripts** עברית
-- **FAQ** מורחב
-- **glossary**
-- **API contract**
-- **error matrix**
-- **performance budget**
-- **accessibility checklist**
-- **risk register**
-- **roadmap** של 36 ימים
-- **CI/CD** workflows
-- **rollback** procedures
-
-המסמך עומד על ~10,000 שורות.
-
-זהו מסמך עיון יחיד מספק שמאפשר לכל developer לקחת אותו ולבנות את הפיצ'ר בלי תלות בקונטקסט נוסף.
-
-**צוות המוצר רשאי להעלות שאלות.** כל הניסוחים, הצבעים, המספרים, השמות, ההגיון העסקי, ה-UX, ה-flow, ה-edge cases — הכל נדון, הוכרע, ותועד.
-
-**עתה — לקודד.**
-
-**סוף המסמך — מהדורה סופית מ-2026-05-16.**
+**End of Master Plan v1 — 2026-05-16.**
