@@ -40,6 +40,31 @@ This document was written before the feasibility audit. The audit (see master pl
 
 **When implementing, refer to the master plan for the rationale and to this document for the code shape — but apply the corrections above first.**
 
+### Additional v1.2 runtime corrections (from code-trace findings)
+
+The code-trace review found 32 runtime bugs (B-1 through B-32 in the master plan). The most impactful at the code level:
+
+| What this document shows | Replace with |
+|---|---|
+| RPC calls assume `actor: string` argument | RPC calls take `p_admin_pin` or `p_supervisor_pin` (raw PIN). Frontend reads PIN from `useAuthStore()._adminPinSession` (admin) or `sessionStorage.getItem('supervisor_pin')` (supervisor, must be added in Phase −1). |
+| `close_audit` error code `SESSION_CLOSED` on retry | Actual code is `NOT_ACTIVE`. Frontend close-handler must treat both `NOT_ACTIVE` and `SESSION_CLOSED` as success. |
+| Routes under `/admin/audit/...` | Routes under `/admin/inspection/...`. Add a redirect from `/admin/rollcall` → `/admin/inspection`. |
+| `submit_audit_response` RPC | Use existing `submit_audit_entry` for MANUAL mode. For LOCATION mode, new Edge Function `send-audit-gps` (B-26) is the entry point — students POST to it, it uses service_role to upsert `audit_entries`. There is no `submit_audit_entry_with_gps` RPC in the design. |
+| `audit_entries.source` accepts `'AUTO_GPS'` out-of-the-box | The current CHECK rejects `'AUTO_GPS'`. Phase 0 migration must `ALTER ... DROP CONSTRAINT ... ADD CONSTRAINT ... CHECK (source IN ('SUPERVISOR','AUTO_DEFAULT','AUTO_GPS'))`. |
+| `audit_sessions.status` accepts `'TIMED_OUT'` and `'ABORTED'` | Same — current CHECK is `IN ('ACTIVE','CLOSED')` only. Must ALTER. |
+| `audit_sessions.mode` column exists | Does not exist. Phase 0 migration adds `mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK IN ('MANUAL','LOCATION')`. |
+| `audit_entries` has GPS columns | Does not. Phase 0 ADD COLUMN: `gps_lat`, `gps_lng`, `gps_accuracy_m`, `distance_from_campus_m`, `distance_bucket`, `gps_status`. |
+| `audit_alerts` trigger fires on UPDATE | Must be `AFTER INSERT OR UPDATE` — students without active departures have no entry until first GPS, which is an INSERT. Trigger predicate: `(TG_OP='INSERT' AND NEW.distance_bucket IN ('ORANGE','RED')) OR (TG_OP='UPDATE' AND OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket AND NEW.distance_bucket IN ('ORANGE','RED'))`. |
+| Migration adds `audit_alerts` to realtime | Must explicitly `ALTER PUBLICATION supabase_realtime ADD TABLE audit_alerts;` — easy to forget; without it, alerts insert silently and admin's modal never fires. |
+| Admin can call audit RPCs after refresh | The `_adminPinSession` is not persisted. After refresh, every audit RPC returns `{error:'AUTH'}`. Either persist PIN to sessionStorage OR force re-prompt before each mutation. |
+| Supervisor PIN is available to call `submit_audit_entry` | The raw PIN is discarded after login. Must be stored in sessionStorage on login and re-verified on bootstrap. |
+| `tick_audit_timeout` cron is auto-scheduled by some existing migration | Production has only `tick-departures` and `purge-admin-overrides-retention`. New cron must be added: `SELECT cron.schedule('tick_audit_timeout', '*/5 * * * *', $$ UPDATE audit_sessions SET status='TIMED_OUT' ... $$)`. Without it, one forgotten session blocks all future audits forever. |
+| `AdminGuard` preserves the original URL on redirect to login | It does not. After re-login the user lands on `/admin` default, not the audit URL they bookmarked. Must pass `state={{from: location.pathname}}` in the Navigate. |
+| `students.lastSeen` UPDATEs by anon are enabled by some hardened RLS | They are enabled by a wide-open `anon_update_students` policy with `qual=true`. Pre-existing security gap; not the audit project's responsibility but acknowledged. |
+| `getCurrentPosition` called inside any callback works on iOS | iOS Safari requires user-gesture origin. The call must be **synchronous inside the click handler** of the consent button — not after `await`, not inside `postMessage`, not inside any callback. |
+
+For details and additional findings (B-1 through B-32), see the "Code-Trace Findings — v1.2" section in the master plan.
+
 ---
 
 ## Original document (pre-feasibility-audit content follows)

@@ -737,7 +737,410 @@ After Phase −1, the codebase mirrors production exactly and is ready to extend
 
 ---
 
-## How to read this document
+# Code-Trace Findings — v1.2 (Runtime Bugs)
+
+This section captures findings from a **code-trace review** that walked through actual files and actual production RPC source. Unlike the v1.1 errata (which corrected planning assumptions), these are **bugs that will fire at runtime on the first audit** unless explicitly handled.
+
+Found by three parallel runtime-trace sub-agents plus direct DB inspection. Severity uses the runtime impact, not planning impact.
+
+### B-1. Admin PIN is gone after refresh — every audit RPC will return `{error:'AUTH'}`
+
+**Verified by reading code.** `src/store/authStore.ts:129-135` shows `partialize: (state) => ({ deviceToken })`. The `_adminPinSession` field that holds the PIN is in-memory only. After any refresh, page navigation that triggers re-bootstrap, or PWA restart, `getAdminPin()` returns `null`.
+
+The wizard's planned call to `start_audit_session(p_class_ids, p_title, p_admin_pin)` will pass `null` as the PIN. The RPC's `verify_admin_pin(NULL)` returns `false`, the RPC returns `{error:'AUTH'}`, and the admin sees a confusing toast.
+
+**Mitigation (must implement before first ship).** The planned R-4 auth bootstrap must include both:
+- Calling `supabase.auth.getSession()` on app start; if a session exists for `admin@yeshiva.local`, set `isAdmin: true`.
+- **A separate mechanism for restoring the PIN itself.** Because RPCs need the raw PIN (not just "the user is admin"), the bootstrap must either:
+  - (a) Force a PIN re-prompt before any audit RPC call when `_adminPinSession === null`, **or**
+  - (b) Persist the PIN to `sessionStorage` (per-tab, cleared on tab close).
+
+Option (a) is more secure (PIN never persists). Option (b) is more seamless. The plan must pick one explicitly. **Recommended: (a) — show a "אישור פעולה" modal asking for PIN before opening a new audit.**
+
+### B-2. Supervisor PIN is never stored — `submit_audit_entry` always returns `{error:'AUTH'}`
+
+**Verified by reading code.** `src/store/authStore.ts:81-93` (`loginClassSupervisor`) only stores `{classId, gradeName}` returned by `verify_supervisor_pin`. The raw PIN is **discarded immediately after verification**.
+
+The RPC `submit_audit_entry(...p_supervisor_pin)` requires the raw PIN to call `_resolve_supervisor_class` (which calls `verify_supervisor_pin`, which does `crypt(p_pin, pin_hash) = pin_hash`). No raw PIN → `AUTH` error on every mark attempt.
+
+**Mitigation (must implement before first ship).** Per R-4, store the raw PIN in `sessionStorage` immediately after successful `loginClassSupervisor`. Read from sessionStorage when calling `submit_audit_entry`. On every app bootstrap, re-verify by calling `verify_supervisor_pin` again — if it fails, clear sessionStorage and force re-login.
+
+**Risk acknowledged:** sessionStorage on iOS Safari is wiped when the PWA is suspended >5 minutes in background. A supervisor whose phone is locked in their pocket through morning seder may need to re-log in mid-audit. Acceptable but flag it.
+
+### B-3. `/admin/inspection` route doesn't exist — every navigation falls through to `/login`
+
+**Verified by reading code.** `src/App.tsx:127-143` registers `/admin/rollcall`, `/admin/audit`, `/admin/students`, `/admin/calendar`, `/admin/settings`, `/admin/requests`, `/admin/exceptions`. No `/admin/inspection` or any audit-feature route.
+
+The catch-all `<Route path="*" element={<Navigate to="/login" />}>` at line 156 catches any unknown URL. So a planned link to `/admin/inspection/new` from anywhere — admin dashboard tile, push notification deep link, supervisor banner — bounces the user to login.
+
+**Mitigation.** Phase 1 of implementation must add the route group. Specifically:
+- `/admin/inspection` → `AuditLandingPage`
+- `/admin/inspection/new` → `AuditNewPage` (wizard)
+- `/admin/inspection/:id/live` → `AuditLivePage`
+- `/admin/inspection/:id/summary` → `AuditSummaryPage`
+
+Add a redirect from `/admin/rollcall` to `/admin/inspection` so legacy bookmarks survive.
+
+### B-4. Realtime INSERT storm — 381 separate `postgres_changes` events fire when a session opens
+
+**Verified by reading RPC source (above) and the schema.** `start_audit_session` ends with a bulk `INSERT INTO audit_entries ... SELECT ... FROM active_departures_snapshot`. Each row insert is a separate WAL record, hence a separate Realtime broadcast. With 45 currently-active departures in production this is fine (45 events). If a session covers many active students it could overwhelm the channel.
+
+Worse: the **admin who just called the RPC will miss every INSERT** because the realtime subscription completes only after `start_audit_session` resolves, but the bulk insert fires inside the RPC.
+
+**Mitigation.** This is already partially planned (§13.3 — initial load via `get_active_audit_session` covers missed events). The implementation must:
+- Subscribe to realtime **before** calling `start_audit_session`.
+- Call `get_active_audit_session()` immediately after the RPC resolves (don't rely on realtime to deliver the initial state).
+- De-dup events that arrive after the initial load (compare `updated_at` timestamps before applying).
+
+**Trace risk:** if a developer wires the live page as "render once realtime is subscribed", they will see 0-381 entries depending on race timing.
+
+### B-5. Legacy `audit-control` broadcast is still wired in production code — supervisors will see double banners
+
+**Verified by reading code.** `src/pages/class-supervisor/ClassSupervisorDashboard.tsx:494-507` still subscribes to the legacy `audit-control` broadcast channel. The plan (R-17) says to remove this in the same commit that introduces the new banner.
+
+If the legacy subscriber is left in place during a deployment overlap, supervisors get:
+- The legacy in-memory banner (from `audit-control` broadcast) — useless because admin won't be sending broadcasts in the new flow
+- The new polling-based banner (from `get_active_audit_session()`)
+
+**Mitigation.** R-17 already specifies "same commit". Just must be enforced at code-review time. Practical test: a `grep -rn "audit-control" src/` after the feature ships must return zero hits.
+
+### B-6. Service worker auto-update has no user-facing prompt — old SW = no audit features
+
+**Verified.** `vite.config.ts:11` uses `registerType: 'autoUpdate'`. Grep for `useRegisterSW` returns zero hits. The default `autoUpdate` mode silently installs the new SW but the page keeps the old chunks. A user with the admin tab open since yesterday will not see the new audit route until they manually reload.
+
+**Mitigation (R-54).** Add the `useRegisterSW({ onNeedRefresh, onOfflineReady })` hook somewhere in `App.tsx`. When `onNeedRefresh` fires, show a Hebrew toast: "גרסה חדשה זמינה — רענן". Tap → `updateSW(true)` → reloads. This is well-known cost (~30 lines).
+
+### B-7. **LOCATION mode has no student auth path** — `submit_audit_entry` cannot be called by a student
+
+**Verified.** The existing `submit_audit_entry` REQUIRES `p_supervisor_pin`. The fallback `verify_admin_pin` requires admin PIN. **Students have NO PIN.** They authenticate by ID number only.
+
+So how does a student in LOCATION mode submit their GPS? The plan's R-26 mentions "new RPC `submit_audit_entry_with_gps`" but does not specify the auth model. Three options, in increasing order of safety:
+
+- **(a) Anon-key direct UPSERT to `audit_entries`.** Blocked by RLS (`audit_entries_service_write` policy: only `service_role` can write). Would require adding a permissive RLS policy keyed off `student_id` claim — but there is no claim mechanism. Insecure even with such a policy.
+- **(b) New RPC `submit_audit_entry_with_gps(p_session_id, p_student_id, p_device_token, p_gps_lat, ...)`** that verifies `p_device_token` against `students.deviceToken`. **But 0/381 students currently have a deviceToken** (verified via prod query). The auth check would fail for every student.
+- **(c) Edge Function `submit-student-gps` as proxy.** Student calls Edge Function over HTTPS with their `studentId` + GPS. Edge Function uses service-role key to verify the student exists, the session is ACTIVE, and the student is in the session's snapshot, then calls a new RPC (or inserts directly) with elevated privileges. **This is the only path that works today without a deviceToken backfill.**
+
+**Recommendation:** **adopt option (c).** Build `send-audit-gps` (or extend `send-audit-push` to handle both directions). The function:
+1. Validates the student exists and has the claimed ID.
+2. Validates the session is ACTIVE.
+3. Validates the student is in `student_snapshot`.
+4. Calls a new RPC `_submit_student_gps_internal(...)` (granted to service_role only) that does the actual UPSERT.
+
+**This is the single most important gap in the plan as written.** The plan implies LOCATION mode is straightforward; it is not.
+
+### B-8. Trigger for `audit_alerts` will fire on initial pre-classified entries too — false alerts
+
+**Verified by tracing.** Plan R-26 specifies an `AFTER INSERT OR UPDATE` trigger on `audit_entries` that inserts into `audit_alerts` when `distance_bucket` is `ORANGE` or `RED`. But `start_audit_session` bulk-INSERTs entries for active-departure students with `OUT_WITH_PERMISSION` and **no GPS data** (bucket NULL). When GPS later arrives, the bucket transitions from NULL to ORANGE/RED.
+
+If the trigger is naively `AFTER INSERT OR UPDATE`, every initial insert with NULL bucket triggers (NULL doesn't match), then every GPS submit triggers again. Correct trigger logic: `AFTER UPDATE` only, with `OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket AND NEW.distance_bucket IN ('ORANGE','RED')`.
+
+**Mitigation.** Specify the trigger precisely in the migration. Include a test that an initial insert with NULL bucket does NOT produce an alert row.
+
+### B-9. No `tick_audit_timeout` cron exists in production — a forgotten session blocks all future audits forever
+
+**Verified via `cron.job` query.** Existing cron jobs:
+- `purge-admin-overrides-retention` (every 2 days)
+- `tick-departures` (every minute)
+
+No audit timeout. A session that an admin forgets to close (e.g. opened at 11pm, admin goes to sleep) stays `ACTIVE` indefinitely. The partial unique index `audit_sessions_one_active` then blocks **every future audit** until the orphan is manually closed via SQL.
+
+**Mitigation.** Phase 0 migration MUST schedule the cron:
+
+```sql
+SELECT cron.schedule(
+  'tick_audit_timeout',
+  '*/5 * * * *',
+  $$ UPDATE audit_sessions SET status='TIMED_OUT', closed_at=NOW(), closed_by='AUTO_TIMEOUT'
+     WHERE status='ACTIVE' AND started_at < NOW() - INTERVAL '24 hours'; $$
+);
+```
+
+Verify with `SELECT * FROM cron.job WHERE jobname='tick_audit_timeout'` post-migration.
+
+### B-10. The audit_sessions status enum may not include `TIMED_OUT`
+
+**Inferred from the schema** (the 4 existing audit migrations are not yet in the repo for inspection). The plan assumes statuses `ACTIVE | CLOSED | ABORTED | TIMED_OUT`. The existing schema may only allow `ACTIVE | CLOSED`.
+
+**Mitigation (must verify during Phase −1 reconciliation).** After pulling the four migrations into the repo (R-30), inspect the CHECK constraint on `audit_sessions.status`. If `TIMED_OUT` and `ABORTED` are missing, add them in a follow-up migration before any cron is scheduled.
+
+### B-11. `submit_audit_entry`'s class authorization check uses snapshot, not live class_id — class rename mid-session works correctly
+
+**Verified by reading RPC source.** The RPC reads `v_student_class_id` from `v_session.student_snapshot` (snapshot at session open), not from `students.classId` (live). A supervisor whose `_resolve_supervisor_class(pin)` returns the OLD class_id but the student snapshot also has the OLD class_id will match. A supervisor whose class is renamed and reassigned mid-session would have the NEW class_id from `_resolve_supervisor_class` and the snapshot has the OLD class_id — they would fail authorization for their own class.
+
+**Mitigation.** Class renames mid-session are rare. If they happen, the supervisor needs to log out and back in (their PIN remains valid; the resolved class_id updates). Document this as a known limitation.
+
+### B-12. No polling fallback for realtime in existing hooks
+
+**Verified.** `src/hooks/useDeparturesRealtime.ts` has no polling fallback. The plan (R-11) calls for a 30s polling fallback in `useActiveAudit`. This means the new hook must be written from scratch; we can't just clone `useDeparturesRealtime`.
+
+**Mitigation.** Write `useActiveAudit` as a brand-new hook with explicit polling fallback. Pattern:
+- Subscribe to realtime.
+- Track `lastEventAt`.
+- Every 30s, check `Date.now() - lastEventAt`; if >30s and session is `ACTIVE`, call `get_active_audit_session()` to refetch.
+
+### B-13. visibilitychange handler doesn't refresh audit state
+
+**Verified by reading code.** `src/App.tsx:80-95` registers `visibilitychange` to update `lastSeen` for students. **It does not refresh audit state.** A backgrounded tab returning to foreground may have a stale view of the active session for up to 30 seconds (until polling fallback fires).
+
+**Mitigation.** Extend the visibilitychange handler: on `document.hidden === false`, if there is an audit context, force a refresh of `get_active_audit_session()`.
+
+### B-14. `student_snapshot` ordering matters — sort by id matters for index stability
+
+**Verified.** `submit_audit_entry` looks up the student in `student_snapshot` by `id` field with WHERE. This is correct. But `student_snapshot_idx` (the unique key) is implicit in the JSONB array order. If `start_audit_session` sorts the snapshot one way and a future `submit_audit_entry_with_gps` sorts differently, indices won't match.
+
+**Mitigation.** Both RPCs must use the same sort (`ORDER BY grade, classId, fullName, id` per RPC source). Document this contract.
+
+### B-15. `xlsx` is imported eagerly in `StudentsPage` — admin bundle bloats
+
+**Verified.** `src/pages/admin/StudentsPage.tsx:2` does `import * as XLSX from 'xlsx'` at top level. Adds ~100KB uncompressed to the admin bundle. Switching to admin then to audit means this code is loaded but unused.
+
+**Mitigation.** Lazy-import inside the export click handler:
+```ts
+const handleExport = async () => {
+  const XLSX = await import('xlsx')
+  ...
+}
+```
+Saves ~30KB gzipped from the admin entry chunk.
+
+### B-16. Sync queue handles RPC operations — Dexie schema bump may not be needed
+
+**Re-verified.** `src/lib/sync/syncEngine.ts:69-70` already supports `operation: 'RPC'` with `tableName` as the RPC name. Queueing a `submit_audit_entry` call requires no Dexie schema change. **R-19 (Dexie v6 bump) is overly cautious** — we can use the existing `syncQueue` store with `operation: 'RPC'`, `tableName: 'submit_audit_entry'`, `payload: {p_session_id, p_student_id, ...}`.
+
+**Mitigation.** Revise R-19. Skip the Dexie bump; reuse the existing queue.
+
+### B-17. Two-admin race UI handling is unspecified
+
+**Verified.** `start_audit_session` correctly serializes via `LOCK TABLE` + check. Loser gets `{error:'ALREADY_ACTIVE', existingId:'<uuid>'}`. The frontend wizard must:
+- Detect the error.
+- Offer the loser two choices: "Continue the existing audit" (navigate to `/admin/inspection/<existingId>/live`) or "Abort and open new" (which requires calling `close_audit_session` first then retrying).
+
+**Mitigation.** Wizard UI must include explicit error handling for `ALREADY_ACTIVE`. Add a Playwright test: open two admin tabs, click "open" simultaneously, verify the loser sees the choice modal.
+
+### B-18. `_resolve_supervisor_class` accepts the wrong PIN length silently — supervisor login UI must validate
+
+**Verified.** `_resolve_supervisor_class` returns NULL for PIN <4 chars (`IF p_pin IS NULL OR length(p_pin) < 4 THEN RETURN NULL`). The frontend supervisor login UI must enforce minimum 4 digits or users get a confusing "AUTH" error for a 3-digit typo.
+
+**Mitigation.** Add input-length validation in the supervisor login form before calling the RPC.
+
+### B-19. Existing send-push is single-recipient — `send-audit-push` is a new edge function
+
+**Verified.** `supabase/functions/send-push/index.ts` sends one push per HTTP call. There is no fan-out logic. Per R-7, the plan calls for a new `send-audit-push` that inlines the VAPID/AES-128-GCM crypto.
+
+**Mitigation (already in plan).** Just need to actually write the new edge function. Cost: ~250 lines (200 lines of crypto reused from send-push + 50 lines of fan-out logic).
+
+### B-20. iOS Geolocation call in current `HomePage.tsx` will fail silently on iOS
+
+**Verified.** `src/pages/student/HomePage.tsx:129-138` calls `getCurrentPosition` inside a `broadcast.subscribe` callback. **This is NOT a user gesture.** iOS Safari silently denies the permission even if granted. The old RollCall flow has never actually worked on iOS.
+
+The new consent sheet (R-52) must call `getCurrentPosition` synchronously inside the click handler:
+```ts
+<button onClick={() => {
+  navigator.geolocation.getCurrentPosition(success, fail)
+}}>
+```
+
+Not:
+```ts
+<button onClick={async () => {
+  await someAsyncThing()
+  navigator.geolocation.getCurrentPosition(success, fail)  // ❌ no longer user-gesture
+}}>
+```
+
+**Mitigation.** Document this pattern explicitly in the implementation. Add a Playwright test on a Safari runner that verifies the GPS prompt appears.
+
+### B-21. `audit_entries.source` CHECK constraint blocks `AUTO_GPS` — every LOCATION submission will fail
+
+**Verified by reading constraint.** `audit_entries.source` allows only `('SUPERVISOR', 'AUTO_DEFAULT')`. The plan calls for an `AUTO_GPS` source value for student GPS submissions. Without a constraint change, the upsert fails with `23514 check constraint violation`.
+
+**Mitigation.** First migration of Phase 0:
+
+```sql
+ALTER TABLE audit_entries DROP CONSTRAINT audit_entries_source_check;
+ALTER TABLE audit_entries ADD CONSTRAINT audit_entries_source_check
+  CHECK (source IN ('SUPERVISOR','AUTO_DEFAULT','AUTO_GPS'));
+```
+
+### B-22. `audit_sessions.status` CHECK constraint blocks `TIMED_OUT` and `ABORTED` — confirmed B-10
+
+**Verified by reading constraint.** The existing CHECK is `IN ('ACTIVE','CLOSED')`. Per plan (R-26) we need `TIMED_OUT` and `ABORTED`. Same migration:
+
+```sql
+ALTER TABLE audit_sessions DROP CONSTRAINT audit_sessions_status_check;
+ALTER TABLE audit_sessions ADD CONSTRAINT audit_sessions_status_check
+  CHECK (status IN ('ACTIVE','CLOSED','TIMED_OUT','ABORTED'));
+```
+
+This blocks: B-9 (cron) and the `abort_audit` RPC.
+
+### B-23. `audit_sessions.mode` column does not exist — every "open LOCATION audit" call would silently behave like MANUAL
+
+**Verified by column inventory.** There is no `mode` column. The existing schema implicitly treats every session as a single mode (whatever the supervisor flow does). The plan's `mode IN ('MANUAL','LOCATION')` is an additive column.
+
+**Mitigation.** Phase 0 migration:
+
+```sql
+ALTER TABLE audit_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'MANUAL'
+  CHECK (mode IN ('MANUAL','LOCATION'));
+```
+
+Existing 0 rows get `'MANUAL'` default; nothing to backfill.
+
+### B-24. `audit_entries` GPS columns don't exist — `distance_bucket`, `gps_lat`, `gps_lng`, `distance_from_campus_m`, `gps_accuracy_m`, `gps_status` all missing
+
+**Verified.** None exist. The LOCATION-mode write path needs all six. Phase 0 ALTER:
+
+```sql
+ALTER TABLE audit_entries
+  ADD COLUMN gps_lat DOUBLE PRECISION,
+  ADD COLUMN gps_lng DOUBLE PRECISION,
+  ADD COLUMN gps_accuracy_m DOUBLE PRECISION,
+  ADD COLUMN distance_from_campus_m DOUBLE PRECISION,
+  ADD COLUMN distance_bucket TEXT CHECK (distance_bucket IN ('GREEN','BLUE','ORANGE','RED')),
+  ADD COLUMN gps_status TEXT;
+```
+
+### B-25. `audit_alerts` table does not exist — must be added in Phase 0
+
+**Verified.** Confirmed by table inventory. The plan's `audit_alerts` is purely additive. Phase 0 CREATE + ADD TO PUBLICATION:
+
+```sql
+CREATE TABLE audit_alerts (...);
+ALTER PUBLICATION supabase_realtime ADD TABLE audit_alerts;
+```
+
+If the migration forgets the second statement, alerts will be inserted but admin's realtime modal never fires.
+
+### B-26. LOCATION mode student auth is **edge-function-as-proxy** — design locked in
+
+**Verified by LOCATION trace.** The only safe path for student GPS submission is:
+
+- A new Edge Function `send-audit-gps` (or extend `send-audit-push` to handle both directions).
+- Student POSTs `{sessionId, studentId, gpsLat, gpsLng, accuracyM, gpsStatus}`.
+- Edge Function uses **service_role key** to:
+  1. Validate session is `ACTIVE` and `mode='LOCATION'`.
+  2. Validate `studentId` exists in `audit_sessions.student_snapshot`.
+  3. Compute distance and bucket.
+  4. UPSERT `audit_entries` with `source='AUTO_GPS'`.
+
+**Auth model:** membership-in-snapshot. An attacker who knows a student's UUID + active session UUID can spoof a GPS — this matches the project's existing posture (ID-only student login). Accepted weakness for v1.
+
+This **closes the implementation gap** identified in B-7. The recommendation is option (c).
+
+### B-27. The `audit_alerts` trigger must fire on INSERT OR UPDATE, not just UPDATE
+
+**Verified by tracing data flow.** `start_audit_session` inserts entries for students with active departures only (~45 students). The other ~336 students have **no audit_entries row** until they submit GPS. The first GPS submission for these students is an **INSERT**, not an UPDATE.
+
+If the trigger fires only on UPDATE, a student in RED whose first event is an INSERT generates **no alert**.
+
+**Mitigation.** Trigger must be `AFTER INSERT OR UPDATE`, with the predicate `(TG_OP = 'INSERT' AND NEW.distance_bucket IN ('ORANGE','RED')) OR (TG_OP = 'UPDATE' AND OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket AND NEW.distance_bucket IN ('ORANGE','RED'))`.
+
+**Edge case verified:** RED→GREEN must NOT delete the alert (alerts are historical evidence). The trigger has no DELETE branch — confirmed safe.
+
+### B-28. Admin Supabase auth session DOES survive refresh — but isAdmin in Zustand does not
+
+**Verified.** When admin logs in via `loginAdmin`, `supabase.auth.signInWithPassword(...)` runs. The Supabase JS client auto-persists its session token to `localStorage` (under key `sb-frxjddevnehprauoapiv-auth-token`). After refresh, `supabase.auth.getSession()` returns the session. But our `authStore.isAdmin` is reset to `false` because we don't read from `supabase.auth` on bootstrap.
+
+**Mitigation (must implement in Phase −1).** Add this to `App.tsx` in a `useEffect` on mount:
+
+```ts
+supabase.auth.getSession().then(({ data }) => {
+  if (data.session?.user?.email === 'admin@yeshiva.local') {
+    useAuthStore.setState({ isAdmin: true })
+  }
+})
+```
+
+This restores `isAdmin` correctly. But: it does **not** restore `_adminPinSession` — that's a separate restoration mechanism. For admin **read** flows (history, summary), the restored `isAdmin` is enough. For admin **mutation** flows (open/close audit), the PIN must be re-prompted.
+
+### B-29. `AdminGuard` / `ClassSupervisorGuard` lose the original URL on redirect to login
+
+**Verified by reading code.** `src/App.tsx:38-44` uses `<Navigate to="/login" replace />` with no `state={{from: location}}`. `LoginScreen` has no `useLocation()` to read it. So a supervisor bookmarking `/class-supervisor` and refreshing → redirected to `/login` → after re-login → lands on `/student` (default), not back on their dashboard.
+
+**Mitigation.** Either pass `state={{from: location.pathname}}` in the Navigate, or read intended destination from `location.state`. Cost: ~10 lines. Important UX issue (the user has to navigate again after every refresh).
+
+### B-30. `close_audit_session` retry returns `NOT_ACTIVE`, not `SESSION_CLOSED` — wizard must accept both
+
+**Verified by reading RPC source.** The RPC does `UPDATE ... WHERE status='ACTIVE'`. If the row is already CLOSED, the UPDATE matches 0 rows. The RPC returns `{error:'NOT_ACTIVE'}` (not `SESSION_CLOSED` as the v1 plan suggested).
+
+**Mitigation.** The wizard's "close" button error handler must treat both `NOT_ACTIVE` and `SESSION_CLOSED` as "already closed, this is fine, navigate to summary". Specifically:
+
+```ts
+if (result.error === 'NOT_ACTIVE' || result.error === 'SESSION_CLOSED') {
+  // success path — session is closed
+  navigate(`/admin/inspection/${sessionId}/summary`)
+}
+```
+
+### B-31. `students` table has wide-open anon UPDATE policy — pre-existing security gap
+
+**Verified by reading RLS.** `students` has a policy `anon_update_students` with `qual=true, with_check=null` — any anon caller can UPDATE any row. This is how `updateStudentLocation` currently works (`src/lib/api/supabaseClient.ts:76-80`).
+
+This is a **separate security issue** in the existing codebase, **not introduced by this plan**. But it does mean the existing `location-requests` GPS flow is unauthenticated. The new edge-function-proxy model (B-26) is strictly better even before the underlying RLS gap is addressed.
+
+**Out of scope** for this project; flagged for a separate hardening sprint.
+
+### B-32. `syncEngine` `isSyncing` flag is per-tab — two tabs can dequeue the same item
+
+**Verified by reading code.** `src/lib/sync/syncEngine.ts:37-45` uses an in-process `isSyncing` boolean. Dexie is per-origin (shared across tabs), but the in-process flag isn't. Two tabs each can claim the same Dexie row.
+
+For `submit_audit_entry` this is harmless (UPSERT is idempotent). For any future non-idempotent audit RPC, it's a duplicate-call risk.
+
+**Mitigation.** Until the audit subsystem adds non-idempotent RPCs, no action needed. If/when one is added, use Dexie's `transaction('rw', ...)` with a `processing_at` timestamp claim.
+
+### Severity summary
+
+| Bug | When it fires | Severity |
+|---|---|---|
+| B-1 (admin PIN gone) | First refresh of admin tab | **Critical — every audit fails** |
+| B-2 (supervisor PIN gone) | First supervisor login | **Critical — every mark fails** |
+| B-3 (no route) | Any navigation to inspection | **Critical — feature unreachable** |
+| B-4 (realtime storm) | Every session open | Medium — masked by initial fetch |
+| B-5 (legacy broadcast) | Deployment overlap | High — visible UX confusion |
+| B-6 (SW prompt) | After deploy of v1 | Medium |
+| B-7 (student auth gap) | First LOCATION audit | **Critical — LOCATION mode unbuildable as planned** |
+| B-8 (alert trigger) | First GPS arrival | High — false alerts |
+| B-9 (no timeout cron) | First forgotten session | **Critical — blocks future audits** |
+| B-10 (status enum) | Adding `TIMED_OUT` | Medium |
+| B-11 (rename mid-session) | Rare | Low |
+| B-12 (no polling fallback) | Realtime drops | Medium |
+| B-13 (visibility refresh) | Backgrounded tabs | Low |
+| B-14 (snapshot sort) | Adding new RPC | Medium |
+| B-15 (xlsx bloat) | Admin bundle | Low |
+| B-16 (Dexie bump unneeded) | Saves work | Low — corrects R-19 |
+| B-17 (race UX) | Two-admin click | Medium |
+| B-18 (PIN length) | Supervisor typo | Low |
+| B-19 (send-push fanout) | Already planned | Low |
+| B-20 (iOS GPS gesture) | iPhone users | **Critical for iOS adoption** |
+| B-21 (source CHECK) | First LOCATION submit | **Critical — DB rejects insert** |
+| B-22 (status CHECK) | First timeout/abort | **Critical — DB rejects update** |
+| B-23 (mode column) | First LOCATION audit | **Critical — column missing** |
+| B-24 (GPS columns) | First GPS submit | **Critical — columns missing** |
+| B-25 (audit_alerts) | First out-of-range | **Critical — table missing** |
+| B-26 (student auth) | LOCATION flow design | **Confirmed — edge proxy is the answer** |
+| B-27 (alert trigger) | First GPS RED INSERT | **Critical — alerts never fire for non-departure students** |
+| B-28 (admin session restore) | Admin refresh | High — masked by missing isAdmin |
+| B-29 (lost URL) | Any refresh | Medium UX |
+| B-30 (close retry) | Network blip on close | Medium |
+| B-31 (anon UPDATE) | Pre-existing | Out of scope but flagged |
+| B-32 (sync dedup) | Multi-tab supervisor | Low |
+
+### What this means for the implementation plan
+
+Several of the "critical" bugs (B-1, B-2, B-3, B-7, B-9) must be addressed **before the first ship** or the feature simply does not work. Specifically:
+
+1. **B-7 (student auth path) blocks LOCATION mode entirely.** Until this is resolved (recommended: option-c edge function proxy), LOCATION mode is unbuildable. Recommendation: **ship MANUAL mode as v1.0**, then design and ship LOCATION as v1.1 once B-7 has a designed answer.
+
+2. **B-1 + B-2 (PIN persistence) block MANUAL mode operation.** The plan's R-4 specifies the mechanism; this confirms the urgency. Phase −1 must include the actual implementation, not just the plan.
+
+3. **B-3 (route) is a 5-minute fix** but must be in Phase 1.
+
+4. **B-9 (cron) is a 5-minute fix** but is in Phase 0 (migration).
+
+5. **B-20 (iOS) is a discipline issue** — must be enforced in code review. Otherwise iOS users get nothing.
+
+---
 
 This document is **a plan, not an implementation**. It does not contain code beyond what is required to make a structural decision unambiguous. Implementation-ready code for the recommended approach exists separately in `INTERNAL_AUDIT_IMPLEMENTATION_REFERENCE.md`; **that file is a reference, not the source of truth.** This file is the source of truth for product, design, and architecture.
 
