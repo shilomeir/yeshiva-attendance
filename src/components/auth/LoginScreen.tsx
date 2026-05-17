@@ -62,7 +62,7 @@ export function LoginScreen() {
   return (
     <div
       className="relative flex min-h-screen flex-col items-center justify-center px-4 overflow-hidden"
-      style={{ background: 'linear-gradient(155deg, #0f1f5c 0%, #1a3a8f 38%, #0e2d6e 65%, #0a1840 100%)' }}
+      style={{ background: 'linear-gradient(155deg, #0c1b4d 0%, #1a3a8f 38%, #0e2d6e 65%, #070f2d 100%)' }}
     >
       {/* Building photo — shows automatically once yeshiva-building.jpg is in /public */}
       <div
@@ -96,7 +96,7 @@ export function LoginScreen() {
         {/* Blue accent top strip */}
         <div
           className="h-1 w-full"
-          style={{ background: 'linear-gradient(90deg, var(--blue), var(--purple))' }}
+          style={{ background: 'linear-gradient(90deg, var(--accent), var(--plum))' }}
         />
 
         <div className="px-7 py-8">
@@ -152,10 +152,10 @@ export function LoginScreen() {
               disabled={isLoading || idNumber.length < 5}
               className="flex w-full items-center justify-center gap-2 rounded-xl py-3 text-base font-bold text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
-                background: 'linear-gradient(135deg, var(--blue) 0%, var(--blue-dark) 100%)',
+                background: 'linear-gradient(135deg, var(--accent) 0%, #3730a3 100%)',
                 boxShadow: isLoading || idNumber.length < 5
                   ? 'none'
-                  : '0 4px 16px rgba(59,130,246,0.35)',
+                  : '0 4px 16px rgba(79,70,229,0.4)',
               }}
             >
               {isLoading ? (

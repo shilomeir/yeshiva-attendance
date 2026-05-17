@@ -18,7 +18,7 @@ const STATUS_CONFIG: Record<DepartureStatus, {
   textColor: string
 }> = {
   PENDING:   { label: 'ממתין לאישור', icon: AlertCircle,  accentColor: 'var(--orange)', bgColor: 'rgba(249,115,22,0.1)',  textColor: '#ea580c' },
-  APPROVED:  { label: 'אושר',          icon: CheckCircle,  accentColor: '#3b82f6',        bgColor: 'rgba(59,130,246,0.1)', textColor: '#2563eb' },
+  APPROVED:  { label: 'אושר',          icon: CheckCircle,  accentColor: 'var(--info)',     bgColor: 'var(--info-soft)',    textColor: 'var(--info)' },
   ACTIVE:    { label: 'בתוקף — בחוץ', icon: Play,         accentColor: 'var(--orange)', bgColor: 'rgba(249,115,22,0.1)',  textColor: '#ea580c' },
   COMPLETED: { label: 'הסתיים',        icon: CheckCircle,  accentColor: 'var(--green)',   bgColor: 'rgba(34,197,94,0.1)',  textColor: '#16a34a' },
   REJECTED:  { label: 'נדחה',          icon: XCircle,      accentColor: 'var(--red)',      bgColor: 'rgba(239,68,68,0.1)', textColor: '#dc2626' },
@@ -194,9 +194,9 @@ export function AbsenceRequestPage() {
       <div style={{
         margin: '16px 16px 0',
         borderRadius: 24,
-        background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 60%, #1d4ed8 100%)',
+        background: 'linear-gradient(135deg, var(--accent) 0%, #3730a3 60%, #312e81 100%)',
         padding: '20px 20px 18px',
-        boxShadow: '0 12px 32px -8px rgba(37,99,235,0.4), 0 1px 0 rgba(255,255,255,0.15) inset',
+        boxShadow: '0 12px 32px -8px rgba(79,70,229,0.45), 0 1px 0 rgba(255,255,255,0.15) inset',
         position: 'relative',
         overflow: 'hidden',
       }}>
@@ -447,14 +447,14 @@ export function AbsenceRequestPage() {
                 borderRadius: 14,
                 background: isUrgent
                   ? 'linear-gradient(135deg, #fb923c, #ea580c)'
-                  : 'linear-gradient(135deg, #3b82f6, #2563eb)',
+                  : 'linear-gradient(135deg, var(--accent), #3730a3)',
                 border: 'none',
                 color: '#fff', fontSize: 14, fontWeight: 700,
                 cursor: canSubmit ? 'pointer' : 'default',
                 opacity: canSubmit ? 1 : 0.5,
                 boxShadow: isUrgent
                   ? '0 6px 18px rgba(234,88,12,0.35)'
-                  : '0 6px 18px rgba(37,99,235,0.35)',
+                  : '0 6px 18px rgba(79,70,229,0.35)',
               }}
             >
               {isSubmitting ? 'שולח...' : isUrgent ? 'שליחת בקשה חריגה' : 'שליחת בקשה'}
@@ -485,9 +485,9 @@ export function AbsenceRequestPage() {
                   flexShrink: 0,
                   padding: '5px 12px',
                   borderRadius: 999,
-                  border: `1.5px solid ${isActive ? '#3b82f6' : 'rgba(15,23,42,0.1)'}`,
-                  background: isActive ? 'rgba(59,130,246,0.1)' : 'rgba(255,255,255,0.6)',
-                  color: isActive ? '#2563eb' : 'var(--text-muted)',
+                  border: `1.5px solid ${isActive ? 'var(--info)' : 'rgba(15,23,42,0.1)'}`,
+                  background: isActive ? 'var(--info-soft)' : 'rgba(255,255,255,0.6)',
+                  color: isActive ? 'var(--info)' : 'var(--text-muted)',
                   fontSize: 12, fontWeight: 700,
                   cursor: 'pointer',
                   backdropFilter: 'blur(8px)',
@@ -498,7 +498,7 @@ export function AbsenceRequestPage() {
                 {opt.label}
                 <span style={{
                   fontSize: 10,
-                  background: isActive ? '#3b82f6' : 'rgba(15,23,42,0.12)',
+                  background: isActive ? 'var(--info)' : 'rgba(15,23,42,0.12)',
                   color: isActive ? '#fff' : 'var(--text-muted)',
                   borderRadius: 999, padding: '1px 5px',
                   fontWeight: 800,

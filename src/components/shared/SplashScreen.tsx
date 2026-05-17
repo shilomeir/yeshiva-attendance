@@ -4,13 +4,6 @@ interface SplashScreenProps {
   onDone: () => void
 }
 
-/**
- * Animated splash screen with the Yeshiva logo.
- * Timeline:
- *   0ms  – logo bounces in (CSS keyframe, 900ms)
- *   2000ms – container starts fading out (500ms transition)
- *   2500ms – onDone() is called → splash unmounts
- */
 export function SplashScreen({ onDone }: SplashScreenProps) {
   const [exiting, setExiting] = useState(false)
 
@@ -25,14 +18,15 @@ export function SplashScreen({ onDone }: SplashScreenProps) {
 
   return (
     <div
-      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-white"
+      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center"
       style={{
+        background: 'var(--parchment)',
         transition: 'opacity 500ms ease',
         opacity: exiting ? 0 : 1,
         pointerEvents: exiting ? 'none' : 'auto',
       }}
     >
-      {/* Logo with bounce-in animation */}
+      {/* Logo */}
       <div style={{ animation: 'splashBounceIn 0.9s cubic-bezier(0.34,1.56,0.64,1) both' }}>
         <img
           src="/logo.png"
@@ -42,10 +36,14 @@ export function SplashScreen({ onDone }: SplashScreenProps) {
         />
       </div>
 
-      {/* Shimmer line under logo */}
+      {/* Indigo shimmer */}
       <div
-        className="mt-6 h-0.5 rounded-full bg-gradient-to-r from-transparent via-[#3B82F6] to-transparent"
-        style={{ width: 180, animation: 'splashShimmer 1.8s ease-in-out 0.5s infinite' }}
+        className="mt-6 h-0.5 rounded-full"
+        style={{
+          width: 180,
+          background: 'linear-gradient(90deg, transparent, var(--accent), transparent)',
+          animation: 'splashShimmer 1.8s ease-in-out 0.5s infinite',
+        }}
       />
     </div>
   )

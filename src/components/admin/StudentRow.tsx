@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Pencil, Trash2 } from 'lucide-react'
 import { StatusBadge } from '@/components/shared/StatusBadge'
-import { Button } from '@/components/ui/button'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { useStudentsStore } from '@/store/studentsStore'
 import { toast } from '@/hooks/use-toast'
@@ -16,23 +15,16 @@ interface StudentRowProps {
 
 function getInitials(name: string): string {
   const parts = name.trim().split(' ')
-  if (parts.length >= 2) {
-    return `${parts[0][0]}${parts[parts.length - 1][0]}`
-  }
+  if (parts.length >= 2) return `${parts[0][0]}${parts[parts.length - 1][0]}`
   return name.substring(0, 2)
 }
 
-function getAvatarColor(id: string): string {
-  const colors = [
-    'bg-blue-500', 'bg-purple-500', 'bg-green-500', 'bg-orange-500',
-    'bg-red-500', 'bg-indigo-500', 'bg-teal-500', 'bg-pink-500',
-  ]
+function getAvatarHue(id: string): string {
+  const hues = [220, 270, 150, 30, 0, 200, 170, 320]
   let hash = 0
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash << 5) - hash + id.charCodeAt(i)
-    hash |= 0
-  }
-  return colors[Math.abs(hash) % colors.length]
+  for (let i = 0; i < id.length; i++) { hash = (hash << 5) - hash + id.charCodeAt(i); hash |= 0 }
+  const hue = hues[Math.abs(hash) % hues.length]
+  return `hsl(${hue} 55% 40%)`
 }
 
 export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) {
@@ -46,47 +38,56 @@ export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) 
       await deleteStudent(student.id)
       onUpdate()
     } catch (err) {
-      toast({
-        title: 'שגיאה במחיקה',
-        description: getErrorMessage(err, 'מחיקת התלמיד נכשלה'),
-        variant: 'destructive',
-      })
+      toast({ title: 'שגיאה במחיקה', description: getErrorMessage(err, 'מחיקת התלמיד נכשלה'), variant: 'destructive' })
       setConfirmDelete(false)
     } finally {
-      setDeleting(false)
-    }
+      setDeleting(false) }
   }
 
   const classLabel = student.classId?.replace(/^כיתה\s+/, '') ?? ''
+  const avatarColor = getAvatarHue(student.id)
 
   return (
     <div
-      className="flex items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 hover:bg-[var(--bg-2)] transition-colors"
-      style={{ height: '72px' }}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        height: 72, padding: '0 16px',
+        borderBottom: '1px solid var(--hairline)',
+        background: 'transparent',
+        transition: 'background 0.15s',
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.35)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
     >
       {/* Avatar */}
-      <div
-        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${getAvatarColor(student.id)}`}
-      >
+      <div style={{
+        width: 38, height: 38, borderRadius: '50%', flexShrink: 0,
+        background: `${avatarColor}22`,
+        border: `1.5px solid ${avatarColor}55`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 12, fontWeight: 700, color: avatarColor,
+      }}>
         {getInitials(student.fullName)}
       </div>
 
       {/* Info */}
-      <div className="flex flex-1 min-w-0 flex-col justify-center gap-0.5">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 500, color: 'var(--ink)', fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {student.fullName}
+          </span>
           {student.pendingApproval && (
-            <span className="shrink-0 rounded-full bg-[var(--orange)] px-1.5 py-0.5 text-[10px] font-bold text-white">
+            <span style={{ borderRadius: 999, background: 'var(--warn-soft)', color: 'var(--warn)', padding: '1px 7px', fontSize: 10, fontWeight: 700 }}>
               חדש
             </span>
           )}
           {classLabel && (
-            <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+            <span style={{ borderRadius: 999, border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.5)', padding: '1px 7px', fontSize: 10.5, color: 'var(--ink-faint)' }}>
               {classLabel}
             </span>
           )}
         </div>
-        <span className="text-xs text-[var(--text-muted)]">
+        <span style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>
           ת.ז. {student.idNumber} · {formatRelativeTime(student.lastSeen)}
         </span>
       </div>
@@ -94,47 +95,65 @@ export function StudentRow({ student, onUpdate, onEditClass }: StudentRowProps) 
       {/* Status badge */}
       <StatusBadge status={student.currentStatus} className="shrink-0 hidden sm:flex" />
 
-      {/* Edit student */}
-      <Button
-        variant="ghost"
-        size="icon"
+      {/* Edit */}
+      <button
         onClick={() => onEditClass(student)}
-        className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--blue)]"
         title="עריכת פרטי תלמיד"
+        style={{
+          flexShrink: 0, width: 30, height: 30, borderRadius: 8,
+          border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+          color: 'var(--ink-faint)', cursor: 'pointer', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', transition: 'color 0.15s',
+        }}
+        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)')}
+        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--ink-faint)')}
       >
-        <Pencil className="h-4 w-4" />
-      </Button>
+        <Pencil size={13} />
+      </button>
 
-      {/* Delete with confirmation */}
+      {/* Delete */}
       {confirmDelete ? (
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <span className="text-[10px] text-[var(--red)] leading-tight">מחיקה תמחק את כל ההיסטוריה</span>
-          <div className="flex items-center gap-1">
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0 }}>
+          <span style={{ fontSize: 10, color: 'var(--bad)', lineHeight: 1.2 }}>מחיקה תמחק את כל ההיסטוריה</span>
+          <div style={{ display: 'flex', gap: 4 }}>
             <button
               onClick={handleDelete}
               disabled={deleting}
-              className="rounded px-2 py-1 text-xs font-medium text-white bg-[var(--red)] hover:opacity-90 transition-opacity disabled:opacity-50"
+              style={{
+                borderRadius: 6, padding: '3px 10px', fontSize: 11.5, fontWeight: 600,
+                color: '#fff', background: 'var(--bad)', border: 'none', cursor: 'pointer',
+                opacity: deleting ? 0.6 : 1,
+              }}
             >
               {deleting ? '...' : 'מחק'}
             </button>
             <button
               onClick={() => setConfirmDelete(false)}
-              className="rounded px-2 py-1 text-xs font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)]"
+              style={{
+                borderRadius: 6, padding: '3px 10px', fontSize: 11.5, fontWeight: 600,
+                color: 'var(--ink-muted)', background: 'rgba(255,255,255,0.6)',
+                border: '1px solid var(--hairline)', cursor: 'pointer',
+              }}
             >
               ביטול
             </button>
           </div>
         </div>
       ) : (
-        <Button
-          variant="ghost"
-          size="icon"
+        <button
           onClick={() => setConfirmDelete(true)}
-          className="shrink-0 h-8 w-8 text-[var(--text-muted)] hover:text-[var(--red)]"
           title="מחיקת תלמיד"
+          style={{
+            flexShrink: 0, width: 30, height: 30, borderRadius: 8,
+            border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+            color: 'var(--ink-faint)', cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center', transition: 'color 0.15s',
+          }}
+          onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--bad)')}
+          onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--ink-faint)')}
         >
-          <Trash2 className="h-4 w-4" />
-        </Button>
+          <Trash2 size={13} />
+        </button>
       )}
     </div>
   )

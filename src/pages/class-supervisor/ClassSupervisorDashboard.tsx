@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
-  Users, UserCheck, UserX, LogOut, GraduationCap,
-  MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
-  Loader2, AlertOctagon, FileText, ShieldAlert,
+  Users, LogOut, GraduationCap, MapPin, Clock, CalendarDays,
+  CheckCircle2, ArrowRightLeft, Loader2, AlertOctagon, FileText,
+  ShieldAlert, X,
 } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -25,7 +24,6 @@ import { toast } from '@/hooks/use-toast'
 import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, CalendarDeparture } from '@/types'
 
-// ── helpers ─────────────────────────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000
   const dLat = ((lat2 - lat1) * Math.PI) / 180
@@ -45,19 +43,26 @@ function getStudentLocation(student: Student): LocationCategory {
   return dist <= AREA_RADIUS_METERS ? 'inArea' : 'far'
 }
 
-const LOCATION_LABELS: Record<LocationCategory, { label: string; color: string; dot: string }> = {
-  inYeshiva: { label: 'בישיבה',    color: 'text-[var(--green)]',  dot: '#22C55E' },
-  inArea:    { label: 'באזור',     color: 'text-[var(--blue)]',   dot: '#3B82F6' },
-  far:       { label: 'רחוק',      color: 'text-[var(--red)]',    dot: '#EF4444' },
-  unknown:   { label: 'לא ידוע',   color: 'text-[var(--text-muted)]', dot: '#94A3B8' },
+const LOCATION_CFG: Record<LocationCategory, { label: string; color: string }> = {
+  inYeshiva: { label: 'בישיבה',  color: 'var(--good)' },
+  inArea:    { label: 'באזור',   color: 'var(--info)' },
+  far:       { label: 'רחוק',    color: 'var(--bad)'  },
+  unknown:   { label: 'לא ידוע', color: 'var(--ink-faint)' },
 }
-
 
 function toDateInput(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-// ── Edit modal ───────────────────────────────────────────────────────────────
+function getTimeStr(isoStr: string): string {
+  const d = new Date(isoStr)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function minsFromNow(isoStr: string): number {
+  return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
+}
+
+// ── Edit modal ────────────────────────────────────────────────────────────────
 interface EditStudentSheetProps {
   student: Student | null
   open: boolean
@@ -67,12 +72,10 @@ interface EditStudentSheetProps {
 
 function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentSheetProps) {
   const [mode, setMode] = useState<'checkin' | 'checkout' | 'request' | null>(null)
-  // checkout fields
   const [exitType, setExitType] = useState<'today' | 'multiday'>('today')
   const [reason, setReason] = useState('')
   const [returnTime, setReturnTime] = useState('')
   const [returnDate, setReturnDate] = useState('')
-  // absence request fields
   const [reqStartDate, setReqStartDate] = useState('')
   const [reqEndDate, setReqEndDate] = useState('')
   const [reqReason, setReqReason] = useState('')
@@ -82,31 +85,20 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const todayStr = toDateInput(new Date())
-  // Supervisors can record departures up to 30 days ahead
   const maxDate = new Date(); maxDate.setDate(maxDate.getDate() + 30)
   const maxDateStr = toDateInput(maxDate)
 
   const reset = () => {
-    setMode(null)
-    setExitType('today')
-    setReason('')
-    setReturnTime('')
-    setReturnDate('')
-    setReqStartDate('')
-    setReqEndDate('')
-    setReqReason('')
-    setReqStartTime('08:00')
-    setReqEndTime('20:00')
-    setReqIsUrgent(false)
+    setMode(null); setExitType('today'); setReason(''); setReturnTime(''); setReturnDate('')
+    setReqStartDate(''); setReqEndDate(''); setReqReason(''); setReqStartTime('08:00')
+    setReqEndTime('20:00'); setReqIsUrgent(false)
   }
-
   const handleClose = () => { reset(); onClose() }
 
   const handleCheckIn = async () => {
     if (!student) return
     setIsSubmitting(true)
     try {
-      // Complete the student's active departure if one exists
       const activeDeps = await api.listDepartures({ studentId: student.id, status: 'ACTIVE' })
       if (activeDeps.length > 0) {
         await api.returnDeparture(activeDeps[0].id, student.id)
@@ -114,8 +106,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         await api.createAdminOverride(student.id, 'ON_CAMPUS', 'עדכון ידני על ידי אחראי כיתה')
       }
       toast({ title: `${student.fullName} סומן כנוכח` })
-      onSuccess()
-      handleClose()
+      onSuccess(); handleClose()
     } catch (err) {
       toast({ title: 'שגיאה בעדכון הסטטוס', description: getErrorMessage(err, 'עדכון סטטוס התלמיד נכשל'), variant: 'destructive' })
     } finally { setIsSubmitting(false) }
@@ -137,15 +128,11 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         if (returnTime) { const [h, m] = returnTime.split(':').map(Number); endAt.setHours(h, m, 0, 0) }
         else endAt.setHours(23, 59, 0, 0)
       } else {
-        endAt = new Date(now.getTime() + 4 * 3600_000) // default: 4 hours from now
+        endAt = new Date(now.getTime() + 4 * 3600_000)
       }
       const result = await api.submitDeparture({
-        studentId: student.id,
-        startAt: now,
-        endAt,
-        reason: reason || null,
-        source: 'SUPERVISOR',
-        actorRole: 'SUPERVISOR',
+        studentId: student.id, startAt: now, endAt,
+        reason: reason || null, source: 'SUPERVISOR', actorRole: 'SUPERVISOR',
       })
       if ('error' in result) {
         toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'רישום היציאה נכשל'), variant: 'destructive' })
@@ -153,8 +140,7 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         toast({ title: 'המכסה מלאה', description: 'לא ניתן לרשום יציאה — המכסה מלאה', variant: 'destructive' })
       } else {
         toast({ title: `יציאה נרשמה עבור ${student.fullName}` })
-        onSuccess()
-        handleClose()
+        onSuccess(); handleClose()
       }
     } catch (err) {
       toast({ title: 'שגיאה ברישום היציאה', description: getErrorMessage(err, 'רישום היציאה נכשל'), variant: 'destructive' })
@@ -169,35 +155,26 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
       const startAt = new Date(`${reqStartDate}T${reqStartTime}:00`)
       const endAt   = new Date(`${reqEndDate || reqStartDate}T${reqEndTime}:00`)
       const result  = await api.submitDeparture({
-        studentId: student.id,
-        startAt,
-        endAt,
-        reason: reqReason,
-        isUrgent: reqIsUrgent,
-        source: 'SUPERVISOR',
-        forcePending: true,
-        actorRole: 'SUPERVISOR',
+        studentId: student.id, startAt, endAt, reason: reqReason,
+        isUrgent: reqIsUrgent, source: 'SUPERVISOR', forcePending: true, actorRole: 'SUPERVISOR',
       })
       if ('error' in result) {
         toast({ title: 'שגיאה', description: getResultErrorMessage(result, 'רישום ההיעדרות נכשל'), variant: 'destructive' })
         return
       }
       if (result.status === 'QUOTA_FULL') {
-        toast({ title: 'שגיאה בלתי צפויה', description: getResultErrorMessage(result, 'המכסה מלאה למרות שהבקשה נשלחה כממתינה'), variant: 'destructive' })
+        toast({ title: 'שגיאה בלתי צפויה', description: getResultErrorMessage(result, 'המכסה מלאה'), variant: 'destructive' })
         return
       }
-      // Auto-approve as supervisor
       await api.approveDeparture(result.id, 'supervisor', 'SUPERVISOR', 'אושר על ידי אחראי כיתה')
       toast({ title: `היעדרות אושרה עבור ${student.fullName}` })
-      onSuccess()
-      handleClose()
+      onSuccess(); handleClose()
     } catch (err) {
       toast({ title: 'שגיאה ברישום ההיעדרות', description: getErrorMessage(err, 'רישום ההיעדרות נכשל'), variant: 'destructive' })
     } finally { setIsSubmitting(false) }
   }
 
   if (!student) return null
-
   const isOutside = student.currentStatus === 'OFF_CAMPUS' || student.currentStatus === 'OVERDUE'
 
   return (
@@ -205,26 +182,30 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
       <SheetContent side="bottom" className="rounded-t-2xl pb-8 max-h-[90vh] overflow-y-auto">
         <SheetHeader className="mb-5">
           <SheetTitle className="flex items-center gap-2">
-            <ArrowRightLeft className="h-5 w-5 text-[var(--blue)]" />
+            <ArrowRightLeft className="h-5 w-5" style={{ color: 'var(--accent)' }} />
             ניהול תלמיד
           </SheetTitle>
           <SheetDescription>{student.fullName}</SheetDescription>
         </SheetHeader>
 
-        {/* Current status */}
-        <div className="mb-5 flex items-center justify-between rounded-xl bg-[var(--bg-2)] px-4 py-3">
-          <span className="text-sm text-[var(--text-muted)]">סטטוס נוכחי</span>
+        <div className="mb-5 flex items-center justify-between rounded-xl px-4 py-3" style={{ background: 'var(--glass-2)', border: '1px solid var(--hairline)' }}>
+          <span className="text-sm" style={{ color: 'var(--ink-muted)' }}>סטטוס נוכחי</span>
           <StatusBadge status={student.currentStatus} />
         </div>
 
-        {/* Mode selection */}
         {mode === null && (
           <div className="flex flex-col gap-3">
             {isOutside && (
               <button
                 onClick={handleCheckIn}
                 disabled={isSubmitting}
-                className="flex items-center justify-center gap-2 rounded-xl bg-green-500 py-4 text-base font-semibold text-white shadow-sm hover:bg-green-600 transition-colors disabled:opacity-60"
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  borderRadius: 14, padding: '14px', border: 'none',
+                  background: 'linear-gradient(135deg, var(--good), #16a34a)',
+                  color: '#fff', fontSize: 15, fontWeight: 700, cursor: 'pointer',
+                  opacity: isSubmitting ? 0.6 : 1, fontFamily: 'inherit',
+                }}
               >
                 {isSubmitting ? <Loader2 className="h-5 w-5 animate-spin" /> : <CheckCircle2 className="h-5 w-5" />}
                 סמן כנוכח בישיבה
@@ -232,18 +213,29 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
             )}
             <button
               onClick={() => setMode('checkout')}
-              className={`flex items-center justify-center gap-2 rounded-xl py-4 text-base font-semibold transition-colors ${
-                isOutside
-                  ? 'border border-[var(--border)] bg-[var(--surface)] text-sm font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)] py-3'
-                  : 'border-2 border-orange-300 bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-950/20 dark:border-orange-800 dark:text-orange-400 dark:hover:bg-orange-950/30'
-              }`}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                borderRadius: 14, padding: isOutside ? '10px 14px' : '14px',
+                border: `1.5px solid ${isOutside ? 'var(--hairline)' : 'var(--warn)'}`,
+                background: isOutside ? 'rgba(255,255,255,0.6)' : 'var(--warn-soft)',
+                color: isOutside ? 'var(--ink-muted)' : 'var(--warn)',
+                fontSize: isOutside ? 13 : 15, fontWeight: isOutside ? 500 : 700,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
             >
               <LogOut className={isOutside ? 'h-4 w-4' : 'h-5 w-5'} />
               {isOutside ? 'עדכן פרטי יציאה' : 'רשום יציאה (עד יומיים)'}
             </button>
             <button
               onClick={() => setMode('request')}
-              className="flex items-center justify-center gap-2 rounded-xl border-2 border-indigo-300 bg-indigo-50 py-4 text-base font-semibold text-indigo-600 hover:bg-indigo-100 transition-colors dark:bg-indigo-950/20 dark:border-indigo-800 dark:text-indigo-400 dark:hover:bg-indigo-950/30"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                borderRadius: 14, padding: '14px',
+                border: '1.5px solid var(--accent)',
+                background: 'var(--accent-soft)',
+                color: 'var(--accent)',
+                fontSize: 15, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+              }}
             >
               <FileText className="h-5 w-5" />
               רישום היעדרות מאושרת
@@ -251,35 +243,28 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
           </div>
         )}
 
-        {/* Checkout form */}
         {mode === 'checkout' && (
           <form onSubmit={handleCheckOut} className="flex flex-col gap-4">
-            {/* Exit type toggle */}
-            <div className="flex rounded-lg border border-[var(--border)] p-1 gap-1">
+            <div className="flex rounded-lg p-1 gap-1" style={{ border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.5)' }}>
               {(['today', 'multiday'] as const).map((t) => (
                 <button
-                  key={t}
-                  type="button"
-                  onClick={() => setExitType(t)}
-                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                    exitType === t ? 'bg-[var(--blue)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--bg-2)]'
-                  }`}
+                  key={t} type="button" onClick={() => setExitType(t)}
+                  style={{
+                    flex: 1, borderRadius: 8, padding: '8px 12px', fontSize: 13, fontWeight: 500,
+                    border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                    background: exitType === t ? 'var(--accent)' : 'transparent',
+                    color: exitType === t ? '#fff' : 'var(--ink-muted)',
+                    transition: 'all 0.15s',
+                  }}
                 >
                   {t === 'today' ? 'חזרה היום' : 'יציאה לכמה ימים'}
                 </button>
               ))}
             </div>
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="sv-reason">סיבת היציאה (אופציונלי)</Label>
-              <Input
-                id="sv-reason"
-                placeholder="לדוגמה: ביקור משפחה..."
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-              />
+              <Input id="sv-reason" placeholder="לדוגמה: ביקור משפחה..." value={reason} onChange={(e) => setReason(e.target.value)} />
             </div>
-
             {exitType === 'today' && (
               <div className="flex flex-col gap-2">
                 <Label htmlFor="sv-time" className="flex items-center gap-1.5">
@@ -288,116 +273,86 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
                 <Input id="sv-time" type="time" value={returnTime} onChange={(e) => setReturnTime(e.target.value)} className="text-lg" />
               </div>
             )}
-
             {exitType === 'multiday' && (
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="sv-date" className="flex items-center gap-1.5">
-                    <CalendarDays className="h-3.5 w-3.5" />תאריך חזרה
-                  </Label>
+                  <Label htmlFor="sv-date" className="flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />תאריך חזרה</Label>
                   <Input id="sv-date" type="date" value={returnDate} min={todayStr} max={maxDateStr} onChange={(e) => setReturnDate(e.target.value)} />
                 </div>
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="sv-time2" className="flex items-center gap-1.5">
-                    <Clock className="h-3.5 w-3.5" />שעה (אופציונלי)
-                  </Label>
+                  <Label htmlFor="sv-time2" className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />שעה (אופציונלי)</Label>
                   <Input id="sv-time2" type="time" value={returnTime} onChange={(e) => setReturnTime(e.target.value)} />
                 </div>
               </div>
             )}
-
             <div className="flex gap-2 pt-1">
               <Button type="button" variant="outline" onClick={() => setMode(null)} className="flex-1">חזור</Button>
-              <Button
-                type="submit"
-                className="flex-1 bg-[var(--orange)] hover:bg-orange-600"
-                disabled={isSubmitting || (exitType === 'multiday' && !returnDate)}
-              >
+              <Button type="submit" className="flex-1" style={{ background: 'var(--warn)', color: '#fff' }}
+                disabled={isSubmitting || (exitType === 'multiday' && !returnDate)}>
                 {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />רושם...</> : 'אישור יציאה'}
               </Button>
             </div>
           </form>
         )}
 
-        {/* Absence request form */}
         {mode === 'request' && (
           <form onSubmit={handleRequest} className="flex flex-col gap-4">
-            <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 dark:border-indigo-800/40 dark:bg-indigo-950/10">
-              <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
-                כאחראי כיתה, ההיעדרות תאושר מיידית ותישלח הודעה לתלמיד
-              </p>
+            <div style={{ borderRadius: 12, border: '1px solid var(--accent)', background: 'var(--accent-soft)', padding: '10px 14px' }}>
+              <p style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 500 }}>כאחראי כיתה, ההיעדרות תאושר מיידית ותישלח הודעה לתלמיד</p>
             </div>
-
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="req-start" className="flex items-center gap-1.5">
-                  <CalendarDays className="h-3.5 w-3.5" />תאריך יציאה
-                </Label>
+                <Label htmlFor="req-start" className="flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />תאריך יציאה</Label>
                 <Input id="req-start" type="date" value={reqStartDate} min={todayStr} onChange={(e) => setReqStartDate(e.target.value)} required />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="req-end" className="flex items-center gap-1.5">
-                  <CalendarDays className="h-3.5 w-3.5" />תאריך חזרה (אופציונלי)
-                </Label>
+                <Label htmlFor="req-end" className="flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />תאריך חזרה</Label>
                 <Input id="req-end" type="date" value={reqEndDate} min={reqStartDate || todayStr} onChange={(e) => setReqEndDate(e.target.value)} />
               </div>
             </div>
-
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="req-stime" className="flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5" />שעת יציאה
-                </Label>
+                <Label htmlFor="req-stime" className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />שעת יציאה</Label>
                 <Input id="req-stime" type="time" value={reqStartTime} onChange={(e) => setReqStartTime(e.target.value)} />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="req-etime" className="flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5" />שעת חזרה
-                </Label>
+                <Label htmlFor="req-etime" className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />שעת חזרה</Label>
                 <Input id="req-etime" type="time" value={reqEndTime} onChange={(e) => setReqEndTime(e.target.value)} />
               </div>
             </div>
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="req-reason">סיבה</Label>
-              <Input
-                id="req-reason"
-                placeholder="לדוגמה: שמחת משפחה..."
-                value={reqReason}
-                onChange={(e) => setReqReason(e.target.value)}
-                required
-              />
+              <Input id="req-reason" placeholder="לדוגמה: שמחת משפחה..." value={reqReason} onChange={(e) => setReqReason(e.target.value)} required />
             </div>
-
-            {/* Urgent toggle */}
             <button
               type="button"
               onClick={() => setReqIsUrgent(v => !v)}
-              className={`flex items-center gap-3 rounded-xl border-2 px-4 py-3 transition-colors text-right ${
-                reqIsUrgent
-                  ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30'
-                  : 'border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--bg-2)]'
-              }`}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                borderRadius: 12, padding: '10px 14px', textAlign: 'right',
+                border: `2px solid ${reqIsUrgent ? 'var(--accent)' : 'var(--hairline)'}`,
+                background: reqIsUrgent ? 'var(--accent-soft)' : 'rgba(255,255,255,0.6)',
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
             >
-              <ShieldAlert className={`h-5 w-5 shrink-0 ${reqIsUrgent ? 'text-indigo-600' : 'text-[var(--text-muted)]'}`} />
-              <div className="flex flex-col items-start">
-                <span className={`text-sm font-semibold ${reqIsUrgent ? 'text-indigo-700 dark:text-indigo-300' : 'text-[var(--text)]'}`}>
-                  מצב חריג
-                </span>
-                <span className="text-xs text-[var(--text-muted)]">לא נספר במכסה הרגילה</span>
+              <ShieldAlert style={{ width: 20, height: 20, color: reqIsUrgent ? 'var(--accent)' : 'var(--ink-faint)', flexShrink: 0 }} />
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 13.5, fontWeight: 600, color: reqIsUrgent ? 'var(--accent)' : 'var(--ink)' }}>מצב חריג</span>
+                <span style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>לא נספר במכסה הרגילה</span>
               </div>
-              <div className={`mr-auto h-5 w-5 rounded-full border-2 transition-colors ${reqIsUrgent ? 'border-indigo-500 bg-indigo-500' : 'border-[var(--border)]'}`}>
-                {reqIsUrgent && <CheckCircle2 className="h-full w-full text-white p-0.5" />}
+              <div style={{
+                marginInlineStart: 'auto', width: 20, height: 20, borderRadius: '50%',
+                border: `2px solid ${reqIsUrgent ? 'var(--accent)' : 'var(--hairline)'}`,
+                background: reqIsUrgent ? 'var(--accent)' : 'transparent',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                {reqIsUrgent && <X size={10} color="#fff" />}
               </div>
             </button>
-
             <div className="flex gap-2 pt-1">
               <Button type="button" variant="outline" onClick={() => setMode(null)} className="flex-1">חזור</Button>
-              <Button
-                type="submit"
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white"
-                disabled={isSubmitting || !reqStartDate || !reqReason}
-              >
+              <Button type="submit" className="flex-1" style={{ background: 'var(--accent)', color: '#fff' }}
+                disabled={isSubmitting || !reqStartDate || !reqReason}>
                 {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />רושם...</> : 'אשר היעדרות'}
               </Button>
             </div>
@@ -405,35 +360,25 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         )}
 
         {mode === null && (
-          <Button type="button" variant="ghost" onClick={handleClose} className="mt-4 w-full text-[var(--text-muted)]">
-            ביטול
-          </Button>
+          <Button type="button" variant="ghost" onClick={handleClose} className="mt-4 w-full" style={{ color: 'var(--ink-muted)' }}>ביטול</Button>
         )}
       </SheetContent>
     </Sheet>
   )
 }
 
-// ── Avatar helper ────────────────────────────────────────────────────────────
+// ── Avatar ─────────────────────────────────────────────────────────────────────
 function getInitials(name: string): string {
   const p = name.trim().split(' ')
   return p.length >= 2 ? `${p[0][0]}${p[p.length - 1][0]}` : name.substring(0, 2)
 }
-function getAvatarColor(id: string): string {
-  const cols = ['bg-blue-500','bg-purple-500','bg-green-500','bg-orange-500','bg-red-500','bg-indigo-500','bg-teal-500','bg-pink-500']
+function getAvatarHue(id: string): string {
+  const hues = [220, 270, 150, 30, 0, 200, 170, 320]
   let h = 0; for (let i = 0; i < id.length; i++) { h = (h << 5) - h + id.charCodeAt(i); h |= 0 }
-  return cols[Math.abs(h) % cols.length]
+  return `hsl(${hues[Math.abs(h) % hues.length]} 55% 40%)`
 }
 
-// ── Main dashboard ───────────────────────────────────────────────────────────
-function getTimeStr(isoStr: string): string {
-  const d = new Date(isoStr)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-function minsFromNow(isoStr: string): number {
-  return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
-}
-
+// ── Main dashboard ────────────────────────────────────────────────────────────
 export function ClassSupervisorDashboard() {
   const { classSupervisor, logout } = useAuthStore()
   const [students, setStudents] = useState<Student[]>([])
@@ -446,7 +391,6 @@ export function ClassSupervisorDashboard() {
   const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
   const [showAuditWarning, setShowAuditWarning] = useState(false)
 
-  // Derive safely before hooks — avoids conditional-return-before-useEffect violation
   const classId = classSupervisor?.classId ?? ''
   const gradeName = classSupervisor?.gradeName ?? ''
 
@@ -461,27 +405,19 @@ export function ClassSupervisorDashboard() {
       ])
       setStudents(sts as Student[])
       setClassStats(cs)
-
       const todayStr = new Date().toISOString().slice(0, 10)
       setTodayDepartures(
-        activeDeps.filter((d) => {
-          const depDate = d.start_at.slice(0, 10)
-          return depDate === todayStr && minsFromNow(d.end_at) > -60
-        })
+        activeDeps.filter((d) => d.start_at.slice(0, 10) === todayStr && minsFromNow(d.end_at) > -60)
       )
     } catch (err) {
-      console.error('Failed to load supervisor data', err)
       toast({ title: 'שגיאה בטעינת נתוני כיתה', description: getErrorMessage(err, 'טעינת נתוני אחראי הכיתה נכשלה'), variant: 'destructive' })
-    } finally {
-      setIsLoading(false)
-    }
+    } finally { setIsLoading(false) }
   }
 
   useEffect(() => {
     if (!classId) return
     loadData()
-    const ch = supabase
-      .channel('supervisor-students-realtime')
+    const ch = supabase.channel('supervisor-students-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, loadData)
       .subscribe()
     const tick = setInterval(() => setTick((t) => t + 1), 60000)
@@ -490,17 +426,12 @@ export function ClassSupervisorDashboard() {
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Subscribe to manual audit broadcasts from admin
   useEffect(() => {
     if (!classId) return
-    const ch = supabase
-      .channel('audit-control')
+    const ch = supabase.channel('audit-control')
       .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
         const { classIds } = payload as { classIds: string[] }
-        if (classIds.includes(classId)) {
-          setManualAuditActive(true)
-          setAuditPresence(new Map())
-        }
+        if (classIds.includes(classId)) { setManualAuditActive(true); setAuditPresence(new Map()) }
       })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
@@ -510,89 +441,112 @@ export function ClassSupervisorDashboard() {
 
   const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
-
-  // Class stats
   const classOnCampus = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
   const classOffCampus = students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
   const classTotal = students.length
-
-  // Yeshiva-wide available spots (across all classes)
   const yeshivaQuota = classStats.reduce((sum, cs) => sum + calcQuota(cs.total), 0)
   const yeshivaOut = classStats.reduce((sum, cs) => sum + cs.offCampus, 0)
   const yeshivaSpots = Math.max(0, yeshivaQuota - yeshivaOut)
-
-  // Check if any student has GPS data (audit mode)
   const hasLocationData = students.some(s => s.lastLocation !== null)
-
-  // Location breakdown for this class
   const locationCounts = students.reduce((acc, s) => {
-    const cat = getStudentLocation(s)
-    acc[cat] = (acc[cat] ?? 0) + 1
-    return acc
+    const cat = getStudentLocation(s); acc[cat] = (acc[cat] ?? 0) + 1; return acc
   }, {} as Record<LocationCategory, number>)
-
-  // Grade-level class stats (excluding own class)
-  const gradeLevelClasses = classStats
-    .filter(cs => cs.grade === gradeName)
-    .sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
-
-  const classColor =
-    yeshivaSpots === 0 ? { bar: 'bg-red-500', text: 'text-[var(--red)]', ring: 'ring-red-200 dark:ring-red-800' }
-    : yeshivaSpots <= 3 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
-    : { bar: 'bg-green-500', text: 'text-[var(--green)]', ring: 'ring-green-200 dark:ring-green-800' }
-
+  const gradeLevelClasses = classStats.filter(cs => cs.grade === gradeName).sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
+  const spotsColor = yeshivaSpots === 0 ? 'var(--bad)' : yeshivaSpots <= 3 ? 'var(--warn)' : 'var(--good)'
   const unmarkedCount = students.length - auditPresence.size
 
   const handleFinishAudit = () => {
-    if (unmarkedCount > 0) {
-      setShowAuditWarning(true)
-    } else {
-      setManualAuditActive(false)
-      setAuditPresence(new Map())
-    }
+    if (unmarkedCount > 0) { setShowAuditWarning(true) }
+    else { setManualAuditActive(false); setAuditPresence(new Map()) }
   }
 
   return (
-    <div className="min-h-screen bg-[var(--bg)] flex flex-col" dir="rtl">
-      {/* Header */}
-      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface)] px-4 py-3 shadow-sm">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--blue)]/10">
-            <GraduationCap className="h-5 w-5 text-[var(--blue)]" />
+    <div dir="rtl" style={{ minHeight: '100vh', background: 'var(--parchment)', position: 'relative' }}>
+      {/* Ambient orbs */}
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none', overflow: 'hidden',
+      }}>
+        <div className="orb-3" />
+        <div className="orb-4" />
+      </div>
+
+      {/* Sticky header */}
+      <header style={{
+        position: 'sticky', top: 0, zIndex: 40,
+        background: 'var(--glass-2)', backdropFilter: 'blur(20px) saturate(140%)',
+        borderBottom: '1px solid var(--hairline)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '12px 16px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: 10,
+            background: 'var(--accent-soft)', color: 'var(--accent)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <GraduationCap size={18} />
           </div>
           <div>
-            <p className="text-sm font-bold text-[var(--text)]">{gradeName}</p>
-            <p className="text-xs text-[var(--text-muted)]">{classLabel} — אחראי כיתה</p>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>{gradeName}</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{classLabel} — אחראי כיתה</div>
           </div>
         </div>
-        <Button variant="ghost" size="sm" onClick={logout} className="gap-1.5 text-[var(--text-muted)]">
-          <LogOut className="h-4 w-4" />
+        <button
+          onClick={logout}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 12px', borderRadius: 8,
+            border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+            color: 'var(--ink-muted)', fontSize: 12.5, fontWeight: 500,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          <LogOut size={13} />
           יציאה
-        </Button>
+        </button>
       </header>
 
-      <div className="flex flex-col gap-5 p-4 lg:p-6">
+      <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '16px 16px 100px' }}>
+
         {/* Manual audit banner */}
         {manualAuditActive && (
-          <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
-              <p className="font-semibold text-amber-700 dark:text-amber-300">ביקורת פנימית פעילה — סמן נוכחות</p>
+          <div style={{
+            borderRadius: 16, padding: 16,
+            border: '1px solid var(--warn)',
+            background: 'var(--warn-soft)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <ShieldAlert size={18} style={{ color: 'var(--warn)', flexShrink: 0 }} />
+              <p style={{ fontWeight: 600, color: 'var(--warn)', fontSize: 14 }}>ביקורת פנימית פעילה — סמן נוכחות</p>
             </div>
-            <div className="flex flex-col gap-1.5 mb-3">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
               {students.map((s) => {
                 const present = auditPresence.get(s.id)
                 return (
-                  <div key={s.id} className="flex items-center justify-between rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
-                    <span className="text-sm font-medium text-[var(--text)]">{s.fullName}</span>
-                    <div className="flex gap-2">
+                  <div key={s.id} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    borderRadius: 10, background: 'rgba(255,255,255,0.7)',
+                    padding: '8px 12px',
+                  }}>
+                    <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{s.fullName}</span>
+                    <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, true))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === true ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
+                        style={{
+                          borderRadius: 7, padding: '3px 10px', fontSize: 11.5, fontWeight: 700,
+                          cursor: 'pointer', border: 'none', fontFamily: 'inherit',
+                          background: present === true ? 'var(--good)' : 'rgba(34,197,94,0.12)',
+                          color: present === true ? '#fff' : 'var(--good)',
+                        }}
                       >נוכח</button>
                       <button
                         onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, false))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === false ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
+                        style={{
+                          borderRadius: 7, padding: '3px 10px', fontSize: 11.5, fontWeight: 700,
+                          cursor: 'pointer', border: 'none', fontFamily: 'inherit',
+                          background: present === false ? 'var(--bad)' : 'rgba(239,68,68,0.12)',
+                          color: present === false ? '#fff' : 'var(--bad)',
+                        }}
                       >נעדר</button>
                     </div>
                   </div>
@@ -601,11 +555,15 @@ export function ClassSupervisorDashboard() {
             </div>
             <button
               onClick={handleFinishAudit}
-              className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600"
+              style={{
+                width: '100%', borderRadius: 10, padding: '10px',
+                background: 'var(--warn)', border: 'none', color: '#fff',
+                fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              }}
             >
               סיום ביקורת
               {unmarkedCount > 0 && (
-                <span className="mr-2 rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
+                <span style={{ marginInlineStart: 8, borderRadius: 999, background: 'rgba(255,255,255,0.3)', padding: '1px 7px', fontSize: 11 }}>
                   {unmarkedCount} לא מסומנים
                 </span>
               )}
@@ -614,268 +572,263 @@ export function ClassSupervisorDashboard() {
         )}
 
         {/* Class stats card */}
-        <Card className={`ring-1 ${classColor.ring} bg-[var(--surface)]`}>
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--blue)]/10">
-                  <Users className="h-4 w-4 text-[var(--blue)]" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-[var(--text)]">{classLabel}</p>
-                  <p className="text-xs text-[var(--text-muted)]">{gradeName}</p>
-                </div>
+        <div className="glass" style={{ padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: 'var(--accent-soft)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Users size={15} />
               </div>
-              <div className="flex flex-col items-end">
-                <span className={`text-3xl font-extrabold ${classColor.text}`}>
-                  {isLoading ? '—' : yeshivaSpots}
-                </span>
-                <span className="text-[10px] text-[var(--text-muted)]">מקומות פנויים בישיבה</span>
+              <div>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>{classLabel}</div>
+                <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{gradeName}</div>
               </div>
             </div>
-            <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
-              <div
-                className={`h-full rounded-full transition-all duration-700 ${classColor.bar}`}
-                style={{ width: `${isLoading || yeshivaQuota === 0 ? 0 : Math.min(100, Math.round((yeshivaOut / yeshivaQuota) * 100))}%` }}
-              />
+            <div style={{ textAlign: 'end' }}>
+              <div className="font-mono-num" style={{ fontSize: 36, fontWeight: 700, color: spotsColor, lineHeight: 1 }}>
+                {isLoading ? '—' : yeshivaSpots}
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--ink-faint)' }}>מקומות פנויים בישיבה</div>
             </div>
-            <div className="mt-3 flex gap-4 text-sm">
-              <div className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-green-500" />
-                <span className="text-[var(--text-muted)]">בישיבה: <strong className="text-[var(--text)]">{classOnCampus}</strong></span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-orange-400" />
-                <span className="text-[var(--text-muted)]">בחוץ: <strong className="text-[var(--text)]">{classOffCampus}</strong></span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-[var(--border)]" />
-                <span className="text-[var(--text-muted)]">מכסה: <strong className={classOffCampus >= quota ? 'text-[var(--red)]' : 'text-[var(--text)]'}>{classOffCampus}/{quota}</strong></span>
-              </div>
-            </div>
+          </div>
 
-            {/* Location breakdown — shown only when audit GPS data exists */}
-            {hasLocationData && (
-              <div className="mt-3 flex flex-wrap gap-2 border-t border-[var(--border)] pt-3">
-                <p className="w-full text-xs font-medium text-[var(--text-muted)] mb-1 flex items-center gap-1">
-                  <MapPin className="h-3 w-3" /> מיקום (ביקורת)
-                </p>
-                {(['inYeshiva', 'inArea', 'far'] as LocationCategory[]).map(cat => {
-                  const count = locationCounts[cat] ?? 0
-                  if (count === 0) return null
-                  const cfg = LOCATION_LABELS[cat]
-                  return (
-                    <div key={cat} className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-xs">
-                      <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: cfg.dot }} />
-                      <span className="text-[var(--text-muted)]">{cfg.label}</span>
-                      <span className={`font-bold ${cfg.color}`}>{count}</span>
-                    </div>
-                  )
-                })}
+          <div style={{ height: 8, borderRadius: 999, background: 'rgba(15,23,42,0.08)', overflow: 'hidden' }}>
+            <div style={{
+              height: '100%', borderRadius: 999,
+              background: spotsColor,
+              width: `${isLoading || yeshivaQuota === 0 ? 0 : Math.min(100, Math.round((yeshivaOut / yeshivaQuota) * 100))}%`,
+              transition: 'width 0.7s ease',
+            }} />
+          </div>
+
+          <div style={{ marginTop: 12, display: 'flex', gap: 16, fontSize: 13 }}>
+            {[
+              { dot: 'var(--good)', label: 'בישיבה', val: classOnCampus },
+              { dot: 'var(--warn)', label: 'בחוץ', val: classOffCampus },
+              { dot: 'var(--hairline)', label: `מכסה ${classOffCampus}/${quota}`, val: null },
+            ].map((item, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: item.dot, flexShrink: 0 }} />
+                <span style={{ color: 'var(--ink-muted)' }}>
+                  {item.val !== null ? `${item.label}: ` : ''}<strong style={{ color: item.val !== null && i === 1 && classOffCampus >= quota ? 'var(--bad)' : 'var(--ink)' }}>{item.val !== null ? item.val : item.label}</strong>
+                </span>
               </div>
-            )}
-          </CardContent>
-        </Card>
+            ))}
+          </div>
+
+          {hasLocationData && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--hairline)', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <p style={{ width: '100%', fontSize: 11, color: 'var(--ink-faint)', marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <MapPin size={11} /> מיקום (ביקורת)
+              </p>
+              {(['inYeshiva', 'inArea', 'far'] as LocationCategory[]).map(cat => {
+                const count = locationCounts[cat] ?? 0
+                if (count === 0) return null
+                const cfg = LOCATION_CFG[cat]
+                return (
+                  <div key={cat} style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    borderRadius: 999, border: '1px solid var(--hairline)',
+                    background: 'rgba(255,255,255,0.5)',
+                    padding: '3px 10px', fontSize: 11.5,
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+                    <span style={{ color: 'var(--ink-muted)' }}>{cfg.label}</span>
+                    <span style={{ fontWeight: 700, color: cfg.color }}>{count}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
 
         {/* Grade-level spots */}
         {gradeLevelClasses.length > 1 && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <AlertOctagon className="h-4 w-4 text-[var(--blue)]" />
-                מצב השכבה — {gradeName}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {gradeLevelClasses.map(cs => {
-                  const isSelf = cs.classId === classId
-                  const cQuota = calcQuota(cs.total)
-                  const spotsUsed = cs.offCampus
-                  const spotsLeft = Math.max(0, cQuota - spotsUsed)
-                  const isFull = spotsLeft === 0
-                  const cLabel = cs.classId.includes(' כיתה ') ? `כיתה ${cs.classId.split(' כיתה ')[1]}` : cs.classId
-                  const cPct = cs.total > 0 ? Math.round((cs.onCampus / cs.total) * 100) : 0
-
-                  return (
-                    <div
-                      key={cs.classId}
-                      className={`relative rounded-xl border p-3 transition-all ${
-                        isSelf
-                          ? 'border-[var(--blue)] bg-blue-50/50 dark:bg-blue-950/20 ring-1 ring-[var(--blue)]/30'
-                          : isFull
-                          ? 'border-red-200 bg-red-50/40 dark:border-red-800 dark:bg-red-950/10'
-                          : 'border-[var(--border)] bg-[var(--surface)]'
-                      }`}
-                    >
-                      {isSelf && (
-                        <span className="absolute -top-2 right-2 rounded-full bg-[var(--blue)] px-1.5 py-0.5 text-[9px] font-bold text-white">הכיתה שלי</span>
-                      )}
-                      <p className="text-sm font-bold text-[var(--text)]">{cLabel}</p>
-                      <div className="mt-1 flex items-center justify-between">
-                        <span className="text-xs text-[var(--text-muted)]">{cPct}% נוכחים</span>
-                        <span className={`text-xs font-semibold ${isFull ? 'text-[var(--red)]' : spotsLeft <= 1 ? 'text-[var(--orange)]' : 'text-[var(--green)]'}`}>
-                          {isFull ? 'מלאה' : `${spotsLeft} מקומות`}
-                        </span>
-                      </div>
-                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
-                        <div
-                          className={`h-full rounded-full ${isFull ? 'bg-red-500' : cPct >= 80 ? 'bg-green-500' : 'bg-orange-400'}`}
-                          style={{ width: `${cPct}%` }}
-                        />
-                      </div>
-                      <p className="mt-1 text-[10px] text-[var(--text-muted)]">{cs.onCampus}/{cs.total} בישיבה · {spotsUsed}/{cQuota} מכסה</p>
-                    </div>
-                  )
-                })}
+          <div className="glass" style={{ padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--hairline)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertOctagon size={14} style={{ color: 'var(--info)' }} />
+                <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>מצב השכבה — {gradeName}</span>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+            <div style={{ padding: 14, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              {gradeLevelClasses.map(cs => {
+                const isSelf = cs.classId === classId
+                const cQuota = calcQuota(cs.total)
+                const spotsUsed = cs.offCampus
+                const spotsLeft = Math.max(0, cQuota - spotsUsed)
+                const isFull = spotsLeft === 0
+                const cLabel = cs.classId.includes(' כיתה ') ? `כיתה ${cs.classId.split(' כיתה ')[1]}` : cs.classId
+                const cPct = cs.total > 0 ? Math.round((cs.onCampus / cs.total) * 100) : 0
+                const c = isFull ? 'var(--bad)' : spotsLeft <= 1 ? 'var(--warn)' : 'var(--good)'
+                return (
+                  <div key={cs.classId} style={{
+                    position: 'relative', borderRadius: 12, padding: 10,
+                    border: `1.5px solid ${isSelf ? 'var(--accent)' : 'var(--hairline)'}`,
+                    background: isSelf ? 'var(--accent-soft)' : 'rgba(255,255,255,0.5)',
+                  }}>
+                    {isSelf && (
+                      <span style={{
+                        position: 'absolute', top: -8, insetInlineEnd: 8,
+                        borderRadius: 999, background: 'var(--accent)', color: '#fff',
+                        padding: '1px 7px', fontSize: 9, fontWeight: 700,
+                      }}>הכיתה שלי</span>
+                    )}
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--ink)', marginBottom: 3 }}>{cLabel}</div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}>
+                      <span style={{ color: 'var(--ink-faint)' }}>{cPct}% נוכחים</span>
+                      <span style={{ fontWeight: 700, color: c }}>{isFull ? 'מלאה' : `${spotsLeft} מקומות`}</span>
+                    </div>
+                    <div style={{ height: 4, borderRadius: 999, background: 'rgba(15,23,42,0.08)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', borderRadius: 999, width: `${cPct}%`, background: c, transition: 'width 0.5s' }} />
+                    </div>
+                    <div style={{ fontSize: 9.5, color: 'var(--ink-faint)', marginTop: 3 }}>
+                      {cs.onCampus}/{cs.total} בישיבה · {spotsUsed}/{cQuota} מכסה
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         )}
 
         {/* Student list */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center justify-between text-base">
-              <span className="flex items-center gap-2">
-                <UserCheck className="h-4 w-4 text-[var(--blue)]" />
-                תלמידי {classLabel}
-              </span>
-              <span className="text-sm font-normal text-[var(--text-muted)]">
-                {classOnCampus}/{classTotal} נוכחים
-              </span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {isLoading ? (
-              <div className="flex items-center justify-center py-10">
-                <Loader2 className="h-6 w-6 animate-spin text-[var(--text-muted)]" />
-              </div>
-            ) : students.length === 0 ? (
-              <p className="py-8 text-center text-sm text-[var(--text-muted)]">אין תלמידים בכיתה זו</p>
-            ) : (
-              <ul>
-                {students
-                  .sort((a, b) => {
-                    // Sort: outside first, then by name
-                    const aOut = a.currentStatus !== 'ON_CAMPUS' ? 0 : 1
-                    const bOut = b.currentStatus !== 'ON_CAMPUS' ? 0 : 1
-                    if (aOut !== bOut) return aOut - bOut
-                    return a.fullName.localeCompare(b.fullName, 'he')
-                  })
-                  .map(student => {
-                    const isOut = student.currentStatus === 'OFF_CAMPUS' || student.currentStatus === 'OVERDUE'
-                    const locCat = getStudentLocation(student)
-                    const locCfg = LOCATION_LABELS[locCat]
-                    const showLoc = hasLocationData && isOut && student.lastLocation
+        <div className="glass" style={{ padding: 0, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>תלמידי {classLabel}</span>
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{classOnCampus}/{classTotal} נוכחים</span>
+          </div>
 
-                    return (
-                      <li
-                        key={student.id}
-                        className={`flex items-center gap-3 border-b border-[var(--border)] px-4 last:border-b-0 transition-colors hover:bg-[var(--bg-2)] ${
-                          isOut ? 'bg-orange-50/30 dark:bg-orange-950/10' : ''
-                        }`}
-                        style={{ minHeight: '68px' }}
+          {isLoading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}>
+              <Loader2 size={22} style={{ animation: 'spin 1s linear infinite', color: 'var(--ink-faint)' }} />
+            </div>
+          ) : students.length === 0 ? (
+            <p style={{ padding: '32px 0', textAlign: 'center', fontSize: 13.5, color: 'var(--ink-faint)' }}>אין תלמידים בכיתה זו</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {students
+                .sort((a, b) => {
+                  const aOut = a.currentStatus !== 'ON_CAMPUS' ? 0 : 1
+                  const bOut = b.currentStatus !== 'ON_CAMPUS' ? 0 : 1
+                  if (aOut !== bOut) return aOut - bOut
+                  return a.fullName.localeCompare(b.fullName, 'he')
+                })
+                .map(student => {
+                  const isOut = student.currentStatus === 'OFF_CAMPUS' || student.currentStatus === 'OVERDUE'
+                  const locCat = getStudentLocation(student)
+                  const locCfg = LOCATION_CFG[locCat]
+                  const showLoc = hasLocationData && isOut && student.lastLocation
+                  const avatarColor = getAvatarHue(student.id)
+
+                  return (
+                    <li
+                      key={student.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '0 14px', minHeight: 62,
+                        borderBottom: '1px solid var(--hairline)',
+                        background: isOut ? 'rgba(249,115,22,0.04)' : 'transparent',
+                      }}
+                    >
+                      <div style={{
+                        width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                        background: `${avatarColor}22`,
+                        border: `1.5px solid ${avatarColor}44`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 11.5, fontWeight: 700, color: avatarColor,
+                      }}>
+                        {getInitials(student.fullName)}
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        <span style={{ fontWeight: 500, color: 'var(--ink)', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {student.fullName}
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <StatusBadge status={student.currentStatus} />
+                          {showLoc && (
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10.5, fontWeight: 500, color: locCfg.color }}>
+                              <MapPin size={10} />
+                              {locCfg.label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => setEditStudent(student)}
+                        style={{
+                          width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+                          border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+                          color: 'var(--ink-faint)', cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
                       >
-                        {/* Avatar */}
-                        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${getAvatarColor(student.id)}`}>
-                          {getInitials(student.fullName)}
-                        </div>
+                        <ArrowRightLeft size={13} />
+                      </button>
+                    </li>
+                  )
+                })}
+            </ul>
+          )}
+        </div>
 
-                        {/* Info */}
-                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
-                          <div className="flex items-center gap-2">
-                            <StatusBadge status={student.currentStatus} />
-                            {showLoc && (
-                              <span className={`flex items-center gap-1 text-xs font-medium ${locCfg.color}`}>
-                                <MapPin className="h-3 w-3" />
-                                {locCfg.label}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Edit */}
-                        <button
-                          onClick={() => setEditStudent(student)}
-                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--blue)]"
-                          title="ניהול תלמיד"
-                        >
-                          <ArrowRightLeft className="h-4 w-4" />
-                        </button>
-                      </li>
-                    )
-                  })}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Today's departures */}
-      {todayDepartures.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Clock className="h-4 w-4 text-[var(--blue)]" />
-              יציאות היום ({todayDepartures.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="divide-y divide-[var(--border)]">
+        {/* Today's departures */}
+        {todayDepartures.length > 0 && (
+          <div className="glass" style={{ padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Clock size={14} style={{ color: 'var(--info)' }} />
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>יציאות היום ({todayDepartures.length})</span>
+            </div>
+            <div>
               {todayDepartures.map((dep) => {
-                const minsEnd   = minsFromNow(dep.end_at)
+                const minsEnd = minsFromNow(dep.end_at)
                 const minsStart = minsFromNow(dep.start_at)
-                const isActive  = minsStart <= 0 && minsEnd > 0
+                const isActive = minsStart <= 0 && minsEnd > 0
                 const isPending = minsStart > 0
                 return (
-                  <div key={dep.id} className="flex items-center gap-3 px-4 py-2.5">
-                    <span className="font-medium text-sm text-[var(--text)] flex-1">{dep.student_name}</span>
-                    <span className="text-xs text-[var(--text-muted)] shrink-0">{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
-                    <span className={`text-xs font-medium shrink-0 ${isActive ? 'text-orange-500 dark:text-orange-400' : isPending ? 'text-blue-500 dark:text-blue-400' : 'text-[var(--text-muted)]'}`}>
+                  <div key={dep.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '10px 14px',
+                    borderBottom: '1px solid var(--hairline)',
+                  }}>
+                    <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--ink)', flex: 1 }}>{dep.student_name}</span>
+                    <span style={{ fontSize: 11.5, color: 'var(--ink-faint)', flexShrink: 0 }}>{getTimeStr(dep.start_at)}–{getTimeStr(dep.end_at)}</span>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, flexShrink: 0, color: isActive ? 'var(--warn)' : isPending ? 'var(--info)' : 'var(--ink-faint)' }}>
                       {isActive ? `נותרו ${minsEnd} דק'` : isPending ? `בעוד ${minsStart} דק'` : 'הסתיים'}
                     </span>
                   </div>
                 )
               })}
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        )}
+      </div>
 
       {/* Audit warning dialog */}
       <Dialog open={showAuditWarning} onOpenChange={setShowAuditWarning}>
         <DialogContent dir="rtl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <AlertOctagon className="h-5 w-5 text-amber-500" />
+              <AlertOctagon className="h-5 w-5" style={{ color: 'var(--warn)' }} />
               יש תלמידים לא מסומנים
             </DialogTitle>
             <DialogDescription>
-              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו כנוכחים או נעדרים.
-              לסיים את הביקורת בכל זאת?
+              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו. לסיים בכל זאת?
             </DialogDescription>
           </DialogHeader>
           <div className="flex gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowAuditWarning(false)} className="flex-1">
-              חזור לסימון
-            </Button>
-            <Button
-              className="flex-1 bg-amber-500 hover:bg-amber-600 text-white"
-              onClick={() => {
-                setShowAuditWarning(false)
-                setManualAuditActive(false)
-                setAuditPresence(new Map())
-              }}
-            >
+            <Button variant="outline" onClick={() => setShowAuditWarning(false)} className="flex-1">חזור לסימון</Button>
+            <Button className="flex-1" style={{ background: 'var(--warn)', color: '#fff' }}
+              onClick={() => { setShowAuditWarning(false); setManualAuditActive(false); setAuditPresence(new Map()) }}>
               סיים בכל זאת
             </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Edit sheet */}
       <EditStudentSheet
         student={editStudent}
         open={editStudent !== null}

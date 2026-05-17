@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { X, ChevronDown, ChevronUp } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
 import { normalizeHebrew } from '@/store/studentsStore'
@@ -19,6 +18,17 @@ const STATUS_OPTIONS: { value: StudentStatus; label: string }[] = [
   { value: 'ON_CAMPUS', label: 'בישיבה' },
   { value: 'OFF_CAMPUS', label: 'מחוץ לישיבה' },
 ]
+
+const selectStyle: React.CSSProperties = {
+  width: '100%', borderRadius: 10,
+  border: '1px solid var(--hairline)',
+  background: 'rgba(255,255,255,0.7)', color: 'var(--ink)',
+  padding: '9px 12px', fontSize: 13.5, fontFamily: 'inherit', outline: 'none',
+}
+
+const inputStyle: React.CSSProperties = {
+  ...selectStyle,
+}
 
 function resolveGrade(rawGrade: string | null | undefined): string {
   const normalized = normalizeHebrew(rawGrade ?? '')
@@ -43,7 +53,6 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
   const [showStatusSection, setShowStatusSection] = useState(false)
   const [overrideStatus, setOverrideStatus] = useState<StudentStatus>(student.currentStatus === 'OVERDUE' ? 'OFF_CAMPUS' : student.currentStatus as StudentStatus)
   const [overrideNote, setOverrideNote] = useState('')
-
   const [saving, setSaving] = useState(false)
 
   const classOptions = getClasses(selectedGrade)
@@ -71,33 +80,20 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
       const statusChanged = showStatusSection && overrideStatus !== effectiveStatus
 
       if (nameOrPhoneChanged) {
-        const result = await api.updateStudent(student.id, {
-          fullName: fullName.trim(),
-          phone: phone.trim(),
-        })
+        const result = await api.updateStudent(student.id, { fullName: fullName.trim(), phone: phone.trim() })
         if (result.error) {
           toast({ title: 'שגיאה בשמירה', description: result.error.message, variant: 'destructive' })
           return
         }
       }
-
-      if (classChanged) {
-        await api.updateStudentGrade(student.id, selectedGrade, selectedClass)
-      }
-
-      if (statusChanged) {
-        await api.createAdminOverride(student.id, overrideStatus, overrideNote || undefined)
-      }
+      if (classChanged) await api.updateStudentGrade(student.id, selectedGrade, selectedClass)
+      if (statusChanged) await api.createAdminOverride(student.id, overrideStatus, overrideNote || undefined)
 
       toast({ title: 'פרטי התלמיד עודכנו בהצלחה' })
       onSaved()
       onClose()
     } catch (err) {
-      toast({
-        title: 'שגיאה בשמירה',
-        description: getErrorMessage(err, 'שמירת פרטי התלמיד נכשלה'),
-        variant: 'destructive',
-      })
+      toast({ title: 'שגיאה בשמירה', description: getErrorMessage(err, 'שמירת פרטי התלמיד נכשלה'), variant: 'destructive' })
     } finally {
       setSaving(false)
     }
@@ -105,118 +101,103 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-end justify-center bg-black/40 sm:items-center"
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+        background: 'rgba(15,23,42,0.45)',
+        backdropFilter: 'blur(6px)',
+      }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="w-full max-w-sm rounded-t-2xl bg-[var(--surface)] p-5 shadow-xl sm:rounded-2xl">
+      <div style={{
+        width: '100%', maxWidth: 440,
+        background: 'var(--glass-2)',
+        backdropFilter: 'blur(28px) saturate(150%)',
+        border: '1px solid var(--hairline)',
+        boxShadow: 'var(--shadow-card)',
+        borderRadius: '24px 24px 0 0',
+        padding: 24,
+      }}>
         {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-base font-bold text-[var(--text)]">
-            עריכת תלמיד — {student.fullName}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h3 style={{ fontFamily: 'Fraunces, serif', fontSize: 22, fontWeight: 500, color: 'var(--ink)', margin: 0 }}>
+            עריכת תלמיד
           </h3>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-[var(--text-muted)] hover:bg-[var(--bg-2)]"
+            style={{
+              width: 30, height: 30, borderRadius: 8,
+              border: '1px solid var(--hairline)',
+              background: 'rgba(255,255,255,0.6)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--ink-faint)',
+            }}
           >
-            <X className="h-4 w-4" />
+            <X size={14} />
           </button>
         </div>
 
-        <div className="flex flex-col gap-3">
-          {/* Full Name */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">שם מלא</label>
-            <input
-              type="text"
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              dir="rtl"
-            />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>שם מלא</label>
+            <input type="text" style={inputStyle} value={fullName} onChange={(e) => setFullName(e.target.value)} dir="rtl" />
           </div>
 
-          {/* Phone */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">טלפון</label>
-            <input
-              type="tel"
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              dir="ltr"
-            />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>טלפון</label>
+            <input type="tel" style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} dir="ltr" />
           </div>
 
-          {/* Grade */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">שכבה</label>
-            <select
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-              value={selectedGrade}
-              onChange={(e) => handleGradeChange(e.target.value)}
-              dir="rtl"
-            >
-              {GRADE_LEVELS.map((g) => (
-                <option key={g.name} value={g.name}>{g.name}</option>
-              ))}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>שכבה</label>
+            <select style={selectStyle} value={selectedGrade} onChange={(e) => handleGradeChange(e.target.value)} dir="rtl">
+              {GRADE_LEVELS.map((g) => <option key={g.name} value={g.name}>{g.name}</option>)}
             </select>
           </div>
 
-          {/* Class — only when grade has multiple classes */}
           {classOptions.length > 1 && (
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium text-[var(--text)]">כיתה</label>
-              <select
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-                value={selectedClass}
-                onChange={(e) => setSelectedClass(e.target.value)}
-                dir="rtl"
-              >
-                {classOptions.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>כיתה</label>
+              <select style={selectStyle} value={selectedClass} onChange={(e) => setSelectedClass(e.target.value)} dir="rtl">
+                {classOptions.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
           )}
 
-          {/* Status override — collapsible */}
-          <div className="rounded-lg border border-[var(--border)]">
+          {/* Status override */}
+          <div style={{ borderRadius: 12, border: '1px solid var(--hairline)' }}>
             <button
               type="button"
-              className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium text-[var(--text-muted)] hover:bg-[var(--bg-2)] rounded-lg transition-colors"
               onClick={() => setShowStatusSection((v) => !v)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 12px', background: 'transparent', border: 'none', cursor: 'pointer',
+                fontSize: 13, fontWeight: 500, color: 'var(--ink-muted)', fontFamily: 'inherit',
+              }}
             >
               <span>עדכון סטטוס ידני</span>
-              <div className="flex items-center gap-2">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <StatusBadge status={student.currentStatus} />
-                {showStatusSection ? (
-                  <ChevronUp className="h-4 w-4" />
-                ) : (
-                  <ChevronDown className="h-4 w-4" />
-                )}
+                {showStatusSection ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               </div>
             </button>
 
             {showStatusSection && (
-              <div className="flex flex-col gap-3 border-t border-[var(--border)] px-3 pb-3 pt-3">
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm font-medium text-[var(--text)]">סטטוס חדש</label>
-                  <select
-                    className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
-                    value={overrideStatus}
-                    onChange={(e) => setOverrideStatus(e.target.value as StudentStatus)}
-                    dir="rtl"
-                  >
-                    {STATUS_OPTIONS.map(({ value, label }) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
+              <div style={{
+                display: 'flex', flexDirection: 'column', gap: 10,
+                borderTop: '1px solid var(--hairline)', padding: '12px',
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>סטטוס חדש</label>
+                  <select style={selectStyle} value={overrideStatus} onChange={(e) => setOverrideStatus(e.target.value as StudentStatus)} dir="rtl">
+                    {STATUS_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
                   </select>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm font-medium text-[var(--text)]">הערה (אופציונלי)</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>הערה (אופציונלי)</label>
                   <input
                     type="text"
-                    className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+                    style={inputStyle}
                     value={overrideNote}
                     onChange={(e) => setOverrideNote(e.target.value)}
                     placeholder="הסבר לשינוי הסטטוס..."
@@ -228,13 +209,33 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
           </div>
 
           {/* Actions */}
-          <div className="mt-1 flex gap-2">
-            <Button type="button" variant="ghost" className="flex-1" onClick={onClose}>
+          <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                flex: 1, padding: '10px', borderRadius: 10,
+                border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+                color: 'var(--ink-muted)', fontSize: 13.5, fontWeight: 500,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
               ביטול
-            </Button>
-            <Button className="flex-1" onClick={handleSave} disabled={saving}>
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{
+                flex: 1, padding: '10px', borderRadius: 10,
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--ink), var(--accent))',
+                color: '#fff', fontSize: 13.5, fontWeight: 600,
+                cursor: saving ? 'not-allowed' : 'pointer',
+                opacity: saving ? 0.7 : 1, fontFamily: 'inherit',
+              }}
+            >
               {saving ? 'שומר...' : 'שמור'}
-            </Button>
+            </button>
           </div>
         </div>
       </div>

@@ -127,9 +127,9 @@ export function HistoryPage() {
       <div className="mb-5 flex items-center gap-3">
         <div style={{
           width: 40, height: 40, borderRadius: 14,
-          background: 'linear-gradient(135deg, #3b82f6, #2563eb)',
+          background: 'linear-gradient(135deg, var(--accent), #3730a3)',
           display: 'grid', placeItems: 'center', flexShrink: 0,
-          boxShadow: '0 6px 16px rgba(37,99,235,0.3)',
+          boxShadow: '0 6px 16px rgba(79,70,229,0.3)',
         }}>
           <CalendarIcon style={{ width: 18, height: 18, color: '#fff' }} />
         </div>
@@ -280,9 +280,9 @@ function DepartureItem({ departure: dep }: { departure: CalendarDeparture }) {
       IconComponent = Clock
       break
     case 'APPROVED':
-      accentColor = '#3b82f6'
-      iconBg = 'rgba(59,130,246,0.12)'
-      iconColor = '#3b82f6'
+      accentColor = 'var(--info)'
+      iconBg = 'var(--info-soft)'
+      iconColor = 'var(--info)'
       statusLabel = 'אושרה'
       IconComponent = CheckCircle
       break
