@@ -1,6 +1,48 @@
-# INTERNAL AUDIT 2.0 — Master Plan
-## ביקורת פנימית — תוכנית עבודה מלאה, מקצה לקצה
-### ישיבת שבי חברון | מערכת נוכחות PWA
+# INTERNAL AUDIT 2.0 — Implementation Reference
+
+> ⚠ **THIS DOCUMENT IS A SUBORDINATE REFERENCE — READ THE MASTER PLAN FIRST.**
+>
+> The authoritative document is `INTERNAL_AUDIT_MASTER_PLAN.md`. When this file disagrees with the master plan, the master plan wins.
+
+---
+
+## 🛑 ERRATA — corrections after the v1.1 feasibility audit
+
+This document was written before the feasibility audit. The audit (see master plan § "Revision History & Errata", R-1 through R-34) discovered that **the production database already contains a working audit subsystem** that this document does not acknowledge. The following code-level corrections apply throughout:
+
+| What this document says | What the corrected v1.1 plan says |
+|---|---|
+| Create new tables `audit_sessions`, `audit_responses`, `audit_response_log`, `audit_alerts`, `audit_push_log` | **Adopt existing** `audit_sessions`, `audit_entries`, `audit_class_states` (already in production). **Add** `audit_alerts`, `audit_push_log`. Rename `audit_response_log` references → handled by triggers on existing tables. |
+| New RPCs `open_audit`, `submit_audit_response`, `close_audit`, `abort_audit`, `get_active_audit`, `get_audit_full` | **Adopt existing** `start_audit_session`, `submit_audit_entry`, `finish_class_audit`, `close_audit_session`, `get_active_audit_session`, `get_audit_session`, `list_audit_sessions`. **Add** `acknowledge_audit_alert`, `compute_audit_kpis`, `submit_audit_entry_with_gps`. |
+| Routes under `/admin/audit/...` | Routes under `/admin/inspection/...` (R-2). `/admin/audit` is already taken by the Audit Log page. |
+| `audit_responses.student_id UUID REFERENCES students(id)` | `audit_entries.student_id TEXT` matching the actual `students.id TEXT` (R-3). |
+| `INTERNAL_AUDIT_*` table names with `inspection_*` rename (introduced in early v1.1 R-23) | **Reverted** — names stay `audit_*` (R-23 in master plan). |
+| Edge Function `send-audit-push` written from scratch | Inlines the VAPID/AES-128-GCM logic from `supabase/functions/send-push/index.ts` rather than refactoring. |
+| `import { toast } from 'sonner'` | `import { toast } from '@/hooks/use-toast'` — the existing Radix-based hook (R-15). `sonner` is not installed. |
+| PDF export with `jspdf` | **Excel-only in v1** (R-8). PDF deferred to v1.1; requires Hebrew font embedding. |
+| `GRANT EXECUTE ... TO anon, authenticated` for every RPC | Per-RPC grants — admin-only RPCs grant only to `authenticated`. Student-callable RPCs grant to `anon` + `authenticated`. RLS enforces row-level access (R-9). |
+| `RollCallPage.tsx` and the two old broadcast subscribers stay until "v1.1 cleanup" | **Removed in the same commit as the new feature** behind a kill-switch flag (R-17). |
+| "Push fan-out to all 381 students" via `push_token` | Push is **advisory, not load-bearing** (R-5). Student adoption is verbal-announcement + app-banner. Only 1/381 has push_token; the model is intentional. |
+| `pushTarget: 'STUDENTS' \| 'SUPERVISORS' \| 'BOTH'` | Only `STUDENTS` in v1 (R-6). The `supervisors` table exists with `pin_hash` but adding `push_token` deferred to v1.1. |
+| `react-leaflet`, `framer-motion`, `howler`, `sonner`, `react-countup`, `jspdf` all installed | Only `react-leaflet`, `react-leaflet-cluster`, `leaflet`, `framer-motion`, `howler`, `react-countup` installed. **`sonner` and `jspdf` NOT installed in v1.** Bundle budget revised to ~600 KB (R-13). |
+| Tests with arbitrary `data-testid` references | New `data-testid` discipline enumerated in R-20. Existing pages have ~zero testids. |
+| Auth state available on refresh "automatically" | Explicit auth-restore bootstrap added in `App.tsx` (R-4): `supabase.auth.getSession()` for admin; `sessionStorage` re-verify for supervisor. |
+| Bundle size budget < 400 KB gzipped | Realistic budget ~600 KB; code-split Leaflet / Excel / projection mode (R-13). |
+| Service worker push handler is generic | Discriminated by `data.kind === 'AUDIT_LOCATION'` in `src/sw.ts` (R-12). `public/push-sw.js` left alone. |
+| Dexie schema unchanged | Bump to v6 for `audit_submit_queue` and `audit_local_cache` (R-19). |
+| Plan does not address mockClient | `mockClient.ts` must implement every new audit RPC (Iron Rule 4) — R-10. |
+| No mention of class-name renames mid-session | Handled by existing `audit_sessions.class_snapshot` JSONB pattern (R-33). |
+| 5-Phase implementation (Weeks 1-6) | **Phase −1 added** (Migration Reconciliation, 3-4 days) — R-25. Total ~4-6 weeks. |
+| `pg_trgm` extension installed | **Removed** — not used anywhere in the plan (R-22). |
+| GPS retention cron mentioned in plan §11.5, missing from migration SQL | **Added** to migration: daily at 03:15 nulls GPS coords on `audit_entries` older than 90 days (R-14). |
+| `v_audit_session_summary` uses SECURITY DEFINER | Fix the existing view — remove `SECURITY DEFINER` clause as part of migration reconciliation (R-29). |
+| `departures_audit_trigger_fn` referenced as part of audit cleanup | **DO NOT TOUCH** — it writes to `admin_overrides`, unrelated to the audit subsystem despite the misleading name (R-28). |
+
+**When implementing, refer to the master plan for the rationale and to this document for the code shape — but apply the corrections above first.**
+
+---
+
+## Original document (pre-feasibility-audit content follows)
 
 > **מסמך זה הוא תוכנית בלבד.** אין כאן שינוי קוד. כל הקוד הקיים של RollCall/ביקורת פנימית נזרק; אנחנו בונים מחדש מאפס על בסיס הכללים בלבד (בישיבה / בחוץ עם אישור / בחוץ בלי אישור / מצב לא ידוע).
 >

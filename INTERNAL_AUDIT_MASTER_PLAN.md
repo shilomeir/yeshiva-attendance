@@ -8,6 +8,735 @@
 
 ---
 
+---
+
+# Revision History & Errata
+
+**v1 — 2026-05-16** — Initial draft.
+
+**v1.1 — 2026-05-16 (this revision)** — Feasibility audit against the live codebase and production Supabase project (`frxjddevnehprauoapiv`). The audit identified ~40 issues; the corrections are captured below. **When this section disagrees with anything later in the document, this section wins** until v1 is rewritten in v2.
+
+**The single biggest correction** is **R-1**: the production database already contains a fully-formed audit subsystem (3 tables, 14 indexes, 5 RLS policies, 5 RPCs, snapshot pattern, three-category vocabulary) created by four registered migrations whose `.sql` files happen to be missing from this repo. The plan pivots from "build a new audit subsystem" to **"reconcile the migration drift, then extend the existing subsystem with LOCATION mode, alerts, and a live dashboard"**. This is a smaller, safer scope.
+
+**Top-level effect on the plan:**
+
+- Names stay `audit_*` (R-23 reversed).
+- Three-category vocabulary stays (it was already correct in production).
+- Snapshot pattern is adopted (it's already correct in production).
+- `students.id TEXT` is honored throughout (R-3).
+- A `supervisors` table exists already (R-27); CLAUDE.md is out of date.
+- Phase −1 is "Migration Reconciliation", not "ghost cleanup" (R-25).
+- The LOCATION mode, GPS columns, alerts, push log, and live-dashboard frontend are **additive layers** (R-26).
+
+The corrections below are organized as a list of **resolved decisions** following the same template as Part 5. Cross-references point to the sections they amend.
+
+### R-1. **Adopt the existing audit subsystem; do not replace it** (reversed from initial finding)
+
+**Initial reading (wrong).** I first reported that the three tables `audit_sessions`, `audit_entries`, `audit_class_states` were "ghost" tables created by direct SQL in Supabase Studio with no migration record. **That reading was incorrect.**
+
+**Actual situation.** Production has a fully-formed audit subsystem registered through four migrations recorded in `supabase_migrations.schema_migrations`:
+
+- `20260515071351_internal_audit_sessions`
+- `20260515071750_internal_audit_rpcs`
+- `20260515074056_internal_audit_remove_overrides_logging`
+- `20260515075214_internal_audit_fix_search_path`
+
+The corresponding `.sql` files are **missing from this repo's `supabase/migrations/` directory** — that is the actual problem, but it is a *migration drift* problem, not a ghost-schema problem.
+
+**What the existing subsystem already provides.** Substantially overlaps with this plan:
+
+- Three tables: `audit_sessions` (with `student_snapshot`, `class_snapshot`, `active_departures_snapshot` as JSONB columns — a clever pattern that protects audit history from later sheet-sync deletions), `audit_entries` (with `student_snapshot_idx` unique-per-session for stable identity), `audit_class_states` (per-class lifecycle).
+- 14 indexes including the partial-unique on `audit_sessions ((1)) WHERE status='ACTIVE'` for one-active-session.
+- 5 RLS policies (RLS is **ON**).
+- 1 view: `v_audit_session_summary` (note: flagged ERROR by advisor — uses SECURITY DEFINER unnecessarily).
+- 5 RPCs: `start_audit_session(text[],text,text)`, `submit_audit_entry(uuid,text,text,text,text)`, `finish_class_audit(uuid,text,text,text)`, `close_audit_session(uuid,text)`, `get_active_audit_session()`, `get_audit_session(uuid)`, `list_audit_sessions(int,int)`.
+- 4 triggers (the two `*_bump_updated_at` triggers on these tables; **`departures_audit_trigger_fn` is unrelated** — it is attached to `departures` and writes into `admin_overrides`; misleading name; must not be touched).
+- Realtime publication membership for all three tables.
+- Three-category vocabulary that **matches this plan**: `IN_YESHIVA | OUT_WITH_PERMISSION | OUT_WITHOUT_PERMISSION`.
+- Source vocabulary: `SUPERVISOR | AUTO_DEFAULT`; auto-mark for students with `ACTIVE` departures already implemented.
+
+**Decision.** **Adopt and extend** the existing subsystem. The pivot:
+
+1. **Pull the four `20260515*` migrations into `supabase/migrations/`** using `supabase db pull` (or by reconstructing from `pg_get_functiondef` if pull is unavailable). This restores migration-file/DB parity.
+2. **Do NOT drop or rename anything.** The existing tables stay; the existing RPCs stay; the existing RLS policies stay.
+3. **Build LOCATION mode and the live dashboard as extensions** on top of the existing schema. Concrete extensions enumerated in R-26 below.
+
+**Reverses R-23.** No renaming to `inspection_*`. The Hebrew UI continues to say "בקרה פנימית" but the DB nomenclature stays `audit_*`.
+
+**Reverses Phase −1's "ghost cleanup" deliverable.** Phase −1 is now "**Migration Reconciliation**" — pulling the four migrations into the repo, ensuring they are reviewable, and confirming RLS policies match our intent.
+
+**Amends.** Reverses §11 entity descriptions; the new entity layer is what production already has, plus R-26 extensions. §23 Phase −1 is reframed as reconciliation. R-3 (ID types) is largely moot because the existing schema uses `student_snapshot_idx` rather than FKs to `students`.
+
+### R-2. Route prefix is `/admin/inspection`, not `/admin/audit`
+
+**Discovered.** `/admin/audit` is already taken by the existing **AuditLogPage** (the admin overrides log) in `src/App.tsx`. Mounting a new feature on the same path would shadow the existing route.
+
+**Decision.** New feature mounts at **`/admin/inspection`** (Hebrew: "בקרה פנימית"). The existing log stays at `/admin/audit`. In Hebrew copy, the new feature is referred to as "בקרה פנימית" or "בקרה" — never "ביקורת" without a qualifier (since "ביקורת" already names the log).
+
+**Amends.** §5.9 terminology table — adds the route distinction. §32 routing diagram in the implementation reference — every `/admin/audit/...` path becomes `/admin/inspection/...`.
+
+### R-3. `students.id` is TEXT — confirmed, and largely sidestepped by the snapshot pattern
+
+**Discovered.** Live schema: `students.id` is `text` (default `gen_random_uuid()::text`). `departures.student_id` is `text`. Any plain `UUID REFERENCES students(id)` would fail with FK type mismatch.
+
+**Decision.** The existing `audit_entries` table **deliberately uses `student_id TEXT`** (matching `students.id`), and snapshots the student into `audit_sessions.student_snapshot` (JSONB) for history preservation. This pattern is correct and is adopted. Any new columns introduced by R-26 that reference students continue using TEXT.
+
+`audit_sessions.id` and `audit_entries.id` are UUID primary keys; no change needed.
+
+TypeScript types remain `string` (no change client-side).
+
+**Amends.** Implementation reference's SQL examples — every `student_id UUID` becomes `student_id TEXT`.
+
+### R-4. Auth state restoration on refresh — the replay-safety guarantee was overstated
+
+**Discovered.** `src/store/authStore.ts` persists only `deviceToken` to localStorage. `currentUser`, `isAdmin`, and `classSupervisor` are reset on page reload. No `supabase.auth.getSession()` or `onAuthStateChange` calls exist anywhere in the codebase. The plan's §13.2 ("replay-safety as a guarantee") cannot hold without explicit auth recovery.
+
+**Decision.** Replay-safety is recovered as follows, per role:
+
+- **Admin.** On app bootstrap, the app calls `supabase.auth.getSession()`. If a session exists for `admin@yeshiva.local`, the auth store is rehydrated to `isAdmin: true`. This piggybacks on the existing Supabase auth session that admin sign-in already creates. Implementation cost: ~20 lines in `App.tsx`. No security regression because the JWT is already stored by `@supabase/supabase-js` automatically.
+
+- **Supervisor.** No Supabase auth session exists (supervisor login is an RPC verify only, not `signInWithPassword`). To preserve replay-safety, persist the supervisor PIN to `sessionStorage` (not `localStorage`) and re-verify on bootstrap. The PIN never leaves the device storage; it is verified via the existing `verify_supervisor_pin` RPC. Trade-off: a closed-and-reopened browser tab restores the supervisor; an actual app reinstall does not. This matches the existing student "remember me" pattern in spirit.
+
+- **Student.** Already works via `yeshiva_remembered_id` localStorage entry. No change.
+
+**Amends.** §13.2 (replay-safety guarantee) — adds the bootstrap mechanism. §22.1/22.2 QA checklists — add explicit "refresh while logged in as X" tests.
+
+### R-5. Push adoption — intentional verbal-announcement model
+
+**Discovered.** Only 1 of 381 students has a `push_token`. The opt-in is buried in a "remember me" banner on first login that most students skipped.
+
+**Decision (deliberate; not a fix).** The model is intentional: **the rabbinic announcement that an internal audit is happening is the primary trigger**, not the push notification. Students who do not have push subscriptions will simply open the app at the rabbi's verbal cue, see an active-session banner at the top of their home screen, and respond from there. Push is a convenience, not a requirement.
+
+**Amends.** §5.12 (push design) — pushes are advisory, not load-bearing. §12.4 (student workflow) — the entry point is *either* push *or* in-app banner. §22.3 (student QA) — adds a "no-push opens app manually" case.
+
+**Implementation implication.** The student home page (`src/pages/student/HomePage.tsx`) must check, on mount and on visibility-change, whether an `audit_sessions.status='ACTIVE'` row exists. If so, render the consent sheet. This is independent of push. The `useActiveAudit` hook does this naturally if it polls.
+
+### R-6. Push targeting — supervisors are reachable; the model is in-app banner first, push optional
+
+**Initial reading (incomplete).** I first reported that supervisors have no `supervisors` table and therefore cannot receive push.
+
+**Actual situation.** A `supervisors` table **exists in production** with 16 rows and a `pin_hash` column. CLAUDE.md (which describes supervisor auth as "concatenation of admin PIN + class code") is out of date — that scheme was already superseded. Supervisor RPCs use `_resolve_supervisor_class(pin)` against this table.
+
+**Decision.** Supervisor push remains **not part of v1**, but the reasoning is now design-driven, not infrastructure-driven:
+
+- Supervisors get notified by the **active-session banner** that appears at the top of their dashboard. The banner polls `get_active_audit_session()` every 10 seconds while the dashboard is foregrounded. This matches the student verbal-announcement model (R-5): the institutional channel is the announcement; the app is the response surface.
+- Push subscription for supervisors is **possible** (we can add a `push_token` column to `supervisors`) but deferred to v1.1 — first prove the banner is sufficient.
+- The `pushTarget` field in session settings is **kept but currently has only one valid value (`STUDENTS`)**. The schema can accept `SUPERVISORS | BOTH` for forward compatibility without forcing UI exposure.
+
+**Amends.** §5.12, §22.2 supervisor QA. The implementation reference's `send-audit-push` Edge Function still targets students only in v1.
+
+### R-7. `send-audit-push` Edge Function shape
+
+**Discovered.** The existing `send-push` Edge Function sends **one push per invocation**. There is no fan-out logic. The plan's `send-audit-push` was sketched but its relationship to the existing function was vague.
+
+**Decision.** Create a new Edge Function `send-audit-push` that **inlines a copy of the VAPID + AES-128-GCM logic** from `send-push/index.ts`. Reasons against refactoring `send-push` into a shared module:
+
+- `send-push` is currently called from the frontend (admin approval flow) and works. Refactoring it adds risk to a working path.
+- The duplicated code is ~200 lines of crypto helpers. Cost of duplication is acceptable for v1.
+- Future v1.1 may extract a shared module across both functions.
+
+`send-audit-push` accepts `{ session_id, class_ids? }`. It queries `students` for matching push_tokens, sends in parallel batches of 20 (Apple's rate limit tolerance), writes per-recipient outcomes to `audit_push_log`. Returns `{ sent, failed, removed, total }`.
+
+**Amends.** §5.12, §10.3.
+
+### R-8. PDF export deferred to v1.1; Excel-only in v1
+
+**Discovered.** `jspdf` cannot render Hebrew RTL text without an embedded Hebrew font (typically 200–500 KB). The plan committed to PDF without budgeting the font.
+
+**Decision.** **Excel-only in v1.** The `INTERNAL_AUDIT_IMPLEMENTATION_REFERENCE.md` `exportPdf.ts` is removed from v1 scope. Excel export (`exportExcel.ts` using the already-installed `xlsx` package) covers the audit-report use case. PDF returns in v1.1 with a properly budgeted font subset (Heebo Regular subset is ~25 KB if compressed to common-glyph set).
+
+**Amends.** §20 (Export & Reporting) — Excel only in v1. §23.5 (Phase 4 deliverables) — drop PDF.
+
+### R-9-REVISED. Existing audit RPCs have RLS — extension RPCs follow the same pattern
+
+**Discovered.** The existing audit subsystem has **5 RLS policies** already in place. The existing 5 RPCs are SECURITY DEFINER and check role via `verify_admin_pin()` / `_resolve_supervisor_class()`.
+
+**Decision.** New RPCs added by R-26 (for LOCATION mode, GPS submission, alerts) follow the same pattern as the existing five:
+
+- `SECURITY DEFINER` + explicit role check internally
+- Granted to `anon` for student-callable functions (`submit_audit_entry_with_gps`, `get_active_audit_session`)
+- Granted to `authenticated` only for admin/supervisor functions (`acknowledge_audit_alert`)
+- Never granted to `PUBLIC`
+
+The original R-9 grant matrix is superseded by the existing RLS policies and the per-RPC role check pattern that's already in place.
+
+**Amends.** Reframes R-9; the implementation reference's GRANT lines are tightened accordingly.
+
+### R-9-ORIGINAL. RPC `GRANT` discipline (superseded by R-9-REVISED)
+
+**Discovered.** Existing admin-only RPCs (e.g. `approve_departure`, `reject_departure`) are granted to `authenticated` only, with `anon` explicitly revoked (`supabase/migrations/20260510_revoke_anon_admin_rpcs.sql`). The plan granted everything to `anon, authenticated`.
+
+**Decision.** Per-RPC grant discipline:
+
+| RPC | anon | authenticated | service_role |
+|---|---|---|---|
+| `open_inspection` (open_audit renamed for §R-2) | — | ✓ | ✓ |
+| `close_inspection` | — | ✓ | ✓ |
+| `abort_inspection` | — | ✓ | ✓ |
+| `submit_inspection_response` | ✓ | ✓ | ✓ |
+| `acknowledge_inspection_alert` | — | ✓ | ✓ |
+| `get_active_inspection` | ✓ | ✓ | ✓ |
+| `get_inspection_full` | — | ✓ | ✓ |
+| `list_past_inspections` | — | ✓ | ✓ |
+| `compute_inspection_kpis` | — | ✓ | ✓ |
+
+Students must call `get_active_inspection` and `submit_inspection_response` while using the `anon` key (they have no Supabase auth session). Everything else is gated.
+
+**Amends.** Every `GRANT EXECUTE ... TO anon, authenticated` in the implementation reference.
+
+### R-10. Mock client (Iron Rule 4) parity is mandatory
+
+**Discovered.** `src/lib/api/mockClient.ts` is the offline/dev implementation of `IApiClient`. CLAUDE.md elevates "both implementations must stay in sync" to an Iron Rule. The plan added ~9 new RPCs to the Supabase implementation but said nothing about the mock.
+
+**Decision.** Every new audit method added to `IApiClient` is implemented in **both** `supabaseClient.ts` and `mockClient.ts`. The mock's audit lifecycle is an in-memory state machine backed by IndexedDB (Dexie), enabling Playwright tests to run without Supabase. The mock must produce realistic data for the live dashboard (pre-populated responses, simulated arrivals).
+
+**Amends.** §21.2 (Test layer 3) — adds the mock parity test layer. §23 — each phase's "Deliverables" lists the mock equivalent.
+
+### R-11. Realtime subscription deduplication
+
+**Discovered.** `src/hooks/useDeparturesRealtime.ts` uses a deduplication-by-channel-name pattern (`departures-${filter}`). The plan's `useActiveAudit`, `useAuditResponses`, `useAuditAlerts` were each described independently. Three separate React hooks subscribing to the same `audit_responses` table would each open their own channel.
+
+**Decision.** Mirror the existing pattern: **one realtime channel per session**, named `inspection:<session_id>`, shared across all hooks. The channel is set up in a single subscription manager (cf. `src/lib/audit/realtimeManager.ts` in the implementation reference). Each hook subscribes to events on that single channel via a callback registry. On unmount, the hook unregisters; the channel itself stays alive while *any* hook references it.
+
+**Amends.** §18 (Hooks in the implementation reference) — collapses three hooks into one shared subscription manager + thin selector hooks.
+
+### R-12. Service worker push payload discrimination
+
+**Discovered.** `src/sw.ts` (the active SW) and `public/push-sw.js` (imported via `importScripts` in vite-plugin-pwa) both register `push` listeners with the same body. They show `data.title ?? 'ישיבת שבי חברון'`. Neither discriminates payload kinds.
+
+**Decision.** The new audit push uses payload shape `{ kind: 'INSPECTION_LOCATION', sessionId, deadlineTs, title, body }`. The SW's push handler is extended to dispatch on `data.kind`:
+
+- `INSPECTION_LOCATION` → custom notification with `requireInteraction: true`, vibrate pattern, and `actions: [{ action: 'open', title: 'פתח' }, { action: 'dismiss', title: 'דחה' }]`. Notification tag is `inspection-<sessionId>` so a second push for the same session replaces the first.
+- Anything else → existing default handler.
+
+Modifications go into `src/sw.ts`. The `public/push-sw.js` file is left alone (it is a strict subset of `src/sw.ts` behavior).
+
+**Amends.** §21 in the implementation reference — the SW patch is specified precisely.
+
+### R-13. Bundle size budget is ~600 KB gzipped, not 400 KB
+
+**Discovered.** New audit features require: `leaflet` (+ 50 KB), `react-leaflet` (+ 25 KB), `react-leaflet-cluster` (+ 15 KB), `framer-motion` (+ 40 KB), `howler` (+ 8 KB), `react-countup` (+ 5 KB). Excel is already installed. Total: ~143 KB gzipped of new deps, on top of the existing ~270 KB.
+
+**Decision.** Realistic budget: **~600 KB gzipped total** post-implementation. Code-split aggressively:
+
+- Map view: dynamic import of `react-leaflet` only when the map tab is opened.
+- Excel export: dynamic import of `xlsx` only on export-click.
+- Projection mode: separate chunk.
+
+The hard ceiling is 700 KB; if approached, drop projection mode from v1.
+
+**Amends.** §17.5 (frontend perf budget).
+
+### R-14. GPS retention cron added to migration
+
+**Discovered.** §11.5 of the original plan describes the 90-day GPS-nulling job, but the implementation reference only scheduled `tick_audit_timeout`. The retention job was missing.
+
+**Decision.** The migration includes:
+
+```sql
+SELECT cron.schedule(
+  'inspection_gps_retention',
+  '15 3 * * *',
+  $$
+  UPDATE public.inspection_responses
+     SET gps_lat = NULL, gps_lng = NULL, gps_accuracy_m = NULL
+   WHERE marked_at < NOW() - INTERVAL '90 days'
+     AND (gps_lat IS NOT NULL OR gps_lng IS NOT NULL);
+  $$
+);
+
+SELECT cron.schedule(
+  'inspection_push_log_retention',
+  '20 3 * * *',
+  $$ DELETE FROM public.inspection_push_log WHERE sent_at < NOW() - INTERVAL '30 days'; $$
+);
+```
+
+**Amends.** §15 in the implementation reference (SQL Migration).
+
+### R-15. Toast hook compatibility
+
+**Discovered.** The plan referenced `sonner` (not installed). The existing toast hook `src/hooks/use-toast.ts` is built on `@radix-ui/react-toast` with a `{ title, description, variant?: 'default' | 'destructive', action? }` signature.
+
+**Decision.** Use the existing `use-toast` hook. Map the plan's `toast.success/info/error` calls to:
+
+- `toast.success(msg)` → `toast({ description: msg })`
+- `toast.error(msg)` → `toast({ description: msg, variant: 'destructive' })`
+- `toast.info(msg)` → `toast({ description: msg })`
+
+No new dep. The `sonner` references in the implementation reference are superseded.
+
+**Amends.** Every `import { toast } from 'sonner'` in the implementation reference becomes `import { toast } from '@/hooks/use-toast'`.
+
+### R-16. Class supervisor route gets nested children
+
+**Discovered.** `/class-supervisor` is a single page with no nested routes (no `<Outlet />`). The plan's `/class-supervisor/audit` had no place to live.
+
+**Decision.** The supervisor inspection UI ships as a **drawer/banner inside `ClassSupervisorDashboard`**, not a separate route. The drawer opens automatically when an active inspection includes the supervisor's class. Closing the drawer dismisses it for the session; reopening on next page mount.
+
+This avoids restructuring `/class-supervisor` into a layout-and-children pattern, which would require more churn.
+
+**Amends.** §32.x routing diagram. §33.1 (`SupervisorAuditPanel.tsx`) becomes an in-place modal, not a route.
+
+### R-17. Old broadcast subscribers must be torn down in the same release
+
+**Discovered.** Three places subscribe to the legacy `audit-control` and `location-requests` Realtime broadcast channels: `RollCallPage.tsx` (admin sender), `ClassSupervisorDashboard.tsx` (supervisor listener), `HomePage.tsx` (student listener).
+
+**Decision.** All three subscribers are **removed in the same commit** that introduces the new inspection feature behind the kill-switch flag. While the kill-switch is OFF, the old code is dead; while it is ON, the new code is live. There is no period where both work in parallel. Old `RollCallPage.tsx` is converted to a redirect to `/admin/inspection`.
+
+**Amends.** §24.2 (rollout sequence) — Stage 2 includes the explicit teardown commit.
+
+### R-18. `eslint` discipline
+
+**Discovered.** No ESLint rule blocks `any`. The repo has `eslint.config.js` but it doesn't reject implicit `any`s in TS.
+
+**Decision.** Audit code uses explicit types throughout. No `any` allowed in audit modules. Enforced by code review, not lint, for v1; a `no-explicit-any: warn` rule is added to `eslint.config.js` in v1.1.
+
+**Amends.** §22.4 cross-cutting QA.
+
+### R-19. Dexie schema version bump
+
+**Discovered.** The audit subsystem needs offline support for supervisor mutations (current Dexie schema v5). Adding new stores requires a version bump and a migration handler.
+
+**Decision.** Bump Dexie schema to **v6** in a separate small migration. Adds two object stores: `inspection_submit_queue` (queued `submit_inspection_response` calls) and `inspection_local_cache` (local copy of active inspection responses for offline reads). The Dexie bump runs automatically on app load; users on v5 see a momentary delay (<100ms). No data loss because v5 has no inspection stores to migrate from.
+
+**Amends.** §60 in the implementation reference (Sync engine integration).
+
+### R-20. `data-testid` attributes are added explicitly in v1
+
+**Discovered.** The existing codebase has roughly zero `data-testid` attributes. The plan's Playwright E2E suite assumes they exist.
+
+**Decision.** New audit components ship with `data-testid` from day one. Required testids:
+
+- `inspection-mode-card-{manual|location}`
+- `inspection-kpi-{category}`
+- `inspection-class-card-{classId}`
+- `inspection-supervisor-row-{studentId}`
+- `inspection-supervisor-button-{category}-{studentId}`
+- `inspection-student-sheet`
+- `inspection-student-confirm`
+- `inspection-student-refuse`
+
+Existing pages get testids only when refactored for adjacency to audit code (not as standalone work).
+
+**Amends.** §22 QA checklists.
+
+### R-21. `students.lastSeen` schema drift — out of scope but flagged
+
+**Discovered.** `students.lastSeen` is `text` in production, but CLAUDE.md documents it as `TIMESTAMPTZ`. Pre-existing drift, not introduced by this plan.
+
+**Decision.** **No action in v1.** Documented for future cleanup. The audit subsystem does not depend on `lastSeen` being a timestamp.
+
+### R-22. `pg_trgm` not needed
+
+**Discovered.** The plan's migration installs `pg_trgm` but no plan feature uses trigram search.
+
+**Decision.** Remove the `CREATE EXTENSION pg_trgm` line from the migration. Saves nothing big but reduces surface area.
+
+**Amends.** §15 (SQL Migration in implementation reference).
+
+### R-23. Naming — **stays `audit_*`** (reversed)
+
+**Discovered (revised by R-1).** The existing production schema uses `audit_*` names. Renaming to `inspection_*` would force a full table-rename migration and would split the codebase into "the part that says audit and the part that says inspection" — net negative.
+
+**Decision.** Names stay `audit_*` for tables, columns, and RPCs. The Hebrew UI says "בקרה פנימית". The route under `/admin/inspection` is a UI convenience (R-2) — internally it works against the `audit_*` tables.
+
+The existing log feature (`AuditLogPage`) is for `admin_overrides`. Engineers reading the code can tell the two apart by context: `admin_overrides` vs `audit_sessions / audit_entries`. No rename needed.
+
+**Amends.** Reverses every renaming proposed in v1.1 R-23. The implementation reference goes back to `audit_*` identifiers.
+
+### R-24. Service worker update propagation
+
+**Discovered.** Workbox's default behavior is for users to keep the old SW until they close all open tabs. If we ship a new push handler, students on old SW will not receive audit pushes correctly.
+
+**Decision.** Add a `<UpdateAvailable />` toast that appears when a new SW version is ready: "גרסה חדשה זמינה — רענן". Users see it, tap, refresh. The toast is dismissable. Workbox is already configured for `registerType: 'autoUpdate'`, so the new SW activates within a minute of detection.
+
+**Amends.** §10.3 (architecture).
+
+### R-26. Concrete schema extensions needed on top of existing audit_*
+
+**Discovered.** The existing audit subsystem covers MANUAL mode end-to-end. To add LOCATION mode (per the plan's goals), the following are missing and must be added in **new** migrations layered on top of `20260515*`:
+
+**Columns to add to `audit_entries`:**
+
+- `gps_lat DOUBLE PRECISION`
+- `gps_lng DOUBLE PRECISION`
+- `gps_accuracy_m DOUBLE PRECISION`
+- `distance_from_campus_m DOUBLE PRECISION`
+- `distance_bucket TEXT CHECK IN ('GREEN','BLUE','ORANGE','RED')`
+- `gps_status TEXT CHECK IN ('OK','DENIED','TIMEOUT','OFFLINE','UNAVAILABLE','LOW_ACCURACY')`
+
+**Columns to add to `audit_sessions`:**
+
+- `mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK IN ('MANUAL','LOCATION')`
+- `settings JSONB NOT NULL DEFAULT '{}'` (timeout, sensitivity, etc.)
+- *Re-evaluate `total_students_snapshot` —* already exists; verify column name during reconciliation.
+
+**New tables:**
+
+- `audit_alerts` — one row per ORANGE/RED bucket transition, with acknowledgement state.
+- `audit_push_log` — operational telemetry for fan-out.
+
+**New triggers:**
+
+- `tg_audit_entries_alert` (AFTER UPDATE on `audit_entries`) — inserts into `audit_alerts` when `distance_bucket` transitions to ORANGE or RED.
+
+**New RPCs (additive, not replacing existing):**
+
+- `submit_audit_entry_with_gps(p_session_id, p_student_id, p_gps_lat, p_gps_lng, p_gps_accuracy_m, p_gps_status)` — wraps the existing `submit_audit_entry` plus the GPS bookkeeping. May share an internal helper.
+- `acknowledge_audit_alert(p_alert_id, p_actor)`.
+- `compute_audit_kpis(p_session_id)` — pure read; called by the live dashboard.
+
+**Cron jobs (new):**
+
+- `tick_audit_timeout` — every 5 minutes, mark sessions >24h old as `TIMED_OUT`. (The existing schema's status enum needs an audit — confirm `TIMED_OUT` is allowed.)
+- `audit_gps_retention` — daily at 03:15, null out `gps_lat/lng/accuracy_m` on `audit_entries` older than 90 days.
+- `audit_push_log_retention` — daily at 03:20, delete `audit_push_log` rows older than 30 days.
+
+**Helper functions:**
+
+- `fn_haversine_m(lat1, lng1, lat2, lng2)` — for GPS distance.
+- `fn_distance_bucket(meters)` — returns `GREEN | BLUE | ORANGE | RED`.
+
+**Amends.** Replaces the original §15 SQL migration in the implementation reference. The migration is **additive**, not a full schema rewrite.
+
+### R-27. `supervisors` table exists; supervisor model in plan is updated
+
+**Discovered.** The `supervisors` table exists in production (16 rows) with `pin_hash`. The audit RPCs already use `_resolve_supervisor_class(pin)` to constrain supervisor mutations to their assigned class. **The supervisor model is more credentialed than CLAUDE.md describes.**
+
+**Decision.** Update §6.5 (role-to-permission matrix), §8 (admin/supervisor flows), §16.3 (auth honest assessment) to reflect this. Specifically:
+
+- CLAUDE.md is out of date; the PIN-concatenation model (`{adminPin}{classCode}`) is partially superseded by `supervisors.pin_hash`. The class code-based supervisor login still works through a different RPC path.
+- Adding a `push_token TEXT` column to `supervisors` is now a clean, well-scoped change (deferred to v1.1 per R-6).
+- Replay-safety for supervisors (R-4) can use `supervisors` table identity in a future revision; for v1, sessionStorage + re-verify on bootstrap is still the right path.
+
+**Amends.** §6.5, §8, §16.3. CLAUDE.md needs a separate cleanup commit to reflect the actual supervisor scheme.
+
+### R-28. `departures_audit_trigger_fn` is unrelated — must not be touched
+
+**Discovered.** A function named `departures_audit_trigger_fn` exists, with two attached triggers on `public.departures`. Despite its name, it **writes to `admin_overrides`**, not to any audit_* table. It is part of the **departure audit-log** subsystem, not the new internal-audit subsystem.
+
+**Decision.** **Never drop, rename, or modify `departures_audit_trigger_fn` or its triggers** as part of this work. Add a comment in the migration file noting this hazard so a future engineer doesn't make the same mistake.
+
+**Amends.** Implementation reference's migration script explicitly excludes this function from any cleanup.
+
+### R-29. `v_audit_session_summary` view has a security-advisor ERROR — fix when adopting
+
+**Discovered.** The existing `v_audit_session_summary` view uses `SECURITY DEFINER`. Supabase's security advisor flags this at ERROR level. The view itself is well-designed (computes marked/unmarked/duration in one read) but the DEFINER clause is unnecessary.
+
+**Decision.** When pulling the four `20260515*` migrations into the repo (per R-1), **drop the SECURITY DEFINER clause** from the view. The view becomes a normal view; permissions flow through RLS. This is a small one-line fix.
+
+**Amends.** The reconciled `20260515*` migration files. Verification: re-run `get_advisors security` and confirm zero ERROR-level findings related to this view.
+
+### R-30. Migration drift — pull the four `20260515*` migrations into the repo
+
+**Discovered.** `supabase_migrations.schema_migrations` records four migrations that do not have matching `.sql` files in `supabase/migrations/`. The DB and the repo are out of sync.
+
+**Decision.** Phase −1 (now "Migration Reconciliation") begins with:
+
+1. `supabase db pull` (if Supabase CLI is available locally) **or** manually export the relevant `pg_get_functiondef`, `pg_dump --schema-only --table=audit_sessions ...` for each missing object, and write them into `supabase/migrations/`.
+2. Verify the imported migrations apply cleanly to a fresh DB by running them in order on a new Supabase branch.
+3. Commit the imported files in a single PR with no functional changes, so the audit trail of "what is in production" is restored.
+4. *Then* layer the R-26 additions as new migrations dated 2026-05-17 or later.
+
+**Amends.** §23 Phase −1 deliverables.
+
+### R-31. Other unrelated RLS gaps surfaced by advisor — not in scope
+
+**Discovered.** The Supabase advisor also flags RLS-off on `sms_events` and `recurring_absences`. These are unrelated to the audit subsystem.
+
+**Decision.** **Not in scope** for this plan. Logged as a separate cleanup item for a future PR.
+
+### R-33. Class rename mid-period — snapshot pattern already handles this
+
+**Discovered.** Class names can be renamed in the Google Sheet between audit sessions. The existing schema's `audit_sessions.class_snapshot` and `audit_entries.student_snapshot` JSONB columns are already designed to preserve point-in-time identity across renames.
+
+**Decision.** No additional code change required. The plan's "snapshot the class_id at session open" requirement (§11) is already satisfied by the existing schema. Class renames in the future do not corrupt past audit history.
+
+The frontend filtering by `class_id` continues to use `normalizeHebrew()` for comparison (the existing pattern in `src/store/studentsStore.ts`), which handles apostrophe variants in dropdowns vs stored strings.
+
+**Amends.** §11 — the snapshot rationale was already present in the plan; this confirmation closes the loop.
+
+### R-34-REVISED. RPC signatures — PIN-based, jsonb-returning, with explicit error codes
+
+**Discovered (precise from RPC source inspection).** The five mutating RPCs use **PIN arguments, not actor strings**:
+
+- `start_audit_session(p_class_ids text[], p_title text, p_admin_pin text) → jsonb` — verifies admin PIN.
+- `submit_audit_entry(p_session_id uuid, p_student_id text, p_status text, p_note text, p_supervisor_pin text) → jsonb` — verifies supervisor PIN (admin PIN also accepted via the dual-PIN pattern).
+- `finish_class_audit(p_session_id uuid, p_class_id text, p_note text, p_supervisor_pin text) → jsonb` — supervisor or admin PIN.
+- `close_audit_session(p_session_id uuid, p_admin_pin text) → jsonb` — admin PIN only.
+- `_resolve_supervisor_class(p_pin text) → text` — helper, returns class_id or NULL.
+
+**All RPCs return `jsonb`**, not bare types. Errors are encoded as `{ error: 'CODE', ... }`. The error codes are a fixed set:
+
+- `AUTH` — invalid PIN.
+- `NO_CLASSES` — null/empty class array.
+- `NO_STUDENTS_IN_CLASSES` — chosen classes have zero students.
+- `ALREADY_ACTIVE` — another session is live; payload includes `existingId`.
+- `SESSION_NOT_FOUND`, `SESSION_CLOSED`, `NOT_ACTIVE`.
+- `NOT_AUTHORIZED_FOR_CLASS` — supervisor PIN not for this class.
+- `CLASS_NOT_IN_SESSION`, `STUDENT_NOT_IN_SESSION`, `CLASS_STATE_NOT_FOUND`.
+- `INVALID_STATUS`.
+
+**Decision.** The IApiClient wrapper:
+
+- Pulls admin PIN from `useAuthStore()._adminPinSession` (in-memory; not persisted) for admin calls.
+- Pulls supervisor PIN from `sessionStorage` (R-4 supervisor restore mechanism) for supervisor calls.
+- Branches on `data.error` after every RPC call; surfaces error codes to the UI as Hebrew strings.
+- Treats raised SQL exceptions as bugs (catch-and-toast-as-error with a "report this" prompt).
+
+The frontend never passes a free-form `actor` string. The `submitted_by` column in `audit_entries` is set internally by the RPC to `'admin'` or to the resolved class_id literal — clients do not control it.
+
+**Amends.** Replaces every `actor: string` signature in the implementation reference's auditApi.ts. Adds an error-code-to-Hebrew map in `lib/audit/errors.ts`.
+
+### R-41. `submit_audit_entry` is UPSERT-only — design decision required
+
+**Discovered.** `submit_audit_entry` does `INSERT … ON CONFLICT (session_id, student_snapshot_idx) DO UPDATE SET status=…, source='SUPERVISOR'`. There is **no lock against double-submission**. A supervisor can silently overwrite an earlier entry from the same supervisor or from the admin; the new value replaces the old. The `audit_entries.updated_at` reflects the last change but nothing logs the prior value.
+
+**Decision.** This is **deliberate behavior we accept in v1**:
+
+- Supervisors do correct themselves ("oops, marked the wrong boy") and expect the correction to stick.
+- If a future requirement demands "once marked, locked", that's a separate migration to add a `is_locked` column and a CHECK constraint.
+- For audit forensics, the prior plan's `audit_response_log` is **not built**; instead we rely on `audit_entries.source` and `submitted_by` to capture intent.
+
+**Amends.** §11 — the original plan's `audit_response_log` table is removed from scope. If a stakeholder needs transition history (e.g. "the supervisor changed Avi from נוכח to ללא אישור"), the UI shows it via `updated_at` only; full history is a v1.1 feature.
+
+### R-42. `audit_entries.source` check constraint allows only `SUPERVISOR` / `AUTO_DEFAULT`
+
+**Discovered.** Production `audit_entries.source` CHECK is `IN ('SUPERVISOR', 'AUTO_DEFAULT')`. Admin submissions are recorded with `source='SUPERVISOR'` and `submitted_by='admin'` — the source field is unable to distinguish admin from supervisor.
+
+**Decision.** For v1, **accept the existing constraint**. UI can derive the distinction from `submitted_by='admin'` vs `submitted_by=<class_id>`. If a future audit-report needs a clean three-way distinction (ADMIN / SUPERVISOR / AUTO_DEFAULT), a follow-up migration adds `'ADMIN'` to the CHECK and updates the RPCs to record it.
+
+**Amends.** §11 entity descriptions for `audit_entries.source`.
+
+### R-43. Audit RPCs do NOT write to `admin_overrides` — by design
+
+**Discovered.** Migration `20260515074056_internal_audit_remove_overrides_logging` **deliberately removed** the override-logging path from the audit RPCs. Audit actions do not show up in the `admin_overrides` audit log.
+
+**Decision.** Confirmed. The two audit logs are kept independent:
+
+- `admin_overrides` — for departure-related admin actions (approve/reject/cancel).
+- `audit_entries` itself — for audit-mark history (limited; see R-41).
+
+This is correct separation of concerns. Do not "fix" by re-adding `admin_overrides` writes. Reviewers must understand both logs exist and serve different purposes.
+
+**Amends.** §20 (Auditability) — clarifies that the new audit subsystem keeps its own history independently.
+
+### R-44. Status vocabulary mismatch is intentional and preserved
+
+**Discovered.** Audit categories are `IN_YESHIVA / OUT_WITH_PERMISSION / OUT_WITHOUT_PERMISSION`. Student current status is `ON_CAMPUS / OFF_CAMPUS / OVERDUE / PENDING`. Two separate vocabularies that never cross-write.
+
+**Decision.** **Keep them separate** in v1. The audit subsystem reads `students."currentStatus"` for the pre-classification logic (a student with `ACTIVE` departure → audit entry with status `OUT_WITH_PERMISSION` and source `AUTO_DEFAULT`) but never writes back. If a future feature requires syncing audit results to `students.currentStatus`, an explicit mapping layer is added then.
+
+**Amends.** §11 — both vocabularies are documented explicitly.
+
+### R-45. Clients must read via `get_active_audit_session()` — direct table reads return zero rows
+
+**Discovered.** RLS is **on** for all audit tables. RPCs are `SECURITY DEFINER` and bypass RLS for legitimate reads. Direct `from('audit_entries').select()` calls **return zero rows** for anon/authenticated callers (only `service_role` bypasses RLS).
+
+**Decision.** All client reads go through the RPCs:
+
+- Live dashboard → `get_active_audit_session()` (returns `{session, entries, classStates}`)
+- History page → `list_audit_sessions(limit, offset)`
+- Per-session detail → `get_audit_session(p_session_id)`
+
+**Never** call `supabase.from('audit_*').select(...)` from the client. This is a hard rule.
+
+**Amends.** §18.1 (`useActiveAudit` hook) — its implementation uses the RPC exclusively, not a direct table query.
+
+### R-46. Plaintext admin PIN comparison — preserved, not upgraded
+
+**Discovered.** `verify_admin_pin` does plaintext comparison: `SELECT value FROM app_settings WHERE key='admin_pin'; RETURN stored = p_pin`. Known limitation per CLAUDE.md.
+
+**Decision.** The audit subsystem accepts this. If hashing is upgraded in a future security sprint, all PIN consumers (audit RPCs, departure RPCs, change-pin flow) must migrate together. Not in scope here.
+
+### R-47. Reconciliation must pull the supervisor-auth migrations too
+
+**Discovered.** The four `20260515*` migrations depend on the `supervisors` table and `verify_supervisor_pin` / `_resolve_supervisor_class` machinery. These are introduced by an earlier migration (`20260510175932_supervisor_tables` or equivalent — exact filename TBD by `supabase db pull`). Pulling only the four audit migrations leaves `_resolve_supervisor_class` as a dangling reference.
+
+**Decision.** Phase −1 reconciliation pulls **all** missing migrations from production, not just the four audit ones. Verify with:
+
+```sql
+SELECT version, name FROM supabase_migrations.schema_migrations
+WHERE version NOT IN (SELECT name FROM ... -- filesystem listing)
+ORDER BY version;
+```
+
+Every missing version becomes a migration file in `supabase/migrations/`. Single PR.
+
+**Amends.** R-30, R-25 — Phase −1 deliverables now include "all missing migrations", not just the audit ones.
+
+### R-48. Audit RPCs auto-create `audit_class_states` rows on session start
+
+**Discovered.** `start_audit_session` populates `audit_class_states` automatically — one row per selected class with `status='NOT_STARTED'`. The first `submit_audit_entry` for a class auto-transitions that row to `IN_PROGRESS` and stamps `started_at`. `finish_class_audit` transitions to `FINISHED` and stamps `finished_at`, `finished_by`, and counts the marked vs total.
+
+**Decision.** The live dashboard's per-class card reads its state from `audit_class_states`, not from aggregated entry counts. This is faster (single index lookup per class) and more accurate (the supervisor explicitly "finished" the class).
+
+**Amends.** §15 (live dashboard data flow) — the per-class card subscribes to `audit_class_states` realtime events. The `AuditClassCard` component reads `status` and uses it for sort priority (NOT_STARTED → IN_PROGRESS → FINISHED).
+
+### R-35. Realtime filter options are dead code — our hooks must actually apply filters
+
+**Discovered.** `src/hooks/useDeparturesRealtime.ts` accepts filter parameters (`studentId`, `classId`, `grade`, `status`, `from`, `to`, `limit`) and stores them in a `useRef`, but **never actually applies them in the subscription callback**. All callbacks fire for all events. The prior review (plan-review-notes-v3) calls this out as a privacy issue — students see other students' events.
+
+**Decision.** When the new `useActiveAudit` (and any sibling hooks for `audit_alerts`, `audit_entries`) are written, **filters must be applied in the subscription callback or in the postgres_changes `filter` argument**. Specifically:
+
+- Pass `filter: \`session_id=eq.${sid}\`` on the postgres_changes subscription (server-side filter).
+- If a hook is scoped to a class (supervisor case), also filter in the callback: `if (newRow.class_id !== expectedClassId) return;`.
+
+This must be enforced in code review. Adding the realtime channel without an enforced filter is rejected at PR review.
+
+**Amends.** §13.3 (realtime as notification) — adds the explicit filter requirement. §18.1 (`useActiveAudit`) — the example code must apply filters.
+
+### R-36. MockClient — adopt the v4-review checklist of 5 documented divergences
+
+**Discovered.** Prior review (`plan-review-notes-v4.txt` §411-467) enumerates 5 specific divergences between `supabaseClient.ts` and `mockClient.ts`:
+
+1. `createEvent()` updates student status in real client, silent in mock.
+2. `approveDeparture()` sends push in real client, silent in mock.
+3. `getDashboardStats()` includes location data in real client only.
+4. `submitDeparture()` and quota checking behave slightly differently.
+5. `subscribeToRealtime()` is a no-op in mock with no event simulation.
+
+**Decision.** Tightens R-10. The mock-client requirement for audit RPCs is now:
+
+- Each audit method in `mockClient.ts` produces **observable side effects equivalent** to the real client, including simulated realtime events for any subscriber.
+- A **contract test** (in `src/lib/api/__tests__/contract.test.ts`) runs the same input through both implementations and asserts identical output shape. This test is mandatory for every new audit RPC.
+- The mock's realtime simulator uses a simple in-memory pub/sub. `useActiveAudit` in test mode receives synthesized events identical to those Supabase Realtime would deliver.
+
+**Amends.** §21.2 (Test layer 2) — adds the contract test layer. §23.2 (Phase 1) — adds mock parity as a deliverable.
+
+### R-37. Adjacent systemic issues — flagged but NOT in scope for the audit project
+
+The feasibility audit surfaced several pre-existing issues in the codebase that affect the audit subsystem indirectly. These are **out of scope** for this project but logged here so they are not forgotten:
+
+- **`approve_departure` supervisor check is broken** (plan-review-notes-v4.txt BUG A). Any supervisor can currently approve any class's departure because the check is "Does a `class_code_*` row exist for this class?" rather than "Is THIS supervisor authorized for THIS class?". Fix lives in the supervisor-auth modernization track, not here.
+- **`getClasses()` / `ALL_CLASS_IDS` constants drift from DB** (plan-review-notes-v4.txt BUG C). The frontend constants list may not match production `students."classId"`. We use the DB as the source of truth in audit (via `audit_sessions.class_snapshot`).
+- **`sync_student_from_sheet` overwrites `currentStatus` on every sync** (plan-review-notes-v4.txt BUG B). Silent data corruption on every Sheet edit. Not our project.
+- **Sync queue accepts arbitrary operations** (plan-review-notes.txt). Any user with DevTools can inject into `syncQueue` IndexedDB and have the engine call arbitrary RPCs. Not our project; logged for the auth-modernization sprint.
+- **`DashboardPage` double realtime subscription** (plan-review-notes-v3) — also irrelevant to audit but exemplifies the discipline lapse R-35 addresses.
+
+**Decision.** **Explicitly out of scope.** This plan does not introduce these issues and does not fix them. Each is listed as a separate work item to be picked up in a different PR.
+
+### R-38. CLAUDE.md is out of date — separate cleanup commit required
+
+**Discovered.** Multiple sections of `CLAUDE.md` no longer match production:
+
+- §7 says supervisor auth is `{adminPin}{classCode}` concatenation. Reality: a `supervisors` table with `pin_hash` exists in production. The class-code-based scheme may still work but is not the canonical path.
+- §9 says `students.lastSeen` is `TIMESTAMPTZ`. Reality: it is `text`.
+- The migration list does not mention the four `20260515*` audit migrations that exist in production.
+
+**Decision.** **A separate cleanup commit** updates `CLAUDE.md` to reflect production. This commit is independent of the audit work. Suggested ordering: pull the `20260515*` migrations first (R-30), then update CLAUDE.md to reference them and the `supervisors` table, then start the audit work proper.
+
+**Amends.** Out-of-scope work item, but blocking for clarity.
+
+### R-39. Domain-before-services discipline applies to audit RPCs
+
+**Discovered.** Prior review (plan-review-notes-v2) calls out: services must be written **after** the domain rules are pinned down, not before. The audit subsystem's domain rules are:
+
+- Three pickable categories + two system categories.
+- Distance buckets 300m / 1km / 5km / ∞.
+- One-active-session.
+- 24h timeout.
+- 90-day GPS retention.
+
+**Decision.** These domain rules are pinned down in §5 of the master plan. They must not change during implementation. If a question arises during implementation that requires changing one of these rules, **the master plan is updated first**, then code follows.
+
+### R-40. Existing send-push rate limit — needs verification before fan-out
+
+**Discovered.** `supabase/functions/send-push/index.ts` is single-recipient. For our `send-audit-push` fan-out to 381 students, we will send ~381 Web Push requests. Apple's APNs, Google's FCM, and Mozilla's autopush all rate-limit somewhere between 100-1000 requests/minute per sender. Inline batching with concurrency 20 (R-7) avoids this.
+
+**Decision.** `send-audit-push` Edge Function sends with **concurrency 20**, batching all 381 students. Each batch waits for the previous to complete. Total wall-clock: ~10-20 seconds for fan-out. The admin's UI shows a spinner during this period; the session is `ACTIVE` before fan-out begins, so users coming via the in-app banner (R-5) can respond immediately even before their push arrives.
+
+**Amends.** §10.5 (data flow happy path) — step 3 ("Fan out") elaborated with concurrency strategy.
+
+### R-49. No top-level Error Boundary in `src/App.tsx`
+
+**Discovered.** `App.tsx` wraps routes in `<Suspense />` (line 107) but **not** in any React error boundary. An unhandled error in the live dashboard (e.g. a malformed realtime payload, a runtime cast failure) crashes the entire app to a blank screen. No fallback UI, no toast, no recovery.
+
+**Decision.** Add a top-level `<ErrorBoundary />` around the routes tree before audit ships. Implementation: a small class component that catches via `componentDidCatch`, logs to console (and to telemetry once that exists), and renders a Hebrew fallback with a "טען מחדש" button. Audit-specific routes wrap an additional inner boundary so a crash in `/admin/inspection/...` doesn't bring down `/admin/dashboard`.
+
+**Amends.** §10.3 (architecture) and §23.2 Phase 1 (deliverables — error boundary is added in Phase 1, not Phase 4 polish).
+
+### R-50. VAPID build-time env var is a silent failure mode
+
+**Discovered.** `src/lib/pwa/webPush.ts` references `import.meta.env.VITE_VAPID_PUBLIC_KEY`. Vite bakes env vars at build time. If the CI build runs without the var set, push subscription fails silently with only a `console.warn`. No app-level visibility.
+
+**Decision.** Add a CI assert: build step fails if `VITE_VAPID_PUBLIC_KEY` is empty. Add a startup health check that logs explicitly when push is unusable. Audit's `send-audit-push` Edge Function does the same on the server: VAPID_PRIVATE_KEY missing → 500 with an explicit error, surfaced to the admin's UI as a Hebrew toast.
+
+**Amends.** §10.3, §22.4 cross-cutting QA.
+
+### R-51. Timezone arithmetic in `src/domain/dates.ts` is fragile around DST
+
+**Discovered.** `buildIsraelTimestamp()` constructs a string using `Intl.DateTimeFormat`, then parses it back, deriving the UTC offset manually. Asia/Jerusalem transitions DST in March and October. A call near the boundary can produce an off-by-one-hour timestamp.
+
+**Decision.** Audit subsystem **does not write timestamps client-side**. Every audit timestamp is server-generated via `NOW()` in the RPCs. Read paths display in `Asia/Jerusalem` via `toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })` — this uses the OS tzdata and handles DST correctly.
+
+The fragility in `dates.ts` remains a concern for the **departure subsystem** (which does build client-side timestamps), but that is out of scope for this project. **Logged as a separate cleanup item.**
+
+**Amends.** §11.2 — audit timestamps are explicitly server-generated. The plan's `audit_sessions.started_at` etc. all use `DEFAULT NOW()`; no client-side timestamp construction in audit RPCs.
+
+### R-52. iOS Geolocation needs user-gesture context — async-triggered calls fail silently
+
+**Discovered.** On iOS Safari, `navigator.geolocation.getCurrentPosition()` requires the call to originate from a **user activation** (tap, click). The existing flow in `src/pages/student/HomePage.tsx` calls it from inside a realtime broadcast callback — which is **not** a user activation. iOS silently rejects with PERMISSION_DENIED even when permission has been granted.
+
+**Decision.** The new student consent sheet (R-5) is **the only path** for GPS in audit context. The sheet shows the "אשר" button; the user taps; `getCurrentPosition()` is called **directly inside the click handler**. User activation is preserved.
+
+The legacy `location-requests` broadcast handler is removed (R-17 — same release). It never worked reliably on iOS anyway.
+
+**Amends.** §12.4 (student workflow) — emphasizes the user-tap origination. §22.3 (student QA) — adds an "iOS Safari path" test case.
+
+### R-53. iOS Web Push requires "Add to Home Screen" — onboarding step is missing
+
+**Discovered.** `index.html` has the `apple-touch-icon` and `apple-mobile-web-app-capable` meta tags (good). But the app does **not** prompt iOS users to add to home screen, and iOS 16.4+ silently disables Web Push for sites accessed via browser tab.
+
+**Decision.** Add a discreet iOS-only prompt: "להתראות בזמן ביקורת, הוסף את האפליקציה למסך הבית" with brief instructions (Share icon → "Add to Home Screen"). Shown once on first login for iOS users in `StudentLayout`. Dismissed forever after first display.
+
+For v1, this is a "nice but not blocking" item — the audit is reachable via the in-app banner without push (R-5).
+
+**Amends.** §22.3 (student QA) — adds the iOS HtH onboarding test. The implementation is small (~30 lines, one component).
+
+### R-54. Service worker update propagation — explicit `skipWaiting` flow
+
+**Discovered.** Workbox config in `vite.config.ts` uses `registerType: 'autoUpdate'` but does not call `skipWaiting()` or `clientsClaim()`. Users may stay on the old SW for hours after a new audit feature deploys. The "version available — refresh" toast (R-24) is the right UX but must be paired with an actual update mechanism.
+
+**Decision.** On SW update detection (via `useRegisterSW`), show a Hebrew toast: "גרסה חדשה זמינה. רענן את הדף." Tapping triggers `registration.waiting.postMessage({ type: 'SKIP_WAITING' })` and then `window.location.reload()`. Pattern is well-known; cost is ~30 lines.
+
+**Amends.** §24 rollout — adds the update toast as a Stage 5 (stabilization) deliverable, optional in earlier stages.
+
+### R-55. `studentsStore` triggers cross-app re-renders on filter changes
+
+**Discovered.** `src/store/studentsStore.ts` returns a new array on every filter mutation. Components that subscribe to filter-related selectors re-render. During a heavy audit (100+ realtime events in 30s), the cascading re-renders could noticeably slow the UI.
+
+**Decision.** Audit UI uses its **own** Zustand store (`useAuditStore`), not `studentsStore`. The audit store updates only on audit events, not on student-table changes. The two stores are independent; an audit-time storm doesn't propagate to `studentsStore` consumers and vice versa.
+
+For the audit store specifically: use `shallow` equality comparators for selectors, and split fine-grained selectors so a single response update doesn't re-render the whole dashboard.
+
+**Amends.** §17.5 (frontend perf) — adds the store-separation discipline.
+
+### R-32. `app_settings` has no audit-related keys today
+
+**Discovered.** Production `app_settings` keys: `admin_pin`, 16 `class_code_*` (one per class), and a stray `_test_commit`. No audit-related config keys exist.
+
+**Decision.** The plan's notion of session-level `settings` JSONB on `audit_sessions` (timeout, sensitivity) is correct — those are session-scoped, not global. No need to introduce new `app_settings` keys for v1.
+
+### R-25. Pre-implementation phase added (Phase −1) — **Migration Reconciliation & Audit-Subsystem Adoption**
+
+**Discovered.** Before any new code can land, the codebase and DB must reconcile (R-30), and three smaller preparatory changes must be in place.
+
+**Decision.** **Phase −1 — Migration Reconciliation & Adoption** (3-4 days):
+
+1. **Pull the four `20260515*` migrations** into `supabase/migrations/` (R-30). Verify they apply cleanly on a fresh Supabase branch. Commit as a no-functional-change PR.
+2. **Apply the R-29 fix** (remove SECURITY DEFINER from `v_audit_session_summary`) as part of the reconciled migrations.
+3. **Implement the auth-state-restore bootstrap** (R-4) in `App.tsx`: `supabase.auth.getSession()` on mount, rehydrate `isAdmin` if a session exists.
+4. **Add Dexie v6 migration scaffolding** (R-19) — empty stores for `audit_submit_queue` and `audit_local_cache`. No code uses them yet; they exist so the next phase can write to them without another bump.
+5. **Tear down the old broadcast subscribers** (R-17) behind a feature flag — `RollCallPage.tsx`, `ClassSupervisorDashboard.tsx` audit-control listener, `HomePage.tsx` location-requests listener. While the flag is OFF, old code runs unchanged.
+
+After Phase −1, the codebase mirrors production exactly and is ready to extend.
+
+**Amends.** §23 (Implementation Phases) — adds Phase −1 ahead of Phase 0. Phase 0 is now "Schema Extensions" (per R-26), not "Database Foundations".
+
+---
+
 ## How to read this document
 
 This document is **a plan, not an implementation**. It does not contain code beyond what is required to make a structural decision unambiguous. Implementation-ready code for the recommended approach exists separately in `INTERNAL_AUDIT_IMPLEMENTATION_REFERENCE.md`; **that file is a reference, not the source of truth.** This file is the source of truth for product, design, and architecture.
