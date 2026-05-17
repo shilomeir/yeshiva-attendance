@@ -6,6 +6,7 @@ import type {
   Student, Event, AdminOverride, RecurringAbsence,
   StudentStatus, DashboardStats, CampusStatusCounts, DailyPresenceData, ReasonData, HourlyData, ClassStat,
   CalendarDeparture, DepartureStatus, SubmitDepartureResult,
+  AuditSessionWithDetails, AuditSessionSummary, AuditEntry, AuditClassState, AuditSessionMode, AuditEntryStatus,
 } from '@/types'
 import type {
   IApiClient, GetStudentsOptions, SubmitDeparturePayload,
@@ -719,5 +720,73 @@ export class SupabaseApiClient implements IApiClient {
       else if (s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE') stat.offCampus++
     }
     return Array.from(map.values())
+  }
+
+  // ── Internal Audit Session ──────────────────────────────────────────────────
+
+  async startAuditSession(params: { classIds: string[]; title?: string; adminPin: string; mode?: AuditSessionMode }): Promise<AuditSessionWithDetails | { error: string; existingId?: string }> {
+    const { data, error } = await supabase.rpc('start_audit_session', {
+      p_class_ids: params.classIds,
+      p_title: params.title ?? '',
+      p_admin_pin: params.adminPin,
+      p_mode: params.mode ?? 'MANUAL',
+    })
+    if (error) throw error
+    if (data?.error) return { error: data.error, existingId: data.existingId }
+    return { ...(data as AuditSessionWithDetails), entries: [], classStates: [] }
+  }
+
+  async getActiveAuditSession(): Promise<AuditSessionWithDetails | null> {
+    const { data, error } = await supabase.rpc('get_active_audit_session')
+    if (error) throw error
+    if (!data) return null
+    const d = data as { session: AuditSessionWithDetails; entries: AuditEntry[]; classStates: AuditClassState[] }
+    return { ...d.session, entries: d.entries ?? [], classStates: d.classStates ?? [] }
+  }
+
+  async getAuditSession(id: string): Promise<AuditSessionWithDetails | null> {
+    const { data, error } = await supabase.rpc('get_audit_session', { p_id: id })
+    if (error) throw error
+    if (!data) return null
+    const d = data as { session: AuditSessionWithDetails; entries: AuditEntry[]; classStates: AuditClassState[] }
+    return { ...d.session, entries: d.entries ?? [], classStates: d.classStates ?? [] }
+  }
+
+  async listAuditSessions(limit = 20, offset = 0): Promise<AuditSessionSummary[]> {
+    const { data, error } = await supabase.rpc('list_audit_sessions', { p_limit: limit, p_offset: offset })
+    if (error) throw error
+    return (data as AuditSessionSummary[]) ?? []
+  }
+
+  async closeAuditSession(id: string, adminPin: string): Promise<AuditSessionWithDetails | { error: string }> {
+    const { data, error } = await supabase.rpc('close_audit_session', { p_session_id: id, p_admin_pin: adminPin })
+    if (error) throw error
+    if (data?.error) return { error: data.error }
+    return data as AuditSessionWithDetails
+  }
+
+  async submitAuditEntry(params: { sessionId: string; studentId: string; status: AuditEntryStatus; note?: string; supervisorPin: string }): Promise<AuditEntry | { error: string }> {
+    const { data, error } = await supabase.rpc('submit_audit_entry', {
+      p_session_id: params.sessionId,
+      p_student_id: params.studentId,
+      p_status: params.status,
+      p_note: params.note ?? null,
+      p_supervisor_pin: params.supervisorPin,
+    })
+    if (error) throw error
+    if (data?.error) return { error: data.error }
+    return data as AuditEntry
+  }
+
+  async finishClassAudit(params: { sessionId: string; classId: string; note?: string; supervisorPin: string }): Promise<AuditClassState | { error: string }> {
+    const { data, error } = await supabase.rpc('finish_class_audit', {
+      p_session_id: params.sessionId,
+      p_class_id: params.classId,
+      p_note: params.note ?? null,
+      p_supervisor_pin: params.supervisorPin,
+    })
+    if (error) throw error
+    if (data?.error) return { error: data.error }
+    return data as AuditClassState
   }
 }

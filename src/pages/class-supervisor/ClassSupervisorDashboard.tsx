@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import {
-  Users, UserCheck, UserX, LogOut, GraduationCap,
+  Users, UserCheck, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
-  Loader2, AlertOctagon, FileText, ShieldAlert,
+  Loader2, AlertOctagon, FileText, ShieldAlert, ClipboardList,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -23,7 +23,7 @@ import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
-import type { Student, ClassStat, CalendarDeparture } from '@/types'
+import type { Student, ClassStat, CalendarDeparture, AuditSessionWithDetails, AuditEntryStatus } from '@/types'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -435,16 +435,21 @@ function minsFromNow(isoStr: string): number {
 }
 
 export function ClassSupervisorDashboard() {
-  const { classSupervisor, logout } = useAuthStore()
+  const { classSupervisor, logout, getSupervisorPin } = useAuthStore()
   const [students, setStudents] = useState<Student[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [editStudent, setEditStudent] = useState<Student | null>(null)
   const [todayDepartures, setTodayDepartures] = useState<CalendarDeparture[]>([])
   const [, setTick] = useState(0)
-  const [manualAuditActive, setManualAuditActive] = useState(false)
-  const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
+
+  // Audit session state
+  const [activeAuditSession, setActiveAuditSession] = useState<AuditSessionWithDetails | null>(null)
+  const [auditEntries, setAuditEntries] = useState<Map<string, AuditEntryStatus>>(new Map())
   const [showAuditWarning, setShowAuditWarning] = useState(false)
+  const [isSubmittingAudit, setIsSubmittingAudit] = useState<string | null>(null)
+  const [isFinishingAudit, setIsFinishingAudit] = useState(false)
+  const supervisorPinRef = useRef<string | null>(null)
 
   // Derive safely before hooks — avoids conditional-return-before-useEffect violation
   const classId = classSupervisor?.classId ?? ''
@@ -477,6 +482,11 @@ export function ClassSupervisorDashboard() {
     }
   }
 
+  // Capture supervisor PIN once on mount (before any re-renders can clear it)
+  useEffect(() => {
+    supervisorPinRef.current = getSupervisorPin()
+  }, [])
+
   useEffect(() => {
     if (!classId) return
     loadData()
@@ -490,20 +500,74 @@ export function ClassSupervisorDashboard() {
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Subscribe to manual audit broadcasts from admin
+  // Load active audit session on mount
   useEffect(() => {
     if (!classId) return
-    const ch = supabase
-      .channel('audit-control')
-      .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
-        const { classIds } = payload as { classIds: string[] }
-        if (classIds.includes(classId)) {
-          setManualAuditActive(true)
-          setAuditPresence(new Map())
+    api.getActiveAuditSession()
+      .then((session) => {
+        if (session && session.classIds.includes(classId)) {
+          setActiveAuditSession(session)
+          // Rebuild local entry map from existing entries
+          const map = new Map<string, AuditEntryStatus>()
+          for (const e of session.entries) {
+            if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
+          }
+          setAuditEntries(map)
+        }
+      })
+      .catch(() => {})
+  }, [classId])
+
+  // Subscribe to audit session realtime changes + manual audit broadcasts
+  useEffect(() => {
+    if (!classId) return
+
+    const auditCh = supabase
+      .channel('audit-sessions-supervisor')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, async () => {
+        const session = await api.getActiveAuditSession().catch(() => null)
+        if (session && session.classIds.includes(classId)) {
+          setActiveAuditSession(session)
+          const map = new Map<string, AuditEntryStatus>()
+          for (const e of session.entries) {
+            if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
+          }
+          setAuditEntries(map)
+        } else {
+          setActiveAuditSession(null)
+          setAuditEntries(new Map())
         }
       })
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
+
+    const broadcastCh = supabase
+      .channel('audit-control')
+      .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
+        const { classIds, sessionId } = payload as { classIds: string[]; sessionId?: string }
+        if (!classIds.includes(classId)) return
+        if (sessionId) {
+          api.getAuditSession(sessionId)
+            .then((session) => {
+              if (session) {
+                setActiveAuditSession(session)
+                setAuditEntries(new Map())
+              }
+            })
+            .catch(() => {})
+        } else {
+          api.getActiveAuditSession()
+            .then((session) => {
+              if (session) {
+                setActiveAuditSession(session)
+                setAuditEntries(new Map())
+              }
+            })
+            .catch(() => {})
+        }
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
   }, [classId])
 
   if (!classSupervisor) return null
@@ -541,14 +605,70 @@ export function ClassSupervisorDashboard() {
     : yeshivaSpots <= 3 ? { bar: 'bg-orange-400', text: 'text-[var(--orange)]', ring: 'ring-orange-200 dark:ring-orange-800' }
     : { bar: 'bg-green-500', text: 'text-[var(--green)]', ring: 'ring-green-200 dark:ring-green-800' }
 
-  const unmarkedCount = students.length - auditPresence.size
+  const myClassStudents = activeAuditSession
+    ? activeAuditSession.studentSnapshot.filter(s => s.classId === classId)
+    : []
+  const unmarkedCount = myClassStudents.length - auditEntries.size
+
+  const handleMarkStudent = async (studentId: string, status: AuditEntryStatus) => {
+    if (!activeAuditSession) return
+    const pin = supervisorPinRef.current
+    if (!pin) {
+      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN בסשן — התחבר מחדש', variant: 'destructive' })
+      return
+    }
+    setIsSubmittingAudit(studentId)
+    try {
+      const result = await api.submitAuditEntry({
+        sessionId: activeAuditSession.id,
+        studentId,
+        status,
+        supervisorPin: pin,
+      })
+      if ('error' in result) {
+        toast({ title: 'שגיאה בסימון נוכחות', description: result.error, variant: 'destructive' })
+      } else {
+        setAuditEntries(prev => new Map(prev).set(studentId, status))
+      }
+    } catch (err) {
+      toast({ title: 'שגיאה בסימון נוכחות', description: getErrorMessage(err, 'שמירת הסימון נכשלה'), variant: 'destructive' })
+    } finally {
+      setIsSubmittingAudit(null)
+    }
+  }
 
   const handleFinishAudit = () => {
     if (unmarkedCount > 0) {
       setShowAuditWarning(true)
     } else {
-      setManualAuditActive(false)
-      setAuditPresence(new Map())
+      doFinishAudit()
+    }
+  }
+
+  const doFinishAudit = async () => {
+    if (!activeAuditSession) return
+    const pin = supervisorPinRef.current
+    if (!pin) {
+      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN בסשן — התחבר מחדש', variant: 'destructive' })
+      return
+    }
+    setIsFinishingAudit(true)
+    try {
+      const result = await api.finishClassAudit({
+        sessionId: activeAuditSession.id,
+        classId,
+        supervisorPin: pin,
+      })
+      if ('error' in result) {
+        toast({ title: 'שגיאה בסיום ביקורת', description: result.error, variant: 'destructive' })
+      } else {
+        toast({ title: 'ביקורת הכיתה הסתיימה', description: `${result.inYeshivaAtFinish ?? 0} נוכחים, ${result.outWithoutPermAtFinish ?? 0} ביצ׳ ללא רשות` })
+        setShowAuditWarning(false)
+      }
+    } catch (err) {
+      toast({ title: 'שגיאה בסיום ביקורת', description: getErrorMessage(err, 'סיום ביקורת הכיתה נכשל'), variant: 'destructive' })
+    } finally {
+      setIsFinishingAudit(false)
     }
   }
 
@@ -572,40 +692,54 @@ export function ClassSupervisorDashboard() {
       </header>
 
       <div className="flex flex-col gap-5 p-4 lg:p-6">
-        {/* Manual audit banner */}
-        {manualAuditActive && (
+        {/* Active audit session banner */}
+        {activeAuditSession && (
           <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
             <div className="flex items-center gap-2 mb-3">
-              <ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
-              <p className="font-semibold text-amber-700 dark:text-amber-300">ביקורת פנימית פעילה — סמן נוכחות</p>
+              <ClipboardList className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <p className="font-semibold text-amber-700 dark:text-amber-300">
+                ביקורת פנימית פעילה — סמן נוכחות
+                {activeAuditSession.title && ` (${activeAuditSession.title})`}
+              </p>
             </div>
             <div className="flex flex-col gap-1.5 mb-3">
-              {students.map((s) => {
-                const present = auditPresence.get(s.id)
+              {myClassStudents.map((snap) => {
+                const status = auditEntries.get(snap.id)
+                const isSubmitting = isSubmittingAudit === snap.id
                 return (
-                  <div key={s.id} className="flex items-center justify-between rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
-                    <span className="text-sm font-medium text-[var(--text)]">{s.fullName}</span>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, true))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === true ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
-                      >נוכח</button>
-                      <button
-                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, false))}
-                        className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${present === false ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
-                      >נעדר</button>
-                    </div>
+                  <div key={snap.id} className="flex items-center justify-between rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2 gap-3">
+                    <span className="text-sm font-medium text-[var(--text)] flex-1 truncate">{snap.fullName}</span>
+                    {isSubmitting ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-amber-500 shrink-0" />
+                    ) : (
+                      <div className="flex gap-1.5 shrink-0">
+                        <button
+                          onClick={() => handleMarkStudent(snap.id, 'IN_YESHIVA')}
+                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'IN_YESHIVA' ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
+                        >בישיבה</button>
+                        <button
+                          onClick={() => handleMarkStudent(snap.id, 'OUT_WITH_PERMISSION')}
+                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500 text-white' : 'border border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/20'}`}
+                        >ביצ׳ רשות</button>
+                        <button
+                          onClick={() => handleMarkStudent(snap.id, 'OUT_WITHOUT_PERMISSION')}
+                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
+                        >ביצ׳ ללא רשות</button>
+                      </div>
+                    )}
                   </div>
                 )
               })}
             </div>
             <button
               onClick={handleFinishAudit}
-              className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600"
+              disabled={isFinishingAudit}
+              className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-60 flex items-center justify-center gap-2"
             >
-              סיום ביקורת
+              {isFinishingAudit ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              סיום ביקורת הכיתה
               {unmarkedCount > 0 && (
-                <span className="mr-2 rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
+                <span className="rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
                   {unmarkedCount} לא מסומנים
                 </span>
               )}
@@ -853,7 +987,7 @@ export function ClassSupervisorDashboard() {
               יש תלמידים לא מסומנים
             </DialogTitle>
             <DialogDescription>
-              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו כנוכחים או נעדרים.
+              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו.
               לסיים את הביקורת בכל זאת?
             </DialogDescription>
           </DialogHeader>
@@ -863,12 +997,10 @@ export function ClassSupervisorDashboard() {
             </Button>
             <Button
               className="flex-1 bg-amber-500 hover:bg-amber-600 text-white"
-              onClick={() => {
-                setShowAuditWarning(false)
-                setManualAuditActive(false)
-                setAuditPresence(new Map())
-              }}
+              disabled={isFinishingAudit}
+              onClick={doFinishAudit}
             >
+              {isFinishingAudit ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
               סיים בכל זאת
             </Button>
           </div>

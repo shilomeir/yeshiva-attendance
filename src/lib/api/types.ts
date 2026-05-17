@@ -15,6 +15,12 @@ import type {
   DepartureStatus,
   DepartureSource,
   SubmitDepartureResult,
+  AuditSessionWithDetails,
+  AuditSessionSummary,
+  AuditEntry,
+  AuditClassState,
+  AuditSessionMode,
+  AuditEntryStatus,
 } from '@/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,4 +172,13 @@ export interface IApiClient {
   getReasonBreakdown(): Promise<ReasonData[]>
   getHourlyDepartures(): Promise<HourlyData[]>
   getClassStats(): Promise<ClassStat[]>
+
+  // ── Internal Audit Session ─────────────────────────────────────────────────
+  startAuditSession(params: { classIds: string[]; title?: string; adminPin: string; mode?: AuditSessionMode }): Promise<AuditSessionWithDetails | { error: string; existingId?: string }>
+  getActiveAuditSession(): Promise<AuditSessionWithDetails | null>
+  getAuditSession(id: string): Promise<AuditSessionWithDetails | null>
+  listAuditSessions(limit?: number, offset?: number): Promise<AuditSessionSummary[]>
+  closeAuditSession(id: string, adminPin: string): Promise<AuditSessionWithDetails | { error: string }>
+  submitAuditEntry(params: { sessionId: string; studentId: string; status: AuditEntryStatus; note?: string; supervisorPin: string }): Promise<AuditEntry | { error: string }>
+  finishClassAudit(params: { sessionId: string; classId: string; note?: string; supervisorPin: string }): Promise<AuditClassState | { error: string }>
 }
