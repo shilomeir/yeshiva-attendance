@@ -6,63 +6,100 @@
 /* Loaded via index.html <link> for performance */
 
 :root {
-  /* Original light blue palette — kept as-is */
-  --bg: #EAF4FF;
-  --bg-2: #D6ECFF;
-  --text: #0F172A;
-  --text-muted: #64748B;
-  --border: #CBD5E1;
-  --surface: #FFFFFF;
+  /* ── Glass / Spatial 2026 palette ───────────────────────────────────────── */
+  --bg:       #F2EFEA;
+  --bg-2:     #EAE6DF;
+  --text:     #14121A;
+  --text-muted: rgba(20,18,25,0.58);
+  --border:   rgba(20,18,25,0.07);
+  --surface:  rgba(255,255,255,0.78);
 
-  /* Accent colors */
-  --blue: #3B82F6;
-  --blue-dark: #2563EB;
-  --purple: #8B5CF6;
-  --green: #22C55E;
-  --green-dark: #16A34A;
-  --orange: #F97316;
-  --orange-dark: #EA580C;
-  --red: #EF4444;
+  /* Ink scale */
+  --ink:        #14121A;
+  --ink-2:      #2A2733;
+  --ink-muted:  rgba(20,18,25,0.58);
+  --ink-faint:  rgba(20,18,25,0.38);
 
-  /* Depth / shadow */
-  --shadow-card: 0 1px 8px rgba(14, 30, 70, 0.07), 0 1px 3px rgba(14, 30, 70, 0.04);
-  --shadow-elevated: 0 6px 24px rgba(14, 30, 70, 0.12), 0 2px 6px rgba(14, 30, 70, 0.06);
+  /* Accent */
+  --accent:       #4F46E5;
+  --accent-soft:  #EEF2FF;
+  --accent-deep:  #3730A3;
+  --blue:         #4F46E5;
+  --blue-dark:    #3730A3;
+  --purple:       #7C3AED;
 
-  /* Sidebar — light themed */
-  --sidebar-bg: #1E293B;
-  --sidebar-text: #94A3B8;
-  --sidebar-active-bg: var(--blue);
-  --sidebar-active-text: #FFFFFF;
-  --sidebar-hover-bg: rgba(255,255,255,0.06);
-  --sidebar-border: rgba(255,255,255,0.07);
+  /* Semantic colors */
+  --green:        #16A34A;
+  --green-dark:   #15803D;
+  --good:         #16A34A;
+  --good-soft:    #DCFCE7;
+  --orange:       #EA580C;
+  --orange-dark:  #C2410C;
+  --warn:         #EA580C;
+  --warn-soft:    #FFEDD5;
+  --red:          #DC2626;
+  --bad:          #DC2626;
+  --bad-soft:     #FEE2E2;
+  --info:         #0891B2;
+  --info-soft:    #CFFAFE;
+  --plum:         #7C3AED;
+  --plum-soft:    #EDE9FE;
+
+  /* Glass layers */
+  --glass-1:      rgba(255,255,255,0.55);
+  --glass-2:      rgba(255,255,255,0.78);
+  --glass-3:      rgba(255,255,255,0.92);
+  --hairline:     rgba(20,18,25,0.07);
+  --hairline-2:   rgba(20,18,25,0.13);
+
+  /* Mesh orb colors */
+  --mesh-1: #E0E7FF;
+  --mesh-2: #FED7AA;
+  --mesh-3: #FBCFE8;
+  --mesh-4: #BBF7D0;
+
+  /* Shadows */
+  --shadow-card:     0 1px 0 rgba(255,255,255,0.6) inset, 0 8px 28px -10px rgba(20,18,25,0.10), 0 1.5px 4px -1px rgba(20,18,25,0.04);
+  --shadow-elevated: 0 1px 0 rgba(255,255,255,0.6) inset, 0 24px 64px -18px rgba(20,18,25,0.22), 0 4px 14px -4px rgba(20,18,25,0.08);
+  --shadow-pop:      0 1px 0 rgba(255,255,255,0.6) inset, 0 24px 64px -18px rgba(20,18,25,0.22), 0 4px 14px -4px rgba(20,18,25,0.08);
+
+  /* Design tokens */
+  --pad:      24px;
+  --pad-sm:   16px;
+  --radius:   20px;
+  --radius-sm: 14px;
+  --card-pad: 24px;
+  --gap:      20px;
+  --gap-sm:   12px;
 }
 
 .dark {
-  --bg: #080E1C;
-  --bg-2: #0F1826;
-  --text: #E8EFFC;
-  --text-muted: #6B82A8;
-  --border: #1E2D47;
-  --surface: #111C30;
+  --bg:        #0D0B12;
+  --bg-2:      #161320;
+  --text:      #EAE6F0;
+  --text-muted: rgba(234,230,240,0.55);
+  --border:    rgba(234,230,240,0.09);
+  --surface:   rgba(22,19,32,0.82);
 
-  --blue: #3B82F6;
-  --blue-dark: #2563EB;
-  --purple: #8B5CF6;
-  --green: #22C55E;
-  --green-dark: #16A34A;
-  --orange: #F97316;
-  --orange-dark: #EA580C;
-  --red: #EF4444;
+  --ink:        #EAE6F0;
+  --ink-2:      #C8C2D8;
+  --ink-muted:  rgba(234,230,240,0.55);
+  --ink-faint:  rgba(234,230,240,0.35);
 
-  --shadow-card: 0 2px 16px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.2);
-  --shadow-elevated: 0 8px 40px rgba(0, 0, 0, 0.5), 0 2px 12px rgba(0, 0, 0, 0.3);
+  --glass-1:   rgba(22,19,32,0.55);
+  --glass-2:   rgba(22,19,32,0.75);
+  --glass-3:   rgba(22,19,32,0.90);
+  --hairline:  rgba(234,230,240,0.09);
+  --hairline-2: rgba(234,230,240,0.15);
 
-  --sidebar-bg: #080E1C;
-  --sidebar-text: #6B82A8;
-  --sidebar-active-bg: #1E3A6E;
-  --sidebar-active-text: #FFFFFF;
-  --sidebar-hover-bg: rgba(255,255,255,0.04);
-  --sidebar-border: rgba(255,255,255,0.06);
+  --mesh-1: #1E215A;
+  --mesh-2: #3D1F0A;
+  --mesh-3: #3B0F25;
+  --mesh-4: #0A2A1A;
+
+  --shadow-card:     0 1px 0 rgba(255,255,255,0.06) inset, 0 8px 28px -10px rgba(0,0,0,0.5);
+  --shadow-elevated: 0 1px 0 rgba(255,255,255,0.06) inset, 0 24px 64px -18px rgba(0,0,0,0.7);
+  --shadow-pop:      0 1px 0 rgba(255,255,255,0.06) inset, 0 24px 64px -18px rgba(0,0,0,0.7);
 }
 
 @layer base {
@@ -370,6 +407,89 @@ button:active:not(:disabled) {
 .dark .day-chip {
   background: rgba(15,23,42,0.6);
   border-color: rgba(255,255,255,0.08);
+}
+
+/* ── Admin Glass / Spatial 2026 Design System ────────────────────────── */
+
+/* Animated mesh background */
+.admin-mesh {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+}
+.admin-mesh::before, .admin-mesh::after, .admin-mesh > span {
+  content: ''; position: absolute; border-radius: 50%;
+  filter: blur(80px); opacity: 0.55; will-change: transform;
+}
+.admin-mesh::before {
+  width: 620px; height: 620px; background: var(--mesh-1);
+  top: -120px; right: -180px; animation: mesh-drift1 28s ease-in-out infinite;
+}
+.admin-mesh::after {
+  width: 540px; height: 540px; background: var(--mesh-2);
+  bottom: -160px; left: -120px; animation: mesh-drift2 32s ease-in-out infinite;
+}
+.admin-mesh > .orb-3 {
+  width: 460px; height: 460px; background: var(--mesh-3);
+  top: 38%; left: 28%; opacity: 0.32; animation: mesh-drift3 36s ease-in-out infinite;
+}
+.admin-mesh > .orb-4 {
+  width: 380px; height: 380px; background: var(--mesh-4);
+  top: 60%; right: 22%; opacity: 0.28; animation: mesh-drift4 40s ease-in-out infinite;
+}
+
+@keyframes mesh-drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-40px,30px)} }
+@keyframes mesh-drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(50px,-30px)} }
+@keyframes mesh-drift3 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(30px,40px)} }
+@keyframes mesh-drift4 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-30px,-40px)} }
+
+/* Glass panels */
+.glass {
+  background: var(--glass-2);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+.glass-solid {
+  background: var(--glass-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+/* Typography utilities */
+.font-serif {
+  font-family: 'Fraunces', 'Georgia', serif;
+  letter-spacing: -0.02em;
+}
+.font-mono-num {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Admin-scoped page heading style */
+.admin-page-title {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(34px, 3vw, 50px);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+/* Entry animations (used in admin pages) */
+@keyframes admin-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.admin-fade-up {
+  animation: admin-fade-up 0.5s cubic-bezier(0.22,1,0.36,1) both;
+}
+@keyframes admin-shimmer-pulse {
+  0%, 100% { opacity: 0.7; }
+  50%       { opacity: 1; }
+}
+.admin-pulse {
+  animation: admin-shimmer-pulse 1.4s ease-in-out infinite;
 }
 
 /* ── Departure Timeline ───────────────────────────────────────────────── */
