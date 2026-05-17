@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Write",
+      "Edit",
+      "mcp__548c876e-66ff-41b3-a7b1-bf8f60a30748__apply_migration"
+    ]
+  }
+}
