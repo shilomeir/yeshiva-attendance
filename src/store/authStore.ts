@@ -23,6 +23,8 @@ interface AuthState {
   error: string | null
   /** Admin PIN held in-memory (session only, never persisted) for ADMIN_OVERRIDE PIN verification */
   _adminPinSession: string | null
+  /** Supervisor PIN held in-memory (session only, never persisted) for audit RPC calls */
+  _supervisorPinSession: string | null
   login: (idNumber: string) => Promise<boolean>
   loginAdmin: (pin: string) => Promise<boolean>
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
@@ -31,6 +33,7 @@ interface AuthState {
   logout: () => void
   clearError: () => void
   getAdminPin: () => string | null
+  getSupervisorPin: () => string | null
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -43,6 +46,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       _adminPinSession: null,
+      _supervisorPinSession: null,
 
       login: async (idNumber: string) => {
         set({ isLoading: true, error: null })
@@ -86,6 +90,7 @@ export const useAuthStore = create<AuthState>()(
             classSupervisor: { classId: result.classId, gradeName: result.gradeName },
             isAdmin: false,
             currentUser: null,
+            _supervisorPinSession: pin,
           })
           return true
         }
@@ -119,12 +124,13 @@ export const useAuthStore = create<AuthState>()(
           supabase.auth.signOut().catch(() => {})
         }
         localStorage.removeItem('yeshiva_remembered_id')
-        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null })
+        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null, _supervisorPinSession: null })
       },
 
       clearError: () => set({ error: null }),
 
       getAdminPin: () => get()._adminPinSession,
+      getSupervisorPin: () => get()._supervisorPinSession,
     }),
     {
       name: 'yeshiva-auth',

@@ -204,6 +204,100 @@ export interface HourlyData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Internal Audit Session types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type AuditSessionStatus = 'ACTIVE' | 'CLOSED' | 'TIMED_OUT' | 'ABORTED'
+export type AuditSessionMode   = 'MANUAL' | 'LOCATION'
+export type AuditEntryStatus   = 'IN_YESHIVA' | 'OUT_WITH_PERMISSION' | 'OUT_WITHOUT_PERMISSION'
+export type AuditEntrySource   = 'SUPERVISOR' | 'AUTO_DEFAULT' | 'AUTO_GPS'
+export type AuditClassStateStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'FINISHED'
+
+export interface AuditStudentSnapshot {
+  id: string
+  fullName: string
+  idNumber: string
+  classId: string
+  grade: string
+}
+
+export interface AuditEntry {
+  id: string
+  sessionId: string
+  studentId: string | null
+  studentSnapshotIdx: number
+  classId: string
+  grade: string
+  status: AuditEntryStatus
+  note: string | null
+  source: AuditEntrySource
+  hadActiveDepartureAtAudit: boolean
+  submittedBy: string
+  submittedAt: string
+  updatedAt: string
+  gpsLat?: number | null
+  gpsLng?: number | null
+  gpsAccuracyM?: number | null
+  distanceFromCampusM?: number | null
+  distanceBucket?: 'GREEN' | 'BLUE' | 'ORANGE' | 'RED' | null
+  gpsStatus?: 'OK' | 'DENIED' | 'TIMEOUT' | 'OFFLINE' | 'UNAVAILABLE' | 'LOW_ACCURACY' | null
+}
+
+export interface AuditClassState {
+  id: string
+  sessionId: string
+  classId: string
+  status: AuditClassStateStatus
+  startedAt: string | null
+  finishedAt: string | null
+  finishedBy: string | null
+  unmarkedAtFinish: number | null
+  inYeshivaAtFinish: number | null
+  outWithPermAtFinish: number | null
+  outWithoutPermAtFinish: number | null
+  supervisorNote: string | null
+  updatedAt: string
+}
+
+export interface AuditSession {
+  id: string
+  title: string | null
+  mode: AuditSessionMode
+  startedAt: string
+  startedBy: string
+  classIds: string[]
+  status: AuditSessionStatus
+  closedAt: string | null
+  closedBy: string | null
+  totalStudentsSnapshot: number
+  classSnapshot: Array<{ classId: string; grade: string; studentCount: number }>
+  studentSnapshot: AuditStudentSnapshot[]
+  activeDeparturesSnapshot: Array<{ studentId: string; departureId: string; endAt: string; reason: string | null }>
+  settings: Record<string, unknown>
+}
+
+export interface AuditSessionWithDetails extends AuditSession {
+  entries: AuditEntry[]
+  classStates: AuditClassState[]
+}
+
+export interface AuditSessionSummary {
+  id: string
+  title: string | null
+  startedAt: string
+  closedAt: string | null
+  status: AuditSessionStatus
+  classIds: string[]
+  totalStudentsSnapshot: number
+  inYeshivaCount: number
+  outWithPermCount: number
+  outWithoutPermCount: number
+  markedCount: number
+  unmarkedCount: number
+  durationSec: number
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Backward-compat alias — components that still import AbsenceRequest will
 // continue to compile during the transition. Remove after Phase 9.
 // ─────────────────────────────────────────────────────────────────────────────

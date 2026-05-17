@@ -20,6 +20,12 @@ import type {
   SubmitDepartureResult,
   DepartureSubmitResult,
   QuotaFullResult,
+  AuditSessionWithDetails,
+  AuditSessionSummary,
+  AuditEntry,
+  AuditClassState,
+  AuditSessionMode,
+  AuditEntryStatus,
 } from '@/types'
 import type {
   IApiClient,
@@ -786,5 +792,95 @@ export class MockApiClient implements IApiClient {
       if (a.grade !== b.grade) return a.grade.localeCompare(b.grade, 'he')
       return a.classId.localeCompare(b.classId, 'he')
     })
+  }
+
+  // ── Internal Audit Session (mock — in-memory only) ─────────────────────────
+
+  private _mockAuditSession: AuditSessionWithDetails | null = null
+
+  async startAuditSession(params: { classIds: string[]; title?: string; adminPin: string; mode?: AuditSessionMode }): Promise<AuditSessionWithDetails | { error: string; existingId?: string }> {
+    if (this._mockAuditSession?.status === 'ACTIVE') return { error: 'ALREADY_ACTIVE', existingId: this._mockAuditSession.id }
+    const students = await db.students.toArray()
+    const filtered = students.filter(s => params.classIds.includes(s.classId))
+    const snap = filtered.map(s => ({ id: s.id, fullName: s.fullName, idNumber: s.idNumber, classId: s.classId, grade: s.grade }))
+    const session: AuditSessionWithDetails = {
+      id: uuidv4(), title: params.title ?? null, mode: params.mode ?? 'MANUAL',
+      startedAt: new Date().toISOString(), startedBy: 'admin', classIds: params.classIds,
+      status: 'ACTIVE', closedAt: null, closedBy: null,
+      totalStudentsSnapshot: snap.length, classSnapshot: [], studentSnapshot: snap,
+      activeDeparturesSnapshot: [], settings: {}, entries: [], classStates: params.classIds.map(cid => ({
+        id: uuidv4(), sessionId: '', classId: cid, status: 'NOT_STARTED',
+        startedAt: null, finishedAt: null, finishedBy: null,
+        unmarkedAtFinish: null, inYeshivaAtFinish: null, outWithPermAtFinish: null, outWithoutPermAtFinish: null,
+        supervisorNote: null, updatedAt: new Date().toISOString(),
+      })),
+    }
+    this._mockAuditSession = session
+    return session
+  }
+
+  async getActiveAuditSession(): Promise<AuditSessionWithDetails | null> {
+    return this._mockAuditSession?.status === 'ACTIVE' ? this._mockAuditSession : null
+  }
+
+  async getAuditSession(id: string): Promise<AuditSessionWithDetails | null> {
+    return this._mockAuditSession?.id === id ? this._mockAuditSession : null
+  }
+
+  async listAuditSessions(): Promise<AuditSessionSummary[]> {
+    if (!this._mockAuditSession) return []
+    const s = this._mockAuditSession
+    const entries = s.entries
+    return [{
+      id: s.id, title: s.title, startedAt: s.startedAt, closedAt: s.closedAt,
+      status: s.status, classIds: s.classIds, totalStudentsSnapshot: s.totalStudentsSnapshot,
+      inYeshivaCount: entries.filter(e => e.status === 'IN_YESHIVA').length,
+      outWithPermCount: entries.filter(e => e.status === 'OUT_WITH_PERMISSION').length,
+      outWithoutPermCount: entries.filter(e => e.status === 'OUT_WITHOUT_PERMISSION').length,
+      markedCount: entries.length, unmarkedCount: s.totalStudentsSnapshot - entries.length,
+      durationSec: Math.round((Date.now() - new Date(s.startedAt).getTime()) / 1000),
+    }]
+  }
+
+  async closeAuditSession(id: string, _adminPin: string): Promise<AuditSessionWithDetails | { error: string }> {
+    if (!this._mockAuditSession || this._mockAuditSession.id !== id) return { error: 'NOT_ACTIVE' }
+    this._mockAuditSession = { ...this._mockAuditSession, status: 'CLOSED', closedAt: new Date().toISOString(), closedBy: 'admin' }
+    return this._mockAuditSession
+  }
+
+  async submitAuditEntry(params: { sessionId: string; studentId: string; status: AuditEntryStatus; note?: string; supervisorPin: string }): Promise<AuditEntry | { error: string }> {
+    if (!this._mockAuditSession || this._mockAuditSession.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    const snap = this._mockAuditSession.studentSnapshot
+    const snapIdx = snap.findIndex(s => s.id === params.studentId)
+    if (snapIdx === -1) return { error: 'STUDENT_NOT_IN_SESSION' }
+    const existing = this._mockAuditSession.entries.findIndex(e => e.studentSnapshotIdx === snapIdx)
+    const entry: AuditEntry = {
+      id: uuidv4(), sessionId: params.sessionId, studentId: params.studentId,
+      studentSnapshotIdx: snapIdx, classId: snap[snapIdx].classId, grade: snap[snapIdx].grade,
+      status: params.status, note: params.note ?? null, source: 'SUPERVISOR',
+      hadActiveDepartureAtAudit: false, submittedBy: 'supervisor',
+      submittedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }
+    const entries = [...this._mockAuditSession.entries]
+    if (existing >= 0) entries[existing] = entry
+    else entries.push(entry)
+    this._mockAuditSession = { ...this._mockAuditSession, entries }
+    return entry
+  }
+
+  async finishClassAudit(params: { sessionId: string; classId: string; note?: string; supervisorPin: string }): Promise<AuditClassState | { error: string }> {
+    if (!this._mockAuditSession || this._mockAuditSession.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    const entries = this._mockAuditSession.entries.filter(e => e.classId === params.classId)
+    const classState: AuditClassState = {
+      id: uuidv4(), sessionId: params.sessionId, classId: params.classId, status: 'FINISHED',
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), finishedBy: 'supervisor',
+      unmarkedAtFinish: 0, inYeshivaAtFinish: entries.filter(e => e.status === 'IN_YESHIVA').length,
+      outWithPermAtFinish: entries.filter(e => e.status === 'OUT_WITH_PERMISSION').length,
+      outWithoutPermAtFinish: entries.filter(e => e.status === 'OUT_WITHOUT_PERMISSION').length,
+      supervisorNote: params.note ?? null, updatedAt: new Date().toISOString(),
+    }
+    const classStates = this._mockAuditSession.classStates.map(cs => cs.classId === params.classId ? classState : cs)
+    this._mockAuditSession = { ...this._mockAuditSession, classStates }
+    return classState
   }
 }

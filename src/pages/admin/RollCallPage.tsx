@@ -9,6 +9,8 @@ import {
   Users,
   Download,
   ClipboardList,
+  X,
+  Clock,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -19,9 +21,10 @@ import {
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
+import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
-import type { Student, ClassStat } from '@/types'
+import type { Student, ClassStat, AuditSessionWithDetails, AuditEntry } from '@/types'
 
 // Thresholds
 const ON_CAMPUS_METERS = 300
@@ -83,6 +86,7 @@ function LocationBadge({ cls }: { cls: LocationClass }) {
 const LOCATION_RESPONSE_TIMEOUT_MS = 15000
 
 export function RollCallPage() {
+  const { getAdminPin } = useAuthStore()
   const [students, setStudents] = useState<StudentWithLocation[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [isWaiting, setIsWaiting] = useState(false)
@@ -96,7 +100,19 @@ export function RollCallPage() {
   const [auditMode, setAuditMode] = useState<'location' | 'manual' | null>(null)
   const [allClassStats, setAllClassStats] = useState<ClassStat[]>([])
   const [selectedClassIds, setSelectedClassIds] = useState<Set<string>>(new Set())
-  const [manualAuditSent, setManualAuditSent] = useState(false)
+  const [auditTitle, setAuditTitle] = useState('')
+  const [isStartingAudit, setIsStartingAudit] = useState(false)
+
+  // Active audit session state
+  const [activeSession, setActiveSession] = useState<AuditSessionWithDetails | null>(null)
+  const [isClosingSession, setIsClosingSession] = useState(false)
+
+  // Load active session on mount
+  useEffect(() => {
+    api.getActiveAuditSession()
+      .then(setActiveSession)
+      .catch(() => {})
+  }, [])
 
   // Load class list when modal opens
   useEffect(() => {
@@ -113,29 +129,85 @@ export function RollCallPage() {
 
   const handleOpenModal = () => {
     setAuditMode(null)
-    setManualAuditSent(false)
+    setAuditTitle('')
     setShowAuditModal(true)
   }
 
   const handleConfirmAudit = async () => {
-    setShowAuditModal(false)
-    if (auditMode === 'location') {
-      runRollCall()
-    } else {
-      // Manual audit: broadcast to class supervisors
-      const classIds = [...selectedClassIds]
-      const ch = supabase.channel('audit-control')
-      await new Promise<void>((resolve) => {
-        ch.subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            ch.send({ type: 'broadcast', event: 'manual_audit_start', payload: { classIds } })
-            resolve()
-          }
-        })
+    if (!auditMode || selectedClassIds.size === 0) return
+    const adminPin = getAdminPin()
+    if (!adminPin) {
+      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN מנהל בסשן', variant: 'destructive' })
+      return
+    }
+
+    setIsStartingAudit(true)
+    try {
+      const result = await api.startAuditSession({
+        classIds: [...selectedClassIds],
+        title: auditTitle || undefined,
+        adminPin,
+        mode: auditMode === 'location' ? 'LOCATION' : 'MANUAL',
       })
-      supabase.removeChannel(ch)
-      setManualAuditSent(true)
-      setLastRun(new Date())
+
+      if ('error' in result) {
+        if (result.error === 'ALREADY_ACTIVE') {
+          toast({ title: 'ביקורת פעילה כבר קיימת', description: 'יש לסגור את הביקורת הפעילה לפני פתיחת חדשה', variant: 'destructive' })
+          // Load existing session
+          const existing = await api.getActiveAuditSession()
+          if (existing) setActiveSession(existing)
+        } else {
+          toast({ title: 'שגיאה בפתיחת ביקורת', description: result.error, variant: 'destructive' })
+        }
+        return
+      }
+
+      setActiveSession(result)
+      setShowAuditModal(false)
+      toast({ title: 'ביקורת פנימית נפתחה', description: `${result.totalStudentsSnapshot} תלמידים בביקורת` })
+
+      if (auditMode === 'location') {
+        runLocationRollCall()
+      } else {
+        // Broadcast to supervisors
+        const ch = supabase.channel('audit-control')
+        await new Promise<void>((resolve) => {
+          ch.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              ch.send({ type: 'broadcast', event: 'manual_audit_start', payload: { classIds: [...selectedClassIds], sessionId: result.id } })
+              resolve()
+            }
+          })
+        })
+        supabase.removeChannel(ch)
+      }
+    } catch (err) {
+      toast({ title: 'שגיאה בפתיחת ביקורת', description: getErrorMessage(err, 'פתיחת ביקורת פנימית נכשלה'), variant: 'destructive' })
+    } finally {
+      setIsStartingAudit(false)
+    }
+  }
+
+  const handleCloseSession = async () => {
+    if (!activeSession) return
+    const adminPin = getAdminPin()
+    if (!adminPin) {
+      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN מנהל בסשן', variant: 'destructive' })
+      return
+    }
+    setIsClosingSession(true)
+    try {
+      const result = await api.closeAuditSession(activeSession.id, adminPin)
+      if ('error' in result) {
+        toast({ title: 'שגיאה בסגירת ביקורת', description: result.error, variant: 'destructive' })
+      } else {
+        setActiveSession(null)
+        toast({ title: 'ביקורת נסגרה בהצלחה' })
+      }
+    } catch (err) {
+      toast({ title: 'שגיאה בסגירת ביקורת', description: getErrorMessage(err, 'סגירת ביקורת נכשלה'), variant: 'destructive' })
+    } finally {
+      setIsClosingSession(false)
     }
   }
 
@@ -161,13 +233,13 @@ export function RollCallPage() {
     setStudents(enriched)
   }, [])
 
-  const runRollCall = useCallback(async () => {
+  const runLocationRollCall = useCallback(async () => {
     setIsLoading(true)
     setIsWaiting(false)
     if (waitTimerRef.current) clearTimeout(waitTimerRef.current)
 
     try {
-      // 1a. Broadcast via Supabase Realtime → reaches apps that are OPEN / BACKGROUNDED
+      // 1. Broadcast via Supabase Realtime
       const channel = supabase.channel('location-requests')
       await new Promise<void>((resolve) => {
         channel.subscribe((status) => {
@@ -179,13 +251,13 @@ export function RollCallPage() {
       })
       supabase.removeChannel(channel)
 
-      // 2. Load current data immediately (some may already have lastLocation)
+      // 2. Load current data immediately
       const initial = await api.getStudents()
       enrichAndSet(initial)
       setLastRun(new Date())
       setIsLoading(false)
 
-      // 3. Wait for students to respond, refreshing after timeout
+      // 3. Wait for students to respond
       setIsWaiting(true)
       waitTimerRef.current = setTimeout(async () => {
         try {
@@ -205,7 +277,7 @@ export function RollCallPage() {
     }
   }, [enrichAndSet])
 
-  // Listen for realtime updates on the students table to refresh on each location update
+  // Listen for realtime updates on the students table
   useEffect(() => {
     const channel = supabase
       .channel('students-location-updates')
@@ -228,7 +300,18 @@ export function RollCallPage() {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
-  // Cleanup timer on unmount only — do NOT auto-run on mount
+  // Listen for audit session realtime changes
+  useEffect(() => {
+    const channel = supabase
+      .channel('audit-sessions-admin')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, async () => {
+        const session = await api.getActiveAuditSession().catch(() => null)
+        setActiveSession(session)
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [])
+
   useEffect(() => {
     return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }
   }, [])
@@ -263,13 +346,31 @@ export function RollCallPage() {
       ]),
     ]
     const csv = rows.map((r) => r.join(',')).join('\n')
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = `ביקורת-${new Date().toLocaleDateString('he-IL').replace(/\//g, '-')}.csv`
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // Audit session summary helpers
+  const getSessionSummary = (session: AuditSessionWithDetails) => {
+    const entries = session.entries as AuditEntry[]
+    const marked = entries.length
+    const total = session.totalStudentsSnapshot
+    const inYeshiva = entries.filter(e => e.status === 'IN_YESHIVA').length
+    const outPerm = entries.filter(e => e.status === 'OUT_WITH_PERMISSION').length
+    const outNoPerm = entries.filter(e => e.status === 'OUT_WITHOUT_PERMISSION').length
+    const unmarked = total - marked
+    return { marked, total, inYeshiva, outPerm, outNoPerm, unmarked }
+  }
+
+  const formatDuration = (startedAt: string) => {
+    const mins = Math.round((Date.now() - new Date(startedAt).getTime()) / 60000)
+    if (mins < 60) return `${mins} דקות`
+    return `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, '0')} שעות`
   }
 
   return (
@@ -281,7 +382,7 @@ export function RollCallPage() {
           <p className="text-sm text-[var(--text-muted)]">
             {lastRun
               ? `עודכן לאחרונה: ${lastRun.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}`
-              : 'לחץ על "הפעל ביקורת" כדי לאסוף מיקומים'}
+              : 'לחץ על "פתח ביקורת" כדי להתחיל'}
           </p>
         </div>
         <div className="flex gap-2">
@@ -289,167 +390,231 @@ export function RollCallPage() {
             <Download className="h-4 w-4" />
             ייצא CSV
           </Button>
-          <Button onClick={handleOpenModal} disabled={isLoading || isWaiting} size="sm">
+          <Button
+            onClick={handleOpenModal}
+            disabled={isLoading || isWaiting || !!activeSession}
+            size="sm"
+          >
             <MapPin className={`h-4 w-4 ${isLoading || isWaiting ? 'animate-spin' : ''}`} />
-            {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'הפעל ביקורת'}
+            {isLoading ? 'שולח בקשה...' : isWaiting ? 'ממתין לתלמידים...' : 'פתח ביקורת'}
           </Button>
         </div>
       </div>
+
+      {/* Active session banner */}
+      {activeSession && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <ClipboardList className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-amber-700 dark:text-amber-300">
+                  ביקורת פעילה
+                  {activeSession.title && ` — ${activeSession.title}`}
+                </p>
+                <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
+                  {activeSession.mode === 'MANUAL' ? 'ביקורת ידנית' : 'ביקורת עם מיקום'} ·{' '}
+                  {activeSession.classIds.length} כיתות ·{' '}
+                  {activeSession.totalStudentsSnapshot} תלמידים ·{' '}
+                  <Clock className="h-3 w-3 inline" /> {formatDuration(activeSession.startedAt)}
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCloseSession}
+              disabled={isClosingSession}
+              className="border-amber-300 text-amber-700 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/50 shrink-0"
+            >
+              <X className="h-4 w-4" />
+              סגור ביקורת
+            </Button>
+          </div>
+
+          {/* Progress */}
+          {(() => {
+            const { marked, total, inYeshiva, outPerm, outNoPerm, unmarked } = getSessionSummary(activeSession)
+            return (
+              <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+                {[
+                  { label: 'בישיבה', count: inYeshiva, color: 'text-green-700 dark:text-green-400' },
+                  { label: 'ביצ׳ רשות', count: outPerm, color: 'text-blue-700 dark:text-blue-400' },
+                  { label: 'ביצ׳ ללא רשות', count: outNoPerm, color: 'text-red-700 dark:text-red-400' },
+                  { label: 'לא סומן', count: unmarked, color: 'text-amber-600 dark:text-amber-400' },
+                ].map(({ label, count, color }) => (
+                  <div key={label} className="rounded-lg bg-white/60 dark:bg-amber-900/20 p-2">
+                    <p className={`text-lg font-bold ${color}`}>{count}</p>
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400">{label}</p>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+          {activeSession.mode === 'MANUAL' && (
+            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              אחראי הכיתות מסמנים נוכחות בלוח הבקרה שלהם
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Empty state when no roll call has been run */}
       {students.length === 0 && !isLoading && (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--border)] py-16 text-center">
           <MapPin className="h-10 w-10 text-[var(--text-muted)] opacity-40" />
-          <p className="font-medium text-[var(--text-muted)]">לא בוצעה ביקורת עדיין</p>
-          <p className="text-sm text-[var(--text-muted)]">לחץ על "הפעל ביקורת" כדי לשלוח בקשת מיקום לכל התלמידים</p>
+          <p className="font-medium text-[var(--text-muted)]">
+            {activeSession?.mode === 'MANUAL' ? 'ביקורת ידנית פעילה' : 'לא בוצעה ביקורת מיקום עדיין'}
+          </p>
+          <p className="text-sm text-[var(--text-muted)]">
+            {activeSession?.mode === 'MANUAL'
+              ? 'אחראי הכיתות מסמנים נוכחות בלוח הבקרה שלהם'
+              : 'פתח ביקורת עם מיקום כדי לשלוח בקשת GPS לתלמידים'}
+          </p>
         </div>
       )}
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {(
-          [
-            { label: 'בישיבה', cls: 'בישיבה' as LocationClass, icon: <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />, bg: 'bg-green-50 dark:bg-green-950/20', num: counts['בישיבה'] },
-            { label: 'קרוב לישיבה', cls: 'קרוב' as LocationClass, icon: <Navigation className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />, bg: 'bg-yellow-50 dark:bg-yellow-950/20', num: counts['קרוב'] },
-            { label: 'רחוק', cls: 'רחוק' as LocationClass, icon: <AlertCircle className="h-5 w-5 text-red-500 dark:text-red-400" />, bg: 'bg-red-50 dark:bg-red-950/20', num: counts['רחוק'] },
-            { label: 'לא ידוע', cls: 'לא ידוע' as LocationClass, icon: <HelpCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />, bg: 'bg-gray-50 dark:bg-gray-900/20', num: counts['לא ידוע'] },
-          ] as const
-        ).map(({ label, cls, icon, bg, num }) => (
-          <button
-            key={cls}
-            onClick={() => setFilterClass(filterClass === cls ? 'הכל' : cls)}
-            className={`rounded-xl border p-4 text-start transition-all hover:shadow-md ${bg} ${filterClass === cls ? 'ring-2 ring-[var(--blue)]' : 'border-[var(--border)]'}`}
-          >
-            <div className="flex items-center justify-between">
-              {icon}
-              <span className="text-2xl font-bold text-[var(--text)]">{num}</span>
-            </div>
-            <p className="mt-1 text-sm font-medium text-[var(--text-muted)]">{label}</p>
-          </button>
-        ))}
-      </div>
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-xs text-[var(--text-muted)]">
-        <div className="flex items-center gap-1.5">
-          <MapPin className="h-3.5 w-3.5 text-[var(--blue)]" />
-          <span>מיקום מבוסס על נתוני GPS אחרונים שנשמרו</span>
-        </div>
-        <span>·</span>
-        <span className="text-green-700 dark:text-green-400">בישיבה ≤ {ON_CAMPUS_METERS}מ׳</span>
-        <span>·</span>
-        <span className="text-yellow-700 dark:text-yellow-400">קרוב ≤ {NEARBY_METERS / 1000}ק״מ</span>
-        <span>·</span>
-        <span className="text-red-700 dark:text-red-400">רחוק &gt; {NEARBY_METERS / 1000}ק״מ</span>
-      </div>
-
-      {/* Search + filter row */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Users className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
-          <Input
-            placeholder="חפש שם או ת.ז..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="ps-9"
-          />
-        </div>
-        {filterClass !== 'הכל' && (
-          <Button variant="outline" size="sm" onClick={() => setFilterClass('הכל')}>
-            נקה פילטר
-          </Button>
-        )}
-        <span className="text-sm text-[var(--text-muted)] whitespace-nowrap">
-          {filtered.length} תלמידים
-        </span>
-      </div>
-
-      {/* Students list */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">
-            {filterClass === 'הכל' ? 'כל התלמידים' : filterClass}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-16">
-              <RefreshCw className="h-6 w-6 animate-spin text-[var(--blue)]" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-16 text-[var(--text-muted)]">
-              <MapPin className="h-8 w-8 opacity-30" />
-              <p>לא נמצאו תלמידים</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-[var(--border)]">
-              {filtered.map((student) => {
-                const cfg = CLASS_CONFIG[student.locationClass]
-                return (
-                  <div
-                    key={student.id}
-                    className={`flex items-center gap-3 px-4 py-3 ${cfg.bg} border-s-4 ${
-                      student.locationClass === 'בישיבה' ? 'border-s-green-500' :
-                      student.locationClass === 'קרוב' ? 'border-s-yellow-500' :
-                      student.locationClass === 'רחוק' ? 'border-s-red-500' :
-                      'border-s-gray-300'
-                    }`}
-                  >
-                    {/* Avatar */}
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--blue)] text-xs font-bold text-white">
-                      {student.fullName.slice(0, 2)}
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
-                      <span className="text-xs text-[var(--text-muted)]">ת.ז. {student.idNumber}</span>
-                    </div>
-
-                    {/* Distance */}
-                    <div className="flex flex-col items-end gap-1">
-                      <LocationBadge cls={student.locationClass} />
-                      {student.distanceMeters !== null && (
-                        <span className="text-xs text-[var(--text-muted)]">
-                          {student.distanceMeters >= 1000
-                            ? `${(student.distanceMeters / 1000).toFixed(1)} ק״מ`
-                            : `${student.distanceMeters} מ׳`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Manual audit sent banner */}
-      {manualAuditSent && (
-        <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 dark:border-blue-800 dark:bg-blue-950/30">
-          <ClipboardList className="h-5 w-5 shrink-0 text-blue-600 dark:text-blue-400" />
-          <div>
-            <p className="font-medium text-sm text-blue-700 dark:text-blue-300">ביקורת ידנית הופעלה</p>
-            <p className="text-xs text-blue-600 dark:text-blue-400 mt-0.5">
-              נשלחה הודעה לאחראי הכיתות. עליהם לסמן נוכחות מלוח הבקרה שלהם.
-            </p>
+      {/* Summary cards (location mode only) */}
+      {students.length > 0 && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {(
+              [
+                { label: 'בישיבה', cls: 'בישיבה' as LocationClass, icon: <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />, bg: 'bg-green-50 dark:bg-green-950/20', num: counts['בישיבה'] },
+                { label: 'קרוב לישיבה', cls: 'קרוב' as LocationClass, icon: <Navigation className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />, bg: 'bg-yellow-50 dark:bg-yellow-950/20', num: counts['קרוב'] },
+                { label: 'רחוק', cls: 'רחוק' as LocationClass, icon: <AlertCircle className="h-5 w-5 text-red-500 dark:text-red-400" />, bg: 'bg-red-50 dark:bg-red-950/20', num: counts['רחוק'] },
+                { label: 'לא ידוע', cls: 'לא ידוע' as LocationClass, icon: <HelpCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />, bg: 'bg-gray-50 dark:bg-gray-900/20', num: counts['לא ידוע'] },
+              ] as const
+            ).map(({ label, cls, icon, bg, num }) => (
+              <button
+                key={cls}
+                onClick={() => setFilterClass(filterClass === cls ? 'הכל' : cls)}
+                className={`rounded-xl border p-4 text-start transition-all hover:shadow-md ${bg} ${filterClass === cls ? 'ring-2 ring-[var(--blue)]' : 'border-[var(--border)]'}`}
+              >
+                <div className="flex items-center justify-between">
+                  {icon}
+                  <span className="text-2xl font-bold text-[var(--text)]">{num}</span>
+                </div>
+                <p className="mt-1 text-sm font-medium text-[var(--text-muted)]">{label}</p>
+              </button>
+            ))}
           </div>
-        </div>
+
+          {/* Legend */}
+          <div className="flex flex-wrap gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-xs text-[var(--text-muted)]">
+            <div className="flex items-center gap-1.5">
+              <MapPin className="h-3.5 w-3.5 text-[var(--blue)]" />
+              <span>מיקום מבוסס על נתוני GPS אחרונים שנשמרו</span>
+            </div>
+            <span>·</span>
+            <span className="text-green-700 dark:text-green-400">בישיבה ≤ {ON_CAMPUS_METERS}מ׳</span>
+            <span>·</span>
+            <span className="text-yellow-700 dark:text-yellow-400">קרוב ≤ {NEARBY_METERS / 1000}ק״מ</span>
+            <span>·</span>
+            <span className="text-red-700 dark:text-red-400">רחוק &gt; {NEARBY_METERS / 1000}ק״מ</span>
+          </div>
+
+          {/* Search + filter row */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="relative flex-1">
+              <Users className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+              <Input
+                placeholder="חפש שם או ת.ז..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="ps-9"
+              />
+            </div>
+            {filterClass !== 'הכל' && (
+              <Button variant="outline" size="sm" onClick={() => setFilterClass('הכל')}>
+                נקה פילטר
+              </Button>
+            )}
+            <span className="text-sm text-[var(--text-muted)] whitespace-nowrap">
+              {filtered.length} תלמידים
+            </span>
+          </div>
+
+          {/* Students list */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">
+                {filterClass === 'הכל' ? 'כל התלמידים' : filterClass}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              {isLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <RefreshCw className="h-6 w-6 animate-spin text-[var(--blue)]" />
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="flex flex-col items-center gap-2 py-16 text-[var(--text-muted)]">
+                  <MapPin className="h-8 w-8 opacity-30" />
+                  <p>לא נמצאו תלמידים</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-[var(--border)]">
+                  {filtered.map((student) => {
+                    const cfg = CLASS_CONFIG[student.locationClass]
+                    return (
+                      <div
+                        key={student.id}
+                        className={`flex items-center gap-3 px-4 py-3 ${cfg.bg} border-s-4 ${
+                          student.locationClass === 'בישיבה' ? 'border-s-green-500' :
+                          student.locationClass === 'קרוב' ? 'border-s-yellow-500' :
+                          student.locationClass === 'רחוק' ? 'border-s-red-500' :
+                          'border-s-gray-300'
+                        }`}
+                      >
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--blue)] text-xs font-bold text-white">
+                          {student.fullName.slice(0, 2)}
+                        </div>
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate font-medium text-[var(--text)]">{student.fullName}</span>
+                          <span className="text-xs text-[var(--text-muted)]">ת.ז. {student.idNumber}</span>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <LocationBadge cls={student.locationClass} />
+                          {student.distanceMeters !== null && (
+                            <span className="text-xs text-[var(--text-muted)]">
+                              {student.distanceMeters >= 1000
+                                ? `${(student.distanceMeters / 1000).toFixed(1)} ק״מ`
+                                : `${student.distanceMeters} מ׳`}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
       )}
 
       {/* Pre-audit modal */}
       <Dialog open={showAuditModal} onOpenChange={setShowAuditModal}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>הפעלת ביקורת פנימית</DialogTitle>
+            <DialogTitle>פתיחת ביקורת פנימית</DialogTitle>
             <DialogDescription>הגדר את פרטי הביקורת לפני ההפעלה</DialogDescription>
           </DialogHeader>
 
           <div className="flex flex-col gap-5 pt-1">
-            {/* Q1: Location mode */}
+            {/* Q0: Title */}
             <div>
-              <p className="text-sm font-semibold text-[var(--text)] mb-2">1. איסוף מיקום</p>
+              <p className="text-sm font-semibold text-[var(--text)] mb-2">כותרת (אופציונלי)</p>
+              <Input
+                placeholder='לדוגמה: ביקורת שבתית 17/05'
+                value={auditTitle}
+                onChange={(e) => setAuditTitle(e.target.value)}
+              />
+            </div>
+
+            {/* Q1: Mode */}
+            <div>
+              <p className="text-sm font-semibold text-[var(--text)] mb-2">1. סוג הביקורת</p>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setAuditMode('location')}
@@ -472,8 +637,8 @@ export function RollCallPage() {
                   }`}
                 >
                   <ClipboardList className="mb-1 h-4 w-4" />
-                  <p className="font-medium">ללא מיקום</p>
-                  <p className="text-xs opacity-70 mt-0.5">אחראי כיתה מסמן נוכחות ידנית</p>
+                  <p className="font-medium">ידנית</p>
+                  <p className="text-xs opacity-70 mt-0.5">אחראי כיתה מסמן נוכחות</p>
                 </button>
               </div>
             </div>
@@ -520,9 +685,9 @@ export function RollCallPage() {
               <Button variant="outline" onClick={() => setShowAuditModal(false)}>ביטול</Button>
               <Button
                 onClick={handleConfirmAudit}
-                disabled={!auditMode || selectedClassIds.size === 0}
+                disabled={!auditMode || selectedClassIds.size === 0 || isStartingAudit}
               >
-                הפעל ביקורת
+                {isStartingAudit ? 'פותח ביקורת...' : 'פתח ביקורת'}
               </Button>
             </div>
           </div>
