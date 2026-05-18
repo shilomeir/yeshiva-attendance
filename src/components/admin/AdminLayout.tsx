@@ -11,6 +11,7 @@ import {
   MapPin,
   ClipboardList,
   AlertOctagon,
+  History,
 } from 'lucide-react'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { SyncStatusBar } from '@/components/shared/SyncStatusBar'
@@ -22,6 +23,7 @@ const NAV_ITEMS = [
   { to: '/admin', icon: LayoutDashboard, label: 'לוח בקרה', end: true },
   { to: '/admin/students', icon: Users, label: 'תלמידים' },
   { to: '/admin/rollcall', icon: MapPin, label: 'ביקורת פנימית' },
+  { to: '/admin/audits', icon: History, label: 'היסטוריית ביקורות' },
   { to: '/admin/calendar', icon: Calendar, label: 'לוח שנה' },
   { to: '/admin/exceptions', icon: AlertOctagon, label: 'חריגות עכשיו' },
   { to: '/admin/requests', icon: ClipboardList, label: 'בקשות ממתינות' },
