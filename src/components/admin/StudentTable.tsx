@@ -32,8 +32,8 @@ export function StudentTable() {
       {/* Virtualizer — contain:strict clips fixed/absolute children, so modal is rendered outside */}
       <div
         ref={parentRef}
-        className="h-full overflow-auto"
-        style={{ contain: 'strict' }}
+        className="overflow-auto"
+        style={{ contain: 'strict', height: 'calc(100vh - 320px)', minHeight: 240 }}
       >
         <div
           className="relative w-full"
