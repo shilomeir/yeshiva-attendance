@@ -883,4 +883,23 @@ export class MockApiClient implements IApiClient {
     this._mockAuditSession = { ...this._mockAuditSession, classStates }
     return classState
   }
+
+  async bulkMarkUnmarkedAuditEntries(params: { sessionId: string; classId: string; status: AuditEntryStatus; supervisorPin: string }): Promise<{ markedCount: number } | { error: string }> {
+    if (!this._mockAuditSession || this._mockAuditSession.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    const session = this._mockAuditSession
+    const existing = new Set(session.entries.map(e => e.studentSnapshotIdx))
+    const fresh: AuditEntry[] = []
+    session.studentSnapshot.forEach((snap, idx) => {
+      if (snap.classId !== params.classId) return
+      if (existing.has(idx)) return
+      fresh.push({
+        id: uuidv4(), sessionId: params.sessionId, studentId: snap.id, studentSnapshotIdx: idx,
+        classId: snap.classId, grade: snap.grade, status: params.status, note: null,
+        source: 'SUPERVISOR', hadActiveDepartureAtAudit: false, submittedBy: 'supervisor',
+        submittedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      })
+    })
+    this._mockAuditSession = { ...session, entries: [...session.entries, ...fresh] }
+    return { markedCount: fresh.length }
+  }
 }

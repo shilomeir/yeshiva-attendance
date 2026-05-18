@@ -794,4 +794,16 @@ export class SupabaseApiClient implements IApiClient {
     if (data?.error) return { error: data.error }
     return data as AuditClassState
   }
+
+  async bulkMarkUnmarkedAuditEntries(params: { sessionId: string; classId: string; status: AuditEntryStatus; supervisorPin: string }): Promise<{ markedCount: number } | { error: string }> {
+    const { data, error } = await supabase.rpc('bulk_mark_unmarked_audit_entries', {
+      p_session_id: params.sessionId,
+      p_class_id: params.classId,
+      p_status: params.status,
+      p_supervisor_pin: params.supervisorPin,
+    })
+    if (error) throw error
+    if (data?.error) return { error: data.error }
+    return { markedCount: (data as { markedCount: number }).markedCount ?? 0 }
+  }
 }
