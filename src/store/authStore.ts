@@ -153,9 +153,22 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'yeshiva-auth',
-      // Only persist deviceToken - session state resets on page reload
+      // We persist:
+      //  - deviceToken: identifies the install across refreshes
+      //  - classSupervisor: a UI identity flag (classId + gradeName). Without
+      //    persistence the supervisor gets bounced to /login on every refresh,
+      //    which breaks mid-audit. The real authorisation gate is the PIN
+      //    check inside every audit RPC, NOT this flag, so persisting the
+      //    classId here doesn't grant write capability — it only restores
+      //    which dashboard to render.
+      // We intentionally do NOT persist:
+      //  - _adminPinSession / _supervisorPinSession: the PIN itself never
+      //    touches disk (PinPromptDialog re-asks on demand)
+      //  - isAdmin: derived in restoreAuth() from supabase.auth.getSession()
+      //  - currentUser: student login already handled by the Remember Me flow
       partialize: (state) => ({
         deviceToken: state.deviceToken,
+        classSupervisor: state.classSupervisor,
       }),
     }
   )

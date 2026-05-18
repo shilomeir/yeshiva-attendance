@@ -22,9 +22,12 @@ import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
 import { usePinPrompt } from '@/components/auth/PinPromptDialog'
+import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, AuditSessionWithDetails, AuditEntry } from '@/types'
+
+const AUDIT_POLL_FALLBACK_MS = 30_000
 
 // Thresholds
 const ON_CAMPUS_METERS = 300
@@ -107,12 +110,24 @@ export function RollCallPage() {
   const [activeSession, setActiveSession] = useState<AuditSessionWithDetails | null>(null)
   const [isClosingSession, setIsClosingSession] = useState(false)
 
-  // Load active session on mount
-  useEffect(() => {
-    api.getActiveAuditSession()
-      .then(setActiveSession)
-      .catch(() => {})
+  // Shared refresh — used by the initial mount, the realtime listener, the
+  // polling fallback, and the visibilitychange listener. Swallows errors so a
+  // transient network blip never blanks the dashboard.
+  const refreshActiveSession = useCallback(async () => {
+    try {
+      const fresh = await api.getActiveAuditSession()
+      setActiveSession(fresh)
+    } catch {
+      /* keep previous state on transient errors */
+    }
   }, [])
+
+  useEffect(() => { refreshActiveSession() }, [refreshActiveSession])
+
+  // Belt-and-braces backup for Realtime: poll every 30 s and on tab focus
+  // so a missed event after a long iOS suspend or a flaky 3G doesn't leave
+  // the admin staring at stale counts.
+  useReloadOnVisibilityAndInterval(refreshActiveSession, AUDIT_POLL_FALLBACK_MS)
 
   // Load class list when modal opens
   useEffect(() => {
@@ -314,21 +329,12 @@ export function RollCallPage() {
   useEffect(() => {
     const channel = supabase
       .channel('audit-admin-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, async () => {
-        const session = await api.getActiveAuditSession().catch(() => null)
-        setActiveSession(session)
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, async () => {
-        const session = await api.getActiveAuditSession().catch(() => null)
-        if (session) setActiveSession(session)
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, async () => {
-        const session = await api.getActiveAuditSession().catch(() => null)
-        if (session) setActiveSession(session)
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshActiveSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshActiveSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshActiveSession)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [])
+  }, [refreshActiveSession])
 
   useEffect(() => {
     return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }

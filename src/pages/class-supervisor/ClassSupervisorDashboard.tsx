@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Users, UserCheck, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
@@ -18,11 +18,14 @@ import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
+import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
 import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { toast } from '@/hooks/use-toast'
+
+const AUDIT_POLL_FALLBACK_MS = 30_000
 import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, CalendarDeparture, AuditSessionWithDetails, AuditEntryStatus } from '@/types'
 
@@ -496,33 +499,13 @@ export function ClassSupervisorDashboard() {
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Load active audit session on mount
-  useEffect(() => {
+  // Shared refresh — initial mount, realtime listeners, polling fallback, and
+  // the legacy broadcast channel all call this. Filters to sessions covering
+  // the supervisor's own class; everything else resets local audit state.
+  const refreshAuditSession = useCallback(async () => {
     if (!classId) return
-    api.getActiveAuditSession()
-      .then((session) => {
-        if (session && session.classIds.includes(classId)) {
-          setActiveAuditSession(session)
-          // Rebuild local entry map from existing entries
-          const map = new Map<string, AuditEntryStatus>()
-          for (const e of session.entries) {
-            if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
-          }
-          setAuditEntries(map)
-        }
-      })
-      .catch(() => {})
-  }, [classId])
-
-  // Subscribe to audit session realtime changes + manual audit broadcasts.
-  // We listen to both audit_sessions (lifecycle) AND audit_entries (per-mark)
-  // so a re-mark by the admin or another supervisor on the same class shows up
-  // here without a manual refresh.
-  useEffect(() => {
-    if (!classId) return
-
-    const refreshSession = async () => {
-      const session = await api.getActiveAuditSession().catch(() => null)
+    try {
+      const session = await api.getActiveAuditSession()
       if (session && session.classIds.includes(classId)) {
         setActiveAuditSession(session)
         const map = new Map<string, AuditEntryStatus>()
@@ -534,31 +517,49 @@ export function ClassSupervisorDashboard() {
         setActiveAuditSession(null)
         setAuditEntries(new Map())
       }
+    } catch {
+      /* keep previous state on transient errors */
     }
+  }, [classId])
+
+  // Initial load
+  useEffect(() => { refreshAuditSession() }, [refreshAuditSession])
+
+  // Belt-and-braces backup for Realtime: poll every 30 s and on tab focus
+  // so a missed event after a long iOS suspend or a flaky 3G doesn't leave
+  // the supervisor staring at stale entries.
+  useReloadOnVisibilityAndInterval(refreshAuditSession, AUDIT_POLL_FALLBACK_MS)
+
+  // Subscribe to audit session realtime changes + manual audit broadcasts.
+  // We listen to both audit_sessions (lifecycle) AND audit_entries (per-mark)
+  // so a re-mark by the admin or another supervisor on the same class shows up
+  // here without a manual refresh.
+  useEffect(() => {
+    if (!classId) return
 
     const auditCh = supabase
       .channel('audit-supervisor-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshAuditSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshAuditSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshAuditSession)
       .subscribe()
 
     // Legacy broadcast channel — admin still emits this from RollCallPage so a
     // supervisor in the affected class jumps to the new session without waiting
-    // for the realtime DB stream to land. We call refreshSession so the entries
-    // map is built from session.entries (AUTO_DEFAULT seeds included) instead
-    // of starting empty.
+    // for the realtime DB stream to land. We call refreshAuditSession so the
+    // entries map is built from session.entries (AUTO_DEFAULT seeds included)
+    // instead of starting empty.
     const broadcastCh = supabase
       .channel('audit-control')
       .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
         const { classIds } = payload as { classIds: string[]; sessionId?: string }
         if (!classIds.includes(classId)) return
-        refreshSession()
+        refreshAuditSession()
       })
       .subscribe()
 
     return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
-  }, [classId])
+  }, [classId, refreshAuditSession])
 
   if (!classSupervisor) return null
 
