@@ -61,8 +61,20 @@ function PageFallback() {
 export default function App() {
   const { initialize } = useSyncStore()
   const { subscribeToRealtime } = useStudentsStore()
-  const { currentUser } = useAuthStore()
+  const { currentUser, restoreAuth } = useAuthStore()
   const [showSplash, setShowSplash] = useState(true)
+  const [authReady, setAuthReady] = useState(false)
+
+  // Re-hydrate isAdmin from Supabase Auth before letting any guard route fire.
+  // Without this gate the admin's first paint after refresh sees isAdmin=false
+  // and AdminGuard redirects to /login even though the underlying Supabase
+  // session is still valid. Supervisors have no Supabase Auth and still need
+  // to re-login on refresh — tracked for a Phase 2 follow-up.
+  useEffect(() => {
+    let cancelled = false
+    restoreAuth().finally(() => { if (!cancelled) setAuthReady(true) })
+    return () => { cancelled = true }
+  }, [restoreAuth])
 
   useEffect(() => {
     const cleanup = initialize()
@@ -105,6 +117,9 @@ export default function App() {
     <PinPromptProvider>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
+      {!authReady ? (
+        <PageFallback />
+      ) : (
       <Suspense fallback={<PageFallback />}>
         <Routes>
           {/* Auth */}
@@ -157,6 +172,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Suspense>
+      )}
     </PinPromptProvider>
   )
 }

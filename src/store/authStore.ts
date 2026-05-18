@@ -30,6 +30,11 @@ interface AuthState {
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
   loginClassSupervisor: (pin: string) => Promise<boolean>
   changeAdminPin: (oldPin: string, newPin: string) => Promise<ChangeAdminPinResult>
+  /** Rehydrate the isAdmin flag from the Supabase Auth session on app boot.
+   *  Only deviceToken is persisted by Zustand, so without this every refresh
+   *  would bounce admin/supervisor users back to /login. PIN cache stays empty
+   *  by design — the next audit RPC will trigger PinPromptDialog. */
+  restoreAuth: () => Promise<void>
   logout: () => void
   clearError: () => void
   getAdminPin: () => string | null
@@ -95,6 +100,20 @@ export const useAuthStore = create<AuthState>()(
           return true
         }
         return false
+      },
+
+      restoreAuth: async () => {
+        // Supabase Auth persists its own session in localStorage. If the admin
+        // signed in via loginAdmin(), that session survives refresh; we just
+        // need to mirror it into the Zustand flag so AdminGuard stops bouncing.
+        try {
+          const { data: { session } } = await supabase.auth.getSession()
+          if (session?.user?.email === ADMIN_EMAIL) {
+            set({ isAdmin: true })
+          }
+        } catch {
+          // best-effort: a failed session check shouldn't block app startup
+        }
       },
 
       changeAdminPin: async (oldPin: string, newPin: string) => {

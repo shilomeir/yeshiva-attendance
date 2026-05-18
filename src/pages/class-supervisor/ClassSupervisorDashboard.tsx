@@ -543,30 +543,17 @@ export function ClassSupervisorDashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshSession)
       .subscribe()
 
+    // Legacy broadcast channel — admin still emits this from RollCallPage so a
+    // supervisor in the affected class jumps to the new session without waiting
+    // for the realtime DB stream to land. We call refreshSession so the entries
+    // map is built from session.entries (AUTO_DEFAULT seeds included) instead
+    // of starting empty.
     const broadcastCh = supabase
       .channel('audit-control')
       .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
-        const { classIds, sessionId } = payload as { classIds: string[]; sessionId?: string }
+        const { classIds } = payload as { classIds: string[]; sessionId?: string }
         if (!classIds.includes(classId)) return
-        if (sessionId) {
-          api.getAuditSession(sessionId)
-            .then((session) => {
-              if (session) {
-                setActiveAuditSession(session)
-                setAuditEntries(new Map())
-              }
-            })
-            .catch(() => {})
-        } else {
-          api.getActiveAuditSession()
-            .then((session) => {
-              if (session) {
-                setActiveAuditSession(session)
-                setAuditEntries(new Map())
-              }
-            })
-            .catch(() => {})
-        }
+        refreshSession()
       })
       .subscribe()
 
