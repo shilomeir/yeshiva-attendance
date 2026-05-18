@@ -3,6 +3,7 @@ import {
   Users, UserCheck, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
   Loader2, AlertOctagon, FileText, ShieldAlert, ClipboardList,
+  MessageSquare, MessageSquarePlus,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -451,6 +452,9 @@ export function ClassSupervisorDashboard() {
   // Audit session state
   const [activeAuditSession, setActiveAuditSession] = useState<AuditSessionWithDetails | null>(null)
   const [auditEntries, setAuditEntries] = useState<Map<string, AuditEntryStatus>>(new Map())
+  const [auditNotes, setAuditNotes] = useState<Map<string, string | null>>(new Map())
+  const [noteDialog, setNoteDialog] = useState<{ studentId: string; studentName: string; draft: string } | null>(null)
+  const [isSavingNote, setIsSavingNote] = useState(false)
   const [showAuditWarning, setShowAuditWarning] = useState(false)
   const [isSubmittingAudit, setIsSubmittingAudit] = useState<string | null>(null)
   const [isFinishingAudit, setIsFinishingAudit] = useState(false)
@@ -510,13 +514,19 @@ export function ClassSupervisorDashboard() {
       if (session && session.classIds.includes(classId)) {
         setActiveAuditSession(session)
         const map = new Map<string, AuditEntryStatus>()
+        const notes = new Map<string, string | null>()
         for (const e of session.entries) {
-          if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
+          if (e.classId === classId && e.studentId) {
+            map.set(e.studentId, e.status)
+            notes.set(e.studentId, e.note)
+          }
         }
         setAuditEntries(map)
+        setAuditNotes(notes)
       } else {
         setActiveAuditSession(null)
         setAuditEntries(new Map())
+        setAuditNotes(new Map())
       }
     } catch {
       /* keep previous state on transient errors */
@@ -561,8 +571,6 @@ export function ClassSupervisorDashboard() {
 
     return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
   }, [classId, refreshAuditSession])
-
-  if (!classSupervisor) return null
 
   const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
@@ -612,16 +620,29 @@ export function ClassSupervisorDashboard() {
     })
   }, [myClassStudents, auditEntries])
 
+  // Derived: is THIS supervisor's class in FINISHED state?
+  const isClassFinished = useMemo(() => {
+    if (!activeAuditSession || !classId) return false
+    return activeAuditSession.classStates.find((cs) => cs.classId === classId)?.status === 'FINISHED'
+  }, [activeAuditSession, classId])
+
+  // Auth gate must come AFTER all hook calls to satisfy the Rules of Hooks —
+  // otherwise an unmount triggered by logout would render fewer hooks than the
+  // previous render and React would throw.
+  if (!classSupervisor) return null
+
   const handleMarkStudent = async (studentId: string, status: AuditEntryStatus) => {
-    if (!activeAuditSession) return
+    if (!activeAuditSession || isClassFinished) return
     const pin = await requestPin('supervisor', 'נדרש PIN אחראי כיתה לסימון נוכחות.')
     if (!pin) return // user cancelled
     setIsSubmittingAudit(studentId)
     try {
+      const existingNote = auditNotes.get(studentId) ?? undefined
       const result = await api.submitAuditEntry({
         sessionId: activeAuditSession.id,
         studentId,
         status,
+        note: existingNote || undefined,
         supervisorPin: pin,
       })
       if ('error' in result) {
@@ -630,7 +651,7 @@ export function ClassSupervisorDashboard() {
           toast({ title: 'PIN שגוי', description: 'נסה שוב — תתבקש PIN חדש', variant: 'destructive' })
         } else if (result.error === 'SESSION_CLOSED' || result.error === 'SESSION_NOT_FOUND') {
           setActiveAuditSession(null)
-          setAuditEntries(new Map())
+          setAuditEntries(new Map()); setAuditNotes(new Map())
           toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בסימון נוכחות', description: result.error, variant: 'destructive' })
@@ -642,6 +663,44 @@ export function ClassSupervisorDashboard() {
       toast({ title: 'שגיאה בסימון נוכחות', description: getErrorMessage(err, 'שמירת הסימון נכשלה'), variant: 'destructive' })
     } finally {
       setIsSubmittingAudit(null)
+    }
+  }
+
+  const handleSaveNote = async () => {
+    if (!activeAuditSession || !noteDialog || isClassFinished) return
+    const currentStatus = auditEntries.get(noteDialog.studentId)
+    if (!currentStatus) {
+      toast({ title: 'יש לסמן סטטוס לפני הוספת הערה', variant: 'destructive' })
+      return
+    }
+    const trimmed = noteDialog.draft.trim()
+    const pin = await requestPin('supervisor', 'נדרש PIN אחראי כיתה לעדכון הערה.')
+    if (!pin) return
+    setIsSavingNote(true)
+    try {
+      const result = await api.submitAuditEntry({
+        sessionId: activeAuditSession.id,
+        studentId: noteDialog.studentId,
+        status: currentStatus,
+        note: trimmed || undefined,
+        supervisorPin: pin,
+      })
+      if ('error' in result) {
+        if (result.error === 'AUTH') {
+          clearPin('supervisor')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
+        } else {
+          toast({ title: 'שגיאה בשמירת הערה', description: result.error, variant: 'destructive' })
+        }
+        return
+      }
+      setAuditNotes((prev) => new Map(prev).set(noteDialog.studentId, trimmed || null))
+      setNoteDialog(null)
+      toast({ title: trimmed ? 'ההערה נשמרה' : 'ההערה נמחקה' })
+    } catch (err) {
+      toast({ title: 'שגיאה בשמירת הערה', description: getErrorMessage(err, 'שמירת ההערה נכשלה'), variant: 'destructive' })
+    } finally {
+      setIsSavingNote(false)
     }
   }
 
@@ -700,7 +759,7 @@ export function ClassSupervisorDashboard() {
           toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
         } else if (result.error === 'SESSION_CLOSED' || result.error === 'SESSION_NOT_FOUND') {
           setActiveAuditSession(null)
-          setAuditEntries(new Map())
+          setAuditEntries(new Map()); setAuditNotes(new Map())
           toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בסימון מרובה', description: result.error, variant: 'destructive' })
@@ -763,8 +822,14 @@ export function ClassSupervisorDashboard() {
                 style={{ width: `${myClassStudents.length === 0 ? 0 : Math.round((markedCount / myClassStudents.length) * 100)}%` }}
               />
             </div>
-            {/* Bulk action — only when there's something left to fill */}
-            {unmarkedCount > 0 && (
+            {isClassFinished && (
+              <div className="mb-3 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-semibold text-green-700 dark:border-green-700 dark:bg-green-950/20 dark:text-green-400 flex items-center justify-center gap-2">
+                <CheckCircle2 className="h-4 w-4" />
+                הביקורת של הכיתה הסתיימה
+              </div>
+            )}
+            {/* Bulk action — only when there's something left to fill AND class isn't finished */}
+            {unmarkedCount > 0 && !isClassFinished && (
               <button
                 onClick={handleBulkMarkInYeshiva}
                 disabled={isBulkSubmitting || !!isSubmittingAudit}
@@ -777,45 +842,78 @@ export function ClassSupervisorDashboard() {
             <div className="flex flex-col gap-1.5 mb-3">
               {sortedClassStudents.map((snap) => {
                 const status = auditEntries.get(snap.id)
+                const note = auditNotes.get(snap.id)
                 const isSubmitting = isSubmittingAudit === snap.id
+                const statusLabel =
+                  status === 'IN_YESHIVA' ? 'בישיבה' :
+                  status === 'OUT_WITH_PERMISSION' ? "ביצ' רשות" :
+                  status === 'OUT_WITHOUT_PERMISSION' ? "ביצ' ללא רשות" : null
+                const statusColor =
+                  status === 'IN_YESHIVA' ? 'bg-green-500' :
+                  status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500' :
+                  status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500' : 'bg-gray-400'
                 return (
-                  <div key={snap.id} className="flex items-center justify-between rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2 gap-3">
-                    <span className="text-sm font-medium text-[var(--text)] flex-1 truncate">{snap.fullName}</span>
-                    {isSubmitting ? (
-                      <Loader2 className="h-4 w-4 animate-spin text-amber-500 shrink-0" />
-                    ) : (
-                      <div className="flex gap-1.5 shrink-0">
-                        <button
-                          onClick={() => handleMarkStudent(snap.id, 'IN_YESHIVA')}
-                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'IN_YESHIVA' ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
-                        >בישיבה</button>
-                        <button
-                          onClick={() => handleMarkStudent(snap.id, 'OUT_WITH_PERMISSION')}
-                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500 text-white' : 'border border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/20'}`}
-                        >ביצ׳ רשות</button>
-                        <button
-                          onClick={() => handleMarkStudent(snap.id, 'OUT_WITHOUT_PERMISSION')}
-                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
-                        >ביצ׳ ללא רשות</button>
-                      </div>
+                  <div key={snap.id} className="flex flex-col gap-1 rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-[var(--text)] flex-1 truncate">{snap.fullName}</span>
+                      {isSubmitting ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-amber-500 shrink-0" />
+                      ) : isClassFinished ? (
+                        statusLabel ? (
+                          <span className={`shrink-0 rounded-md px-2.5 py-1 text-xs font-semibold text-white ${statusColor}`}>{statusLabel}</span>
+                        ) : (
+                          <span className="shrink-0 rounded-md border border-gray-300 px-2.5 py-1 text-xs font-semibold text-gray-500 dark:border-gray-700 dark:text-gray-400">לא סומן</span>
+                        )
+                      ) : (
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => handleMarkStudent(snap.id, 'IN_YESHIVA')}
+                            className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'IN_YESHIVA' ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
+                          >בישיבה</button>
+                          <button
+                            onClick={() => handleMarkStudent(snap.id, 'OUT_WITH_PERMISSION')}
+                            className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500 text-white' : 'border border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/20'}`}
+                          >ביצ׳ רשות</button>
+                          <button
+                            onClick={() => handleMarkStudent(snap.id, 'OUT_WITHOUT_PERMISSION')}
+                            className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
+                          >ביצ׳ ללא רשות</button>
+                          {status && (
+                            <button
+                              onClick={() => setNoteDialog({ studentId: snap.id, studentName: snap.fullName, draft: note ?? '' })}
+                              title={note ? 'ערוך הערה' : 'הוסף הערה'}
+                              className={`rounded-md p-1 transition-colors ${note ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400' : 'border border-amber-300 text-amber-600 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-950/20'}`}
+                            >
+                              {note ? <MessageSquare className="h-3.5 w-3.5" /> : <MessageSquarePlus className="h-3.5 w-3.5" />}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {note && (
+                      <p className="text-[11px] text-amber-700 dark:text-amber-400 ps-1 truncate">
+                        <MessageSquare className="inline h-3 w-3 me-1" />{note}
+                      </p>
                     )}
                   </div>
                 )
               })}
             </div>
-            <button
-              onClick={handleFinishAudit}
-              disabled={isFinishingAudit}
-              className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-60 flex items-center justify-center gap-2"
-            >
-              {isFinishingAudit ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              סיום ביקורת הכיתה
-              {unmarkedCount > 0 && (
-                <span className="rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
-                  {unmarkedCount} לא מסומנים
-                </span>
-              )}
-            </button>
+            {!isClassFinished && (
+              <button
+                onClick={handleFinishAudit}
+                disabled={isFinishingAudit}
+                className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {isFinishingAudit ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                סיום ביקורת הכיתה
+                {unmarkedCount > 0 && (
+                  <span className="rounded-full bg-white/30 px-1.5 py-0.5 text-xs">
+                    {unmarkedCount} לא מסומנים
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         )}
 
@@ -1074,6 +1172,45 @@ export function ClassSupervisorDashboard() {
             >
               {isFinishingAudit ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
               סיים בכל זאת
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Audit entry note dialog */}
+      <Dialog open={!!noteDialog} onOpenChange={(open) => { if (!open) setNoteDialog(null) }}>
+        <DialogContent dir="rtl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MessageSquare className="h-5 w-5 text-amber-500" />
+              הערה — {noteDialog?.studentName}
+            </DialogTitle>
+            <DialogDescription>
+              הערה אופציונלית לסימון (למשל "ראיתי במכולת"). עד 500 תווים.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            value={noteDialog?.draft ?? ''}
+            onChange={(e) => setNoteDialog((prev) => prev ? { ...prev, draft: e.target.value.slice(0, 500) } : prev)}
+            placeholder="הוסף הערה..."
+            rows={4}
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+            autoFocus
+          />
+          <div className="flex justify-between items-center text-xs text-[var(--text-muted)]">
+            <span>{(noteDialog?.draft ?? '').length}/500</span>
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button variant="outline" onClick={() => setNoteDialog(null)} className="flex-1">
+              ביטול
+            </Button>
+            <Button
+              className="flex-1 bg-amber-500 hover:bg-amber-600 text-white"
+              disabled={isSavingNote}
+              onClick={handleSaveNote}
+            >
+              {isSavingNote ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+              שמור
             </Button>
           </div>
         </DialogContent>

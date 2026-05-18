@@ -53,8 +53,15 @@ export function AuditMissionControl({ session, isClosing, onClose }: Props) {
     }
   })
 
+  // Alert queue: explicitly marked as OUT_WITHOUT_PERMISSION, or auto-flagged
+  // by GPS distance (ORANGE > 1 km / RED > 5 km from campus).
   const alertEntries = allEntries
-    .filter((e) => e.status === 'OUT_WITHOUT_PERMISSION')
+    .filter(
+      (e) =>
+        e.status === 'OUT_WITHOUT_PERMISSION' ||
+        e.distanceBucket === 'ORANGE' ||
+        e.distanceBucket === 'RED',
+    )
     .map((e) => ({ entry: e, student: session.studentSnapshot[e.studentSnapshotIdx] }))
     .filter(({ student }) => student != null)
 
@@ -184,30 +191,51 @@ export function AuditMissionControl({ session, isClosing, onClose }: Props) {
             </p>
           </div>
           <div className="rounded-lg border border-red-200 dark:border-red-800/50 bg-white/70 dark:bg-red-950/20 divide-y divide-red-100 dark:divide-red-900/30">
-            {alertEntries.map(({ entry, student }) => (
-              <div key={entry.id} className="flex items-center gap-3 px-3 py-2">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/40 text-[10px] font-bold text-red-700 dark:text-red-300">
-                  {student.fullName.slice(0, 2)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-[var(--text)] truncate">{student.fullName}</p>
-                  <p className="text-[10px] text-[var(--text-muted)] truncate">{entry.classId}</p>
-                </div>
-                <div className="text-end shrink-0">
-                  <p className="text-[10px] text-[var(--text-muted)]">
-                    {new Date(entry.submittedAt).toLocaleTimeString('he-IL', {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </p>
-                  {entry.note && (
-                    <p className="text-[10px] text-red-600 dark:text-red-400 max-w-[120px] truncate">
-                      {entry.note}
+            {alertEntries.map(({ entry, student }) => {
+              const distanceLabel =
+                entry.distanceFromCampusM == null
+                  ? null
+                  : entry.distanceFromCampusM < 1000
+                    ? `${Math.round(entry.distanceFromCampusM)} מ׳`
+                    : `${(entry.distanceFromCampusM / 1000).toFixed(1)} ק״מ`
+              const bucketColor =
+                entry.distanceBucket === 'RED'
+                  ? 'text-red-700 dark:text-red-400 font-bold'
+                  : entry.distanceBucket === 'ORANGE'
+                    ? 'text-orange-700 dark:text-orange-400'
+                    : 'text-[var(--text-muted)]'
+              const isExplicit = entry.status === 'OUT_WITHOUT_PERMISSION'
+              return (
+                <div key={entry.id} className="flex items-center gap-3 px-3 py-2">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/40 text-[10px] font-bold text-red-700 dark:text-red-300">
+                    {student.fullName.slice(0, 2)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-[var(--text)] truncate">{student.fullName}</p>
+                    <p className="text-[10px] text-[var(--text-muted)] truncate">
+                      {entry.classId}
+                      {!isExplicit && entry.distanceBucket && ' · GPS'}
                     </p>
-                  )}
+                  </div>
+                  <div className="text-end shrink-0 flex flex-col items-end gap-0.5">
+                    <p className="text-[10px] text-[var(--text-muted)]">
+                      {new Date(entry.submittedAt).toLocaleTimeString('he-IL', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </p>
+                    {distanceLabel && (
+                      <p className={`text-[10px] ${bucketColor}`}>{distanceLabel}</p>
+                    )}
+                    {entry.note && (
+                      <p className="text-[10px] text-red-600 dark:text-red-400 max-w-[120px] truncate">
+                        {entry.note}
+                      </p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
