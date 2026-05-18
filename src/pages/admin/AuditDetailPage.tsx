@@ -191,7 +191,7 @@ export function AuditDetailPage() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     const slug = (session.title ?? new Date(session.startedAt).toISOString().slice(0, 16))
-      .replace(/[^\w֐-׿\-]+/g, '_')
+      .replace(/[^\w֐-׿-]+/g, '_')
     a.href = url
     a.download = `audit_${slug}.csv`
     a.click()

@@ -572,8 +572,6 @@ export function ClassSupervisorDashboard() {
     return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
   }, [classId, refreshAuditSession])
 
-  if (!classSupervisor) return null
-
   const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
 
@@ -627,6 +625,11 @@ export function ClassSupervisorDashboard() {
     if (!activeAuditSession || !classId) return false
     return activeAuditSession.classStates.find((cs) => cs.classId === classId)?.status === 'FINISHED'
   }, [activeAuditSession, classId])
+
+  // Auth gate must come AFTER all hook calls to satisfy the Rules of Hooks —
+  // otherwise an unmount triggered by logout would render fewer hooks than the
+  // previous render and React would throw.
+  if (!classSupervisor) return null
 
   const handleMarkStudent = async (studentId: string, status: AuditEntryStatus) => {
     if (!activeAuditSession || isClassFinished) return
