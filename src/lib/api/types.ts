@@ -181,4 +181,8 @@ export interface IApiClient {
   closeAuditSession(id: string, adminPin: string): Promise<AuditSessionWithDetails | { error: string }>
   submitAuditEntry(params: { sessionId: string; studentId: string; status: AuditEntryStatus; note?: string; supervisorPin: string }): Promise<AuditEntry | { error: string }>
   finishClassAudit(params: { sessionId: string; classId: string; note?: string; supervisorPin: string }): Promise<AuditClassState | { error: string }>
+  /** Bulk-seed a status for every student in the class who doesn't yet have an
+   *  entry. ON CONFLICT DO NOTHING preserves AUTO_DEFAULT seeds and prior
+   *  manual marks. Returns the count of rows actually inserted. */
+  bulkMarkUnmarkedAuditEntries(params: { sessionId: string; classId: string; status: AuditEntryStatus; supervisorPin: string }): Promise<{ markedCount: number } | { error: string }>
 }

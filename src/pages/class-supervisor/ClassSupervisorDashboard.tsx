@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Users, UserCheck, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
@@ -454,6 +454,7 @@ export function ClassSupervisorDashboard() {
   const [showAuditWarning, setShowAuditWarning] = useState(false)
   const [isSubmittingAudit, setIsSubmittingAudit] = useState<string | null>(null)
   const [isFinishingAudit, setIsFinishingAudit] = useState(false)
+  const [isBulkSubmitting, setIsBulkSubmitting] = useState(false)
 
   // Derive safely before hooks — avoids conditional-return-before-useEffect violation
   const classId = classSupervisor?.classId ?? ''
@@ -600,6 +601,16 @@ export function ClassSupervisorDashboard() {
     ? activeAuditSession.studentSnapshot.filter(s => s.classId === classId)
     : []
   const unmarkedCount = myClassStudents.length - auditEntries.size
+  const markedCount = auditEntries.size
+  // Sort unmarked students to the top so the supervisor can focus on what's
+  // left; marked students stay visible below for quick correction.
+  const sortedClassStudents = useMemo(() => {
+    return [...myClassStudents].sort((a, b) => {
+      const aMarked = auditEntries.has(a.id) ? 1 : 0
+      const bMarked = auditEntries.has(b.id) ? 1 : 0
+      return aMarked - bMarked
+    })
+  }, [myClassStudents, auditEntries])
 
   const handleMarkStudent = async (studentId: string, status: AuditEntryStatus) => {
     if (!activeAuditSession) return
@@ -671,6 +682,44 @@ export function ClassSupervisorDashboard() {
     }
   }
 
+  const handleBulkMarkInYeshiva = async () => {
+    if (!activeAuditSession || unmarkedCount === 0) return
+    const pin = await requestPin('supervisor', 'נדרש PIN לסימון מהיר של הנותרים.')
+    if (!pin) return
+    setIsBulkSubmitting(true)
+    try {
+      const result = await api.bulkMarkUnmarkedAuditEntries({
+        sessionId: activeAuditSession.id,
+        classId,
+        status: 'IN_YESHIVA',
+        supervisorPin: pin,
+      })
+      if ('error' in result) {
+        if (result.error === 'AUTH') {
+          clearPin('supervisor')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
+        } else if (result.error === 'SESSION_CLOSED' || result.error === 'SESSION_NOT_FOUND') {
+          setActiveAuditSession(null)
+          setAuditEntries(new Map())
+          toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
+        } else {
+          toast({ title: 'שגיאה בסימון מרובה', description: result.error, variant: 'destructive' })
+        }
+      } else if (result.markedCount === 0) {
+        toast({ title: 'אין תלמידים לא-מסומנים' })
+      } else {
+        toast({ title: `סומנו ${result.markedCount} תלמידים כבישיבה` })
+        // Realtime will deliver the inserts within ~1s; refresh now so the UI
+        // updates immediately without waiting for the round-trip.
+        await refreshAuditSession()
+      }
+    } catch (err) {
+      toast({ title: 'שגיאה בסימון מרובה', description: getErrorMessage(err, 'הסימון נכשל'), variant: 'destructive' })
+    } finally {
+      setIsBulkSubmitting(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[var(--bg)] flex flex-col" dir="rtl">
       {/* Header */}
@@ -694,15 +743,39 @@ export function ClassSupervisorDashboard() {
         {/* Active audit session banner */}
         {activeAuditSession && (
           <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
-            <div className="flex items-center gap-2 mb-3">
+            <div className="flex items-center gap-2 mb-2">
               <ClipboardList className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
-              <p className="font-semibold text-amber-700 dark:text-amber-300">
-                ביקורת פנימית פעילה — סמן נוכחות
-                {activeAuditSession.title && ` (${activeAuditSession.title})`}
-              </p>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-amber-700 dark:text-amber-300">
+                  ביקורת פנימית פעילה — סמן נוכחות
+                  {activeAuditSession.title && ` (${activeAuditSession.title})`}
+                </p>
+                <p className="text-xs text-amber-600/90 dark:text-amber-400/90 mt-0.5">
+                  {markedCount} מתוך {myClassStudents.length} סומנו
+                  {unmarkedCount > 0 && ` · נותרו ${unmarkedCount}`}
+                </p>
+              </div>
             </div>
+            {/* Progress bar */}
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-amber-200 dark:bg-amber-900/50 mb-3">
+              <div
+                className="h-full bg-amber-500 transition-all duration-300"
+                style={{ width: `${myClassStudents.length === 0 ? 0 : Math.round((markedCount / myClassStudents.length) * 100)}%` }}
+              />
+            </div>
+            {/* Bulk action — only when there's something left to fill */}
+            {unmarkedCount > 0 && (
+              <button
+                onClick={handleBulkMarkInYeshiva}
+                disabled={isBulkSubmitting || !!isSubmittingAudit}
+                className="mb-3 w-full rounded-lg border border-green-300 bg-green-50 py-2 text-sm font-semibold text-green-700 hover:bg-green-100 disabled:opacity-60 dark:border-green-700 dark:bg-green-950/20 dark:text-green-400 dark:hover:bg-green-950/40 flex items-center justify-center gap-2"
+              >
+                {isBulkSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                סמן את כל הנותרים ({unmarkedCount}) כבישיבה
+              </button>
+            )}
             <div className="flex flex-col gap-1.5 mb-3">
-              {myClassStudents.map((snap) => {
+              {sortedClassStudents.map((snap) => {
                 const status = auditEntries.get(snap.id)
                 const isSubmitting = isSubmittingAudit === snap.id
                 return (
