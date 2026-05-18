@@ -182,6 +182,13 @@ export function RollCallPage() {
       toast({ title: 'ביקורת פנימית נפתחה', description: `${result.totalStudentsSnapshot} תלמידים בביקורת` })
 
       if (auditMode === 'location') {
+        // Send Web Push to all students in the session so backgrounded devices
+        // open the app and share GPS. Fire-and-forget — don't block the UI.
+        api.sendPushNotification(
+          'ביקורת פנימית — נדרש מיקום',
+          'המנהל מבקש לדעת את מיקומך — פתח את האפליקציה ושתף מיקום',
+          { studentIds: result.studentSnapshot.map((s) => s.id) },
+        ).catch(() => { /* best-effort; don't fail the audit open */ })
         runLocationRollCall()
       } else {
         // Broadcast to supervisors

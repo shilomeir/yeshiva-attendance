@@ -902,4 +902,39 @@ export class MockApiClient implements IApiClient {
     this._mockAuditSession = { ...session, entries: [...session.entries, ...fresh] }
     return { markedCount: fresh.length }
   }
+
+  async submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }> {
+    const session = this._mockAuditSession
+    if (!session || session.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    if (session.mode !== 'LOCATION') return { error: 'WRONG_MODE' }
+    const CAMPUS_LAT = 31.5253, CAMPUS_LNG = 35.1056
+    const toRad = (d: number) => d * Math.PI / 180
+    const R = 6371000
+    const dLat = toRad(params.gpsLat - CAMPUS_LAT)
+    const dLng = toRad(params.gpsLng - CAMPUS_LNG)
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(CAMPUS_LAT)) * Math.cos(toRad(params.gpsLat)) * Math.sin(dLng / 2) ** 2
+    const distM = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))
+    const bucket = distM <= 300 ? 'GREEN' : distM <= 1000 ? 'BLUE' : distM <= 5000 ? 'ORANGE' : 'RED'
+    const status: AuditEntryStatus = bucket === 'GREEN' ? 'IN_YESHIVA' : 'OUT_WITH_PERMISSION'
+    const snapIdx = session.studentSnapshot.findIndex(s => s.id === params.studentId)
+    if (snapIdx === -1) return { error: 'STUDENT_NOT_IN_SESSION' }
+    const snap = session.studentSnapshot[snapIdx]
+    const existing = session.entries.findIndex(e => e.studentSnapshotIdx === snapIdx)
+    const entry: AuditEntry = {
+      id: uuidv4(), sessionId: params.sessionId, studentId: params.studentId,
+      studentSnapshotIdx: snapIdx, classId: snap.classId, grade: snap.grade,
+      status, note: null, source: 'AUTO_GPS', hadActiveDepartureAtAudit: false,
+      submittedBy: 'student', submittedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      gpsLat: params.gpsLat, gpsLng: params.gpsLng,
+      gpsAccuracyM: params.accuracyM ?? null, distanceFromCampusM: distM,
+      distanceBucket: bucket as AuditEntry['distanceBucket'],
+      gpsStatus: (params.gpsStatus ?? 'OK') as AuditEntry['gpsStatus'],
+    }
+    const entries = [...session.entries]
+    if (existing >= 0) entries[existing] = entry
+    else entries.push(entry)
+    this._mockAuditSession = { ...session, entries }
+    return { distanceM: distM, distanceBucket: bucket, status }
+  }
 }

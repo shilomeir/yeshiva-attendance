@@ -806,4 +806,20 @@ export class SupabaseApiClient implements IApiClient {
     if (data?.error) return { error: data.error }
     return { markedCount: (data as { markedCount: number }).markedCount ?? 0 }
   }
+
+  async submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }> {
+    const { data, error } = await supabase.rpc('submit_student_audit_gps', {
+      p_session_id:   params.sessionId,
+      p_student_id:   params.studentId,
+      p_device_token: params.deviceToken,
+      p_gps_lat:      params.gpsLat,
+      p_gps_lng:      params.gpsLng,
+      p_accuracy_m:   params.accuracyM ?? null,
+      p_gps_status:   params.gpsStatus ?? 'OK',
+    })
+    if (error) throw error
+    if (data?.error) return { error: data.error as string }
+    const r = data as { distanceM: number; distanceBucket: string; status: AuditEntryStatus }
+    return { distanceM: r.distanceM, distanceBucket: r.distanceBucket, status: r.status }
+  }
 }

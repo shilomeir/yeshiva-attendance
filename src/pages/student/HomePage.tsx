@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Clock, Undo2, Calendar } from 'lucide-react'
+import { Clock, Undo2, Calendar, MapPin, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { StatusButtons } from '@/components/student/StatusButtons'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
@@ -9,7 +9,7 @@ import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
-import type { Student, CalendarDeparture } from '@/types'
+import type { Student, CalendarDeparture, AuditSessionWithDetails } from '@/types'
 
 function getTimeStr(isoStr: string): string {
   const d = new Date(isoStr)
@@ -80,11 +80,15 @@ function HistoryWidget({ count }: { count: number }) {
 }
 
 export function HomePage() {
-  const { currentUser } = useAuthStore()
+  const { currentUser, deviceToken } = useAuthStore()
   const [student, setStudent] = useState<Student | null>(currentUser)
   const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; departureId: string } | null>(null)
   const [activeDeparture, setActiveDeparture] = useState<CalendarDeparture | null>(null)
   const [recentCount, setRecentCount] = useState(0)
+  // LOCATION-mode audit GPS state
+  const [activeAuditSession, setActiveAuditSession] = useState<AuditSessionWithDetails | null>(null)
+  const [gpsShareState, setGpsShareState] = useState<'idle' | 'capturing' | 'done' | 'error'>('idle')
+  const [gpsShareResult, setGpsShareResult] = useState<{ distanceM: number; distanceBucket: string } | null>(null)
   const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -124,6 +128,59 @@ export function HomePage() {
     return () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current) }
   }, [undoCheckout])
 
+  // Check for an active LOCATION-mode audit that includes this student's class.
+  const checkAuditSession = useCallback(async () => {
+    if (!currentUser) return
+    try {
+      const session = await api.getActiveAuditSession()
+      if (session && session.mode === 'LOCATION' && session.classIds.includes(currentUser.classId)) {
+        setActiveAuditSession(session)
+      } else {
+        setActiveAuditSession(null)
+        if (!session) setGpsShareState('idle') // reset when session ends
+      }
+    } catch { /* ignore */ }
+  }, [currentUser?.id, currentUser?.classId])
+
+  useEffect(() => {
+    checkAuditSession()
+    const id = setInterval(checkAuditSession, 30_000)
+    return () => clearInterval(id)
+  }, [checkAuditSession])
+
+  const handleShareGps = useCallback(async () => {
+    if (!currentUser || !activeAuditSession || !deviceToken) return
+    setGpsShareState('capturing')
+    try {
+      const pos = await getCurrentPosition()
+      if (!isGPSResult(pos)) {
+        setGpsShareState('error')
+        toast({ title: 'לא ניתן לגשת למיקום', description: 'אפשר גישה למיקום בהגדרות הדפדפן', variant: 'destructive' })
+        return
+      }
+      await api.updateStudentLocation(currentUser.id, pos.lat, pos.lng)
+      const result = await api.submitStudentAuditGps({
+        sessionId: activeAuditSession.id,
+        studentId: currentUser.id,
+        deviceToken,
+        gpsLat: pos.lat,
+        gpsLng: pos.lng,
+        accuracyM: pos.accuracy ?? null,
+        gpsStatus: 'OK',
+      })
+      if ('error' in result) {
+        setGpsShareState('error')
+        toast({ title: 'שגיאה בשיתוף מיקום', description: result.error, variant: 'destructive' })
+        return
+      }
+      setGpsShareState('done')
+      setGpsShareResult({ distanceM: result.distanceM, distanceBucket: result.distanceBucket })
+    } catch (err) {
+      setGpsShareState('error')
+      toast({ title: 'שגיאה בשיתוף מיקום', description: getErrorMessage(err, 'שיתוף מיקום נכשל'), variant: 'destructive' })
+    }
+  }, [currentUser?.id, activeAuditSession?.id, deviceToken])
+
   useEffect(() => {
     if (!currentUser) return
     const channel = supabase.channel('location-requests')
@@ -133,10 +190,12 @@ export function HomePage() {
         if (isGPSResult(result)) {
           await api.updateStudentLocation(currentUser.id, result.lat, result.lng)
         }
+        // Also check if a LOCATION audit just started
+        checkAuditSession()
       })
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [currentUser?.id])
+  }, [currentUser?.id, checkAuditSession])
 
   useDeparturesRealtime({
     onAnyChange: () => {
@@ -181,6 +240,57 @@ export function HomePage() {
           >
             בטל
           </button>
+        </div>
+      )}
+
+      {/* ── LOCATION-mode audit GPS banner ── */}
+      {activeAuditSession && (
+        <div className="animate-slide-up mx-4 mt-3">
+          {gpsShareState === 'done' && gpsShareResult ? (
+            <div className="flex items-center gap-3 rounded-2xl border border-green-200 bg-green-50 px-4 py-3.5 dark:border-green-900/50 dark:bg-green-950/20">
+              <CheckCircle2 className="h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-green-800 dark:text-green-300">מיקומך נמסר בהצלחה</p>
+                <p className="text-xs text-green-700 dark:text-green-400">
+                  מרחק מהישיבה:{' '}
+                  {gpsShareResult.distanceM < 1000
+                    ? `${gpsShareResult.distanceM} מ׳`
+                    : `${(gpsShareResult.distanceM / 1000).toFixed(1)} ק״מ`}
+                </p>
+              </div>
+            </div>
+          ) : gpsShareState === 'error' ? (
+            <div className="flex items-center gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3.5 dark:border-red-900/50 dark:bg-red-950/20">
+              <AlertTriangle className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-red-800 dark:text-red-300">לא ניתן לגשת למיקום</p>
+                <p className="text-xs text-red-700 dark:text-red-400">בדוק הרשאות מיקום בדפדפן</p>
+              </div>
+              <button
+                onClick={() => { setGpsShareState('idle'); handleShareGps() }}
+                className="shrink-0 rounded-xl bg-red-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-600 transition-colors"
+              >
+                נסה שוב
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3.5 dark:border-blue-900/50 dark:bg-blue-950/20">
+              <div className="flex items-center gap-2.5">
+                <MapPin className="h-5 w-5 shrink-0 text-blue-600 dark:text-blue-400" />
+                <div>
+                  <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">ביקורת פנימית מתבצעת</p>
+                  <p className="text-xs text-blue-700 dark:text-blue-400">המנהל מבקש לדעת את מיקומך</p>
+                </div>
+              </div>
+              <button
+                onClick={handleShareGps}
+                disabled={gpsShareState === 'capturing'}
+                className="shrink-0 rounded-xl bg-blue-500 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-blue-600 transition-colors disabled:opacity-50"
+              >
+                {gpsShareState === 'capturing' ? 'מאתר...' : 'שתף מיקום'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
