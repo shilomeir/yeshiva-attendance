@@ -26,6 +26,8 @@ const SettingsPage       = lazy(() => import('@/pages/admin/SettingsPage').then(
 const RollCallPage       = lazy(() => import('@/pages/admin/RollCallPage').then(m => ({ default: m.RollCallPage })))
 const PendingRequestsPage = lazy(() => import('@/pages/admin/PendingRequestsPage').then(m => ({ default: m.PendingRequestsPage })))
 const ExceptionsPage     = lazy(() => import('@/pages/admin/ExceptionsPage').then(m => ({ default: m.ExceptionsPage })))
+const AuditHistoryPage   = lazy(() => import('@/pages/admin/AuditHistoryPage').then(m => ({ default: m.AuditHistoryPage })))
+const AuditDetailPage    = lazy(() => import('@/pages/admin/AuditDetailPage').then(m => ({ default: m.AuditDetailPage })))
 
 // Supervisor
 const ClassSupervisorDashboard = lazy(() =>
@@ -154,6 +156,8 @@ export default function App() {
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="rollcall" element={<RollCallPage />} />
+            <Route path="audits" element={<AuditHistoryPage />} />
+            <Route path="audits/:id" element={<AuditDetailPage />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
           </Route>
