@@ -185,4 +185,7 @@ export interface IApiClient {
    *  entry. ON CONFLICT DO NOTHING preserves AUTO_DEFAULT seeds and prior
    *  manual marks. Returns the count of rows actually inserted. */
   bulkMarkUnmarkedAuditEntries(params: { sessionId: string; classId: string; status: AuditEntryStatus; supervisorPin: string }): Promise<{ markedCount: number } | { error: string }>
+  /** Student submits their GPS location during a LOCATION-mode audit.
+   *  Auth is device-token-based (no PIN). Returns distance info on success. */
+  submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }>
 }
