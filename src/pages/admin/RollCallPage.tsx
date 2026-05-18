@@ -9,8 +9,6 @@ import {
   Users,
   Download,
   ClipboardList,
-  X,
-  Clock,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -23,9 +21,10 @@ import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
 import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
+import { AuditMissionControl } from '@/components/admin/AuditMissionControl'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
-import type { Student, ClassStat, AuditSessionWithDetails, AuditEntry } from '@/types'
+import type { Student, ClassStat, AuditSessionWithDetails } from '@/types'
 
 const AUDIT_POLL_FALLBACK_MS = 30_000
 
@@ -379,24 +378,6 @@ export function RollCallPage() {
     URL.revokeObjectURL(url)
   }
 
-  // Audit session summary helpers
-  const getSessionSummary = (session: AuditSessionWithDetails) => {
-    const entries = session.entries as AuditEntry[]
-    const marked = entries.length
-    const total = session.totalStudentsSnapshot
-    const inYeshiva = entries.filter(e => e.status === 'IN_YESHIVA').length
-    const outPerm = entries.filter(e => e.status === 'OUT_WITH_PERMISSION').length
-    const outNoPerm = entries.filter(e => e.status === 'OUT_WITHOUT_PERMISSION').length
-    const unmarked = total - marked
-    return { marked, total, inYeshiva, outPerm, outNoPerm, unmarked }
-  }
-
-  const formatDuration = (startedAt: string) => {
-    const mins = Math.round((Date.now() - new Date(startedAt).getTime()) / 60000)
-    if (mins < 60) return `${mins} דקות`
-    return `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, '0')} שעות`
-  }
-
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       {/* Header */}
@@ -425,75 +406,22 @@ export function RollCallPage() {
         </div>
       </div>
 
-      {/* Active session banner */}
+      {/* Active session — Mission Control */}
       {activeSession && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <ClipboardList className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold text-amber-700 dark:text-amber-300">
-                  ביקורת פעילה
-                  {activeSession.title && ` — ${activeSession.title}`}
-                </p>
-                <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                  {activeSession.mode === 'MANUAL' ? 'ביקורת ידנית' : 'ביקורת עם מיקום'} ·{' '}
-                  {activeSession.classIds.length} כיתות ·{' '}
-                  {activeSession.totalStudentsSnapshot} תלמידים ·{' '}
-                  <Clock className="h-3 w-3 inline" /> {formatDuration(activeSession.startedAt)}
-                </p>
-              </div>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCloseSession}
-              disabled={isClosingSession}
-              className="border-amber-300 text-amber-700 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/50 shrink-0"
-            >
-              <X className="h-4 w-4" />
-              סגור ביקורת
-            </Button>
-          </div>
-
-          {/* Progress */}
-          {(() => {
-            const { marked, total, inYeshiva, outPerm, outNoPerm, unmarked } = getSessionSummary(activeSession)
-            return (
-              <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                {[
-                  { label: 'בישיבה', count: inYeshiva, color: 'text-green-700 dark:text-green-400' },
-                  { label: 'ביצ׳ רשות', count: outPerm, color: 'text-blue-700 dark:text-blue-400' },
-                  { label: 'ביצ׳ ללא רשות', count: outNoPerm, color: 'text-red-700 dark:text-red-400' },
-                  { label: 'לא סומן', count: unmarked, color: 'text-amber-600 dark:text-amber-400' },
-                ].map(({ label, count, color }) => (
-                  <div key={label} className="rounded-lg bg-white/60 dark:bg-amber-900/20 p-2">
-                    <p className={`text-lg font-bold ${color}`}>{count}</p>
-                    <p className="text-[10px] text-amber-600 dark:text-amber-400">{label}</p>
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
-          {activeSession.mode === 'MANUAL' && (
-            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-              אחראי הכיתות מסמנים נוכחות בלוח הבקרה שלהם
-            </p>
-          )}
-        </div>
+        <AuditMissionControl
+          session={activeSession}
+          isClosing={isClosingSession}
+          onClose={handleCloseSession}
+        />
       )}
 
-      {/* Empty state when no roll call has been run */}
-      {students.length === 0 && !isLoading && (
+      {/* Empty state — only when no active session and no location results */}
+      {!activeSession && students.length === 0 && !isLoading && (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--border)] py-16 text-center">
           <MapPin className="h-10 w-10 text-[var(--text-muted)] opacity-40" />
-          <p className="font-medium text-[var(--text-muted)]">
-            {activeSession?.mode === 'MANUAL' ? 'ביקורת ידנית פעילה' : 'לא בוצעה ביקורת מיקום עדיין'}
-          </p>
+          <p className="font-medium text-[var(--text-muted)]">לא בוצעה ביקורת מיקום עדיין</p>
           <p className="text-sm text-[var(--text-muted)]">
-            {activeSession?.mode === 'MANUAL'
-              ? 'אחראי הכיתות מסמנים נוכחות בלוח הבקרה שלהם'
-              : 'פתח ביקורת עם מיקום כדי לשלוח בקשת GPS לתלמידים'}
+            פתח ביקורת עם מיקום כדי לשלוח בקשת GPS לתלמידים
           </p>
         </div>
       )}
