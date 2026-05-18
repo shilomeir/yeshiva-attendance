@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { LoginScreen } from '@/components/auth/LoginScreen'
+import { PinPromptProvider } from '@/components/auth/PinPromptDialog'
 import { SplashScreen } from '@/components/shared/SplashScreen'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
@@ -101,7 +102,7 @@ export default function App() {
   }, [currentUser?.id])
 
   return (
-    <>
+    <PinPromptProvider>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
       <Suspense fallback={<PageFallback />}>
@@ -156,6 +157,6 @@ export default function App() {
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Suspense>
-    </>
+    </PinPromptProvider>
   )
 }

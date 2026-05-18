@@ -733,7 +733,12 @@ export class SupabaseApiClient implements IApiClient {
     })
     if (error) throw error
     if (data?.error) return { error: data.error, existingId: data.existingId }
-    return { ...(data as AuditSessionWithDetails), entries: [], classStates: [] }
+    // RPC returns only the session row, but it has already inserted AUTO_DEFAULT
+    // entries for students with active departures. Re-fetch to surface them so the
+    // admin sees the seeded count instead of all-unmarked.
+    const sessionId = (data as { id: string }).id
+    const full = await this.getAuditSession(sessionId)
+    return full ?? { ...(data as AuditSessionWithDetails), entries: [], classStates: [] }
   }
 
   async getActiveAuditSession(): Promise<AuditSessionWithDetails | null> {

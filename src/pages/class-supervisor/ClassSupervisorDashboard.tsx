@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Users, UserCheck, LogOut, GraduationCap,
   MapPin, Clock, CalendarDays, CheckCircle2, ArrowRightLeft,
@@ -21,6 +21,7 @@ import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
+import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, CalendarDeparture, AuditSessionWithDetails, AuditEntryStatus } from '@/types'
@@ -435,7 +436,8 @@ function minsFromNow(isoStr: string): number {
 }
 
 export function ClassSupervisorDashboard() {
-  const { classSupervisor, logout, getSupervisorPin } = useAuthStore()
+  const { classSupervisor, logout } = useAuthStore()
+  const { requestPin, clearPin } = usePinPrompt()
   const [students, setStudents] = useState<Student[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -449,7 +451,6 @@ export function ClassSupervisorDashboard() {
   const [showAuditWarning, setShowAuditWarning] = useState(false)
   const [isSubmittingAudit, setIsSubmittingAudit] = useState<string | null>(null)
   const [isFinishingAudit, setIsFinishingAudit] = useState(false)
-  const supervisorPinRef = useRef<string | null>(null)
 
   // Derive safely before hooks — avoids conditional-return-before-useEffect violation
   const classId = classSupervisor?.classId ?? ''
@@ -482,11 +483,6 @@ export function ClassSupervisorDashboard() {
     }
   }
 
-  // Capture supervisor PIN once on mount (before any re-renders can clear it)
-  useEffect(() => {
-    supervisorPinRef.current = getSupervisorPin()
-  }, [])
-
   useEffect(() => {
     if (!classId) return
     loadData()
@@ -518,26 +514,33 @@ export function ClassSupervisorDashboard() {
       .catch(() => {})
   }, [classId])
 
-  // Subscribe to audit session realtime changes + manual audit broadcasts
+  // Subscribe to audit session realtime changes + manual audit broadcasts.
+  // We listen to both audit_sessions (lifecycle) AND audit_entries (per-mark)
+  // so a re-mark by the admin or another supervisor on the same class shows up
+  // here without a manual refresh.
   useEffect(() => {
     if (!classId) return
 
-    const auditCh = supabase
-      .channel('audit-sessions-supervisor')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, async () => {
-        const session = await api.getActiveAuditSession().catch(() => null)
-        if (session && session.classIds.includes(classId)) {
-          setActiveAuditSession(session)
-          const map = new Map<string, AuditEntryStatus>()
-          for (const e of session.entries) {
-            if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
-          }
-          setAuditEntries(map)
-        } else {
-          setActiveAuditSession(null)
-          setAuditEntries(new Map())
+    const refreshSession = async () => {
+      const session = await api.getActiveAuditSession().catch(() => null)
+      if (session && session.classIds.includes(classId)) {
+        setActiveAuditSession(session)
+        const map = new Map<string, AuditEntryStatus>()
+        for (const e of session.entries) {
+          if (e.classId === classId && e.studentId) map.set(e.studentId, e.status)
         }
-      })
+        setAuditEntries(map)
+      } else {
+        setActiveAuditSession(null)
+        setAuditEntries(new Map())
+      }
+    }
+
+    const auditCh = supabase
+      .channel('audit-supervisor-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshSession)
       .subscribe()
 
     const broadcastCh = supabase
@@ -612,11 +615,8 @@ export function ClassSupervisorDashboard() {
 
   const handleMarkStudent = async (studentId: string, status: AuditEntryStatus) => {
     if (!activeAuditSession) return
-    const pin = supervisorPinRef.current
-    if (!pin) {
-      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN בסשן — התחבר מחדש', variant: 'destructive' })
-      return
-    }
+    const pin = await requestPin('supervisor', 'נדרש PIN אחראי כיתה לסימון נוכחות.')
+    if (!pin) return // user cancelled
     setIsSubmittingAudit(studentId)
     try {
       const result = await api.submitAuditEntry({
@@ -626,7 +626,16 @@ export function ClassSupervisorDashboard() {
         supervisorPin: pin,
       })
       if ('error' in result) {
-        toast({ title: 'שגיאה בסימון נוכחות', description: result.error, variant: 'destructive' })
+        if (result.error === 'AUTH') {
+          clearPin('supervisor')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב — תתבקש PIN חדש', variant: 'destructive' })
+        } else if (result.error === 'SESSION_CLOSED' || result.error === 'SESSION_NOT_FOUND') {
+          setActiveAuditSession(null)
+          setAuditEntries(new Map())
+          toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
+        } else {
+          toast({ title: 'שגיאה בסימון נוכחות', description: result.error, variant: 'destructive' })
+        }
       } else {
         setAuditEntries(prev => new Map(prev).set(studentId, status))
       }
@@ -647,11 +656,8 @@ export function ClassSupervisorDashboard() {
 
   const doFinishAudit = async () => {
     if (!activeAuditSession) return
-    const pin = supervisorPinRef.current
-    if (!pin) {
-      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN בסשן — התחבר מחדש', variant: 'destructive' })
-      return
-    }
+    const pin = await requestPin('supervisor', 'נדרש PIN אחראי כיתה לסיום הביקורת.')
+    if (!pin) return
     setIsFinishingAudit(true)
     try {
       const result = await api.finishClassAudit({
@@ -660,7 +666,12 @@ export function ClassSupervisorDashboard() {
         supervisorPin: pin,
       })
       if ('error' in result) {
-        toast({ title: 'שגיאה בסיום ביקורת', description: result.error, variant: 'destructive' })
+        if (result.error === 'AUTH') {
+          clearPin('supervisor')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
+        } else {
+          toast({ title: 'שגיאה בסיום ביקורת', description: result.error, variant: 'destructive' })
+        }
       } else {
         toast({ title: 'ביקורת הכיתה הסתיימה', description: `${result.inYeshivaAtFinish ?? 0} נוכחים, ${result.outWithoutPermAtFinish ?? 0} ביצ׳ ללא רשות` })
         setShowAuditWarning(false)

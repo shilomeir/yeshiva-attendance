@@ -21,7 +21,7 @@ import {
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
-import { useAuthStore } from '@/store/authStore'
+import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
 import type { Student, ClassStat, AuditSessionWithDetails, AuditEntry } from '@/types'
@@ -86,7 +86,7 @@ function LocationBadge({ cls }: { cls: LocationClass }) {
 const LOCATION_RESPONSE_TIMEOUT_MS = 15000
 
 export function RollCallPage() {
-  const { getAdminPin } = useAuthStore()
+  const { requestPin, clearPin } = usePinPrompt()
   const [students, setStudents] = useState<StudentWithLocation[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [isWaiting, setIsWaiting] = useState(false)
@@ -135,11 +135,8 @@ export function RollCallPage() {
 
   const handleConfirmAudit = async () => {
     if (!auditMode || selectedClassIds.size === 0) return
-    const adminPin = getAdminPin()
-    if (!adminPin) {
-      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN מנהל בסשן', variant: 'destructive' })
-      return
-    }
+    const adminPin = await requestPin('admin', 'נדרש PIN מנהל לפתיחת ביקורת פנימית.')
+    if (!adminPin) return // user cancelled the PIN prompt
 
     setIsStartingAudit(true)
     try {
@@ -156,6 +153,10 @@ export function RollCallPage() {
           // Load existing session
           const existing = await api.getActiveAuditSession()
           if (existing) setActiveSession(existing)
+        } else if (result.error === 'AUTH') {
+          // Cached PIN no longer matches DB — drop it and let the user retry
+          clearPin('admin')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב — תתבקש להזין PIN חדש', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בפתיחת ביקורת', description: result.error, variant: 'destructive' })
         }
@@ -190,16 +191,22 @@ export function RollCallPage() {
 
   const handleCloseSession = async () => {
     if (!activeSession) return
-    const adminPin = getAdminPin()
-    if (!adminPin) {
-      toast({ title: 'שגיאת הרשאה', description: 'לא נמצא PIN מנהל בסשן', variant: 'destructive' })
-      return
-    }
+    const adminPin = await requestPin('admin', 'נדרש PIN מנהל לסגירת הביקורת.')
+    if (!adminPin) return
     setIsClosingSession(true)
     try {
       const result = await api.closeAuditSession(activeSession.id, adminPin)
       if ('error' in result) {
-        toast({ title: 'שגיאה בסגירת ביקורת', description: result.error, variant: 'destructive' })
+        if (result.error === 'AUTH') {
+          clearPin('admin')
+          toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
+        } else if (result.error === 'NOT_ACTIVE') {
+          // Session was already closed (race with another admin or tick_audit_timeout)
+          setActiveSession(null)
+          toast({ title: 'הביקורת כבר סגורה' })
+        } else {
+          toast({ title: 'שגיאה בסגירת ביקורת', description: result.error, variant: 'destructive' })
+        }
       } else {
         setActiveSession(null)
         toast({ title: 'ביקורת נסגרה בהצלחה' })
@@ -300,13 +307,24 @@ export function RollCallPage() {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
-  // Listen for audit session realtime changes
+  // Listen for audit session lifecycle changes (start/close/timeout) AND entry changes.
+  // submit_audit_entry only mutates audit_entries — not audit_sessions — so without
+  // the entries subscription the admin's progress counters stay stale while a
+  // supervisor marks students. We refetch the whole active session on any change.
   useEffect(() => {
     const channel = supabase
-      .channel('audit-sessions-admin')
+      .channel('audit-admin-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, async () => {
         const session = await api.getActiveAuditSession().catch(() => null)
         setActiveSession(session)
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, async () => {
+        const session = await api.getActiveAuditSession().catch(() => null)
+        if (session) setActiveSession(session)
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, async () => {
+        const session = await api.getActiveAuditSession().catch(() => null)
+        if (session) setActiveSession(session)
       })
       .subscribe()
     return () => { supabase.removeChannel(channel) }
