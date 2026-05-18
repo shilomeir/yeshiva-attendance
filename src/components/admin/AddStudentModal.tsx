@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
 import { toast } from '@/hooks/use-toast'
@@ -9,6 +8,16 @@ import { getErrorMessage } from '@/lib/errors'
 interface AddStudentModalProps {
   onClose: () => void
   onSaved: () => void
+}
+
+const fieldStyle: React.CSSProperties = {
+  width: '100%', borderRadius: 10,
+  border: '1px solid var(--hairline)',
+  background: 'rgba(255,255,255,0.7)',
+  color: 'var(--ink)',
+  padding: '9px 12px',
+  fontSize: 13.5, fontFamily: 'inherit', outline: 'none',
+  boxSizing: 'border-box',
 }
 
 export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
@@ -52,11 +61,7 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
       onSaved()
       onClose()
     } catch (err) {
-      toast({
-        title: 'שגיאה בהוספה',
-        description: getErrorMessage(err, 'הוספת התלמיד נכשלה'),
-        variant: 'destructive',
-      })
+      toast({ title: 'שגיאה בהוספה', description: getErrorMessage(err, 'הוספת התלמיד נכשלה'), variant: 'destructive' })
     } finally {
       setSaving(false)
     }
@@ -64,28 +69,48 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-end justify-center bg-black/40 sm:items-center"
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+        background: 'rgba(15,23,42,0.45)',
+        backdropFilter: 'blur(6px)',
+      }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="w-full max-w-sm rounded-t-2xl bg-[var(--surface)] p-5 shadow-xl sm:rounded-2xl">
+      <div style={{
+        width: '100%', maxWidth: 440,
+        background: 'var(--glass-2)',
+        backdropFilter: 'blur(28px) saturate(150%)',
+        border: '1px solid var(--hairline)',
+        boxShadow: 'var(--shadow-card)',
+        borderRadius: '24px 24px 0 0',
+        padding: 24,
+      }}>
         {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-base font-bold text-[var(--text)]">הוספת תלמיד חדש</h3>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h3 style={{ fontFamily: 'Fraunces, serif', fontSize: 22, fontWeight: 500, color: 'var(--ink)', margin: 0 }}>
+            הוספת תלמיד חדש
+          </h3>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-[var(--text-muted)] hover:bg-[var(--bg-2)]"
+            style={{
+              width: 30, height: 30, borderRadius: 8,
+              border: '1px solid var(--hairline)',
+              background: 'rgba(255,255,255,0.6)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--ink-faint)',
+            }}
           >
-            <X className="h-4 w-4" />
+            <X size={14} />
           </button>
         </div>
 
-        <div className="flex flex-col gap-3">
-          {/* Full Name */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">שם מלא</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>שם מלא</label>
             <input
               type="text"
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+              style={fieldStyle}
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
               dir="rtl"
@@ -93,40 +118,35 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
             />
           </div>
 
-          {/* ID Number */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">מספר זהות</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>מספר זהות</label>
             <input
               type="text"
               inputMode="numeric"
               maxLength={9}
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+              style={{ ...fieldStyle, direction: 'ltr' }}
               value={idNumber}
               onChange={(e) => setIdNumber(e.target.value.replace(/\D/g, '').slice(0, 9))}
-              dir="ltr"
               placeholder="000000000"
             />
-            <span className="text-xs text-[var(--text-muted)]">9 ספרות בדיוק</span>
+            <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>9 ספרות בדיוק</span>
           </div>
 
-          {/* Phone */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">טלפון</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>טלפון</label>
             <input
               type="tel"
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+              style={{ ...fieldStyle, direction: 'ltr' }}
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              dir="ltr"
               placeholder="050-0000000"
             />
           </div>
 
-          {/* Grade */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--text)]">שכבה</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>שכבה</label>
             <select
-              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+              style={fieldStyle}
               value={selectedGrade}
               onChange={(e) => handleGradeChange(e.target.value)}
               dir="rtl"
@@ -137,12 +157,11 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
             </select>
           </div>
 
-          {/* Class — only when grade has multiple classes */}
           {classOptions.length > 1 && (
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium text-[var(--text)]">כיתה</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)' }}>כיתה</label>
               <select
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--blue)]"
+                style={fieldStyle}
                 value={selectedClass}
                 onChange={(e) => setSelectedClass(e.target.value)}
                 dir="rtl"
@@ -154,14 +173,32 @@ export function AddStudentModal({ onClose, onSaved }: AddStudentModalProps) {
             </div>
           )}
 
-          {/* Actions */}
-          <div className="mt-1 flex gap-2">
-            <Button type="button" variant="ghost" className="flex-1" onClick={onClose}>
+          <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                flex: 1, padding: '10px', borderRadius: 10,
+                border: '1px solid var(--hairline)', background: 'rgba(255,255,255,0.6)',
+                color: 'var(--ink-muted)', fontSize: 13.5, fontWeight: 500,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
               ביטול
-            </Button>
-            <Button className="flex-1" onClick={handleSave} disabled={saving}>
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{
+                flex: 1, padding: '10px', borderRadius: 10, border: 'none',
+                background: 'linear-gradient(135deg, var(--ink), var(--accent))',
+                color: '#fff', fontSize: 13.5, fontWeight: 600,
+                cursor: saving ? 'not-allowed' : 'pointer',
+                opacity: saving ? 0.7 : 1, fontFamily: 'inherit',
+              }}
+            >
               {saving ? 'מוסיף...' : 'הוסף תלמיד'}
-            </Button>
+            </button>
           </div>
         </div>
       </div>

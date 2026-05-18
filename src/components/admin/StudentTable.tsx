@@ -21,7 +21,7 @@ export function StudentTable() {
 
   if (filteredStudents.length === 0) {
     return (
-      <div className="flex items-center justify-center py-16 text-[var(--text-muted)]">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '64px 0', color: 'var(--ink-faint)', fontSize: 13.5 }}>
         <p>לא נמצאו תלמידים</p>
       </div>
     )
