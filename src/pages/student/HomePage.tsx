@@ -5,7 +5,6 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
 import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
-import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
@@ -129,15 +128,31 @@ export function HomePage() {
   }, [undoCheckout])
 
   // Check for an active LOCATION-mode audit that includes this student's class.
+  // Also detects an existing AUTO_GPS entry so that after a refresh we don't
+  // prompt the student to share GPS again — they see the success state.
   const checkAuditSession = useCallback(async () => {
     if (!currentUser) return
     try {
       const session = await api.getActiveAuditSession()
       if (session && session.mode === 'LOCATION' && session.classIds.includes(currentUser.classId)) {
         setActiveAuditSession(session)
+        // Surface an existing GPS entry so refresh mid-session doesn't re-prompt.
+        const existing = session.entries.find(
+          (e) => e.studentId === currentUser.id && e.source === 'AUTO_GPS',
+        )
+        if (existing && existing.distanceFromCampusM != null && existing.distanceBucket) {
+          setGpsShareState('done')
+          setGpsShareResult({
+            distanceM: Math.round(existing.distanceFromCampusM),
+            distanceBucket: existing.distanceBucket,
+          })
+        }
       } else {
         setActiveAuditSession(null)
-        if (!session) setGpsShareState('idle') // reset when session ends
+        if (!session) {
+          setGpsShareState('idle') // reset when session ends
+          setGpsShareResult(null)
+        }
       }
     } catch { /* ignore */ }
   }, [currentUser?.id, currentUser?.classId])
@@ -170,7 +185,17 @@ export function HomePage() {
       })
       if ('error' in result) {
         setGpsShareState('error')
-        toast({ title: 'שגיאה בשיתוף מיקום', description: result.error, variant: 'destructive' })
+        // Translate server error codes to user-facing Hebrew so the student
+        // doesn't see e.g. "SESSION_CLOSED" — the previous all-purpose "GPS
+        // denied" message was misleading.
+        const description =
+          result.error === 'SESSION_CLOSED'    ? 'הביקורת כבר נסגרה' :
+          result.error === 'CLASS_FINISHED'    ? 'הביקורת של הכיתה כבר הסתיימה' :
+          result.error === 'WRONG_MODE'        ? 'הביקורת אינה במצב מיקום' :
+          result.error === 'STUDENT_NOT_IN_SESSION' ? 'אינך חלק מהביקורת' :
+          result.error === 'AUTH'              ? 'המכשיר לא מזוהה — צא והיכנס שוב' :
+          result.error
+        toast({ title: 'שגיאה בשיתוף מיקום', description, variant: 'destructive' })
         return
       }
       setGpsShareState('done')
@@ -181,21 +206,14 @@ export function HomePage() {
     }
   }, [currentUser?.id, activeAuditSession?.id, deviceToken])
 
-  useEffect(() => {
-    if (!currentUser) return
-    const channel = supabase.channel('location-requests')
-    channel
-      .on('broadcast', { event: 'request_location' }, async () => {
-        const result = await getCurrentPosition()
-        if (isGPSResult(result)) {
-          await api.updateStudentLocation(currentUser.id, result.lat, result.lng)
-        }
-        // Also check if a LOCATION audit just started
-        checkAuditSession()
-      })
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [currentUser?.id, checkAuditSession])
+  // The active LOCATION-mode audit triggers a polling check that surfaces the
+  // explicit-consent GPS banner. A previous Realtime broadcast handler tried to
+  // capture GPS automatically when 'request_location' arrived — that path was
+  // removed because (a) it asked the browser for GPS without an explicit user
+  // tap, violating consent, (b) it only updated students.lastLocation and
+  // never wrote to audit_entries, and (c) it broadcast was not scoped by
+  // session/class. GPS sharing now happens only via handleShareGps when the
+  // student presses "שתף מיקום" on the banner.
 
   useDeparturesRealtime({
     onAnyChange: () => {

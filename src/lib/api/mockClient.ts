@@ -850,9 +850,13 @@ export class MockApiClient implements IApiClient {
 
   async submitAuditEntry(params: { sessionId: string; studentId: string; status: AuditEntryStatus; note?: string; supervisorPin: string }): Promise<AuditEntry | { error: string }> {
     if (!this._mockAuditSession || this._mockAuditSession.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    if (this._mockAuditSession.status !== 'ACTIVE') return { error: 'SESSION_CLOSED' }
     const snap = this._mockAuditSession.studentSnapshot
     const snapIdx = snap.findIndex(s => s.id === params.studentId)
     if (snapIdx === -1) return { error: 'STUDENT_NOT_IN_SESSION' }
+    // Server-side parity: a FINISHED class is immutable.
+    const cs = this._mockAuditSession.classStates.find(c => c.classId === snap[snapIdx].classId)
+    if (cs?.status === 'FINISHED') return { error: 'CLASS_FINISHED' }
     const existing = this._mockAuditSession.entries.findIndex(e => e.studentSnapshotIdx === snapIdx)
     const entry: AuditEntry = {
       id: uuidv4(), sessionId: params.sessionId, studentId: params.studentId,
@@ -886,6 +890,9 @@ export class MockApiClient implements IApiClient {
 
   async bulkMarkUnmarkedAuditEntries(params: { sessionId: string; classId: string; status: AuditEntryStatus; supervisorPin: string }): Promise<{ markedCount: number } | { error: string }> {
     if (!this._mockAuditSession || this._mockAuditSession.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    if (this._mockAuditSession.status !== 'ACTIVE') return { error: 'SESSION_CLOSED' }
+    const cs = this._mockAuditSession.classStates.find(c => c.classId === params.classId)
+    if (cs?.status === 'FINISHED') return { error: 'CLASS_FINISHED' }
     const session = this._mockAuditSession
     const existing = new Set(session.entries.map(e => e.studentSnapshotIdx))
     const fresh: AuditEntry[] = []
@@ -906,7 +913,16 @@ export class MockApiClient implements IApiClient {
   async submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }> {
     const session = this._mockAuditSession
     if (!session || session.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    if (session.status !== 'ACTIVE') return { error: 'SESSION_CLOSED' }
     if (session.mode !== 'LOCATION') return { error: 'WRONG_MODE' }
+    // Server-side parity: device token must match (in mock we accept any non-empty token).
+    if (!params.deviceToken) return { error: 'AUTH' }
+    const snapIdx = session.studentSnapshot.findIndex(s => s.id === params.studentId)
+    if (snapIdx === -1) return { error: 'STUDENT_NOT_IN_SESSION' }
+    const snap = session.studentSnapshot[snapIdx]
+    // Server-side parity: a FINISHED class is immutable.
+    const cs = session.classStates.find(c => c.classId === snap.classId)
+    if (cs?.status === 'FINISHED') return { error: 'CLASS_FINISHED' }
     const CAMPUS_LAT = 31.5253, CAMPUS_LNG = 35.1056
     const toRad = (d: number) => d * Math.PI / 180
     const R = 6371000
@@ -916,9 +932,6 @@ export class MockApiClient implements IApiClient {
     const distM = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))
     const bucket = distM <= 300 ? 'GREEN' : distM <= 1000 ? 'BLUE' : distM <= 5000 ? 'ORANGE' : 'RED'
     const status: AuditEntryStatus = bucket === 'GREEN' ? 'IN_YESHIVA' : 'OUT_WITH_PERMISSION'
-    const snapIdx = session.studentSnapshot.findIndex(s => s.id === params.studentId)
-    if (snapIdx === -1) return { error: 'STUDENT_NOT_IN_SESSION' }
-    const snap = session.studentSnapshot[snapIdx]
     const existing = session.entries.findIndex(e => e.studentSnapshotIdx === snapIdx)
     const entry: AuditEntry = {
       id: uuidv4(), sessionId: params.sessionId, studentId: params.studentId,

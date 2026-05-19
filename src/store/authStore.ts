@@ -61,10 +61,14 @@ export const useAuthStore = create<AuthState>()(
             set({ error: 'מספר זהות לא נמצא במערכת', isLoading: false })
             return false
           }
-          // Stamp lastSeen on login so the device is always visible in Supabase
           const now = new Date().toISOString()
-          supabase.from('students').update({ lastSeen: now }).eq('id', student.id).then(() => {})
-          set({ currentUser: { ...student, lastSeen: now }, isAdmin: false, classSupervisor: null, isLoading: false })
+          const deviceToken = get().deviceToken
+          // Stamp lastSeen and bind the locally-generated device token to the
+          // student row so device-token-authenticated RPCs (e.g. submit_student_audit_gps
+          // for the LOCATION-mode audit) can verify this device on later calls.
+          // Pre-existing RLS policy 'anon_update_students' permits this update.
+          supabase.from('students').update({ lastSeen: now, deviceToken }).eq('id', student.id).then(() => {})
+          set({ currentUser: { ...student, lastSeen: now, deviceToken }, isAdmin: false, classSupervisor: null, isLoading: false })
           return true
         } catch (err) {
           set({ error: getErrorMessage(err, 'ההתחברות נכשלה'), isLoading: false })

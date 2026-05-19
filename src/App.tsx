@@ -70,8 +70,9 @@ export default function App() {
   // Re-hydrate isAdmin from Supabase Auth before letting any guard route fire.
   // Without this gate the admin's first paint after refresh sees isAdmin=false
   // and AdminGuard redirects to /login even though the underlying Supabase
-  // session is still valid. Supervisors have no Supabase Auth and still need
-  // to re-login on refresh — tracked for a Phase 2 follow-up.
+  // session is still valid. Supervisor refresh is handled separately —
+  // classSupervisor is persisted by authStore so the ClassSupervisorGuard
+  // sees it on first paint without needing this hook.
   useEffect(() => {
     let cancelled = false
     restoreAuth().finally(() => { if (!cancelled) setAuthReady(true) })
