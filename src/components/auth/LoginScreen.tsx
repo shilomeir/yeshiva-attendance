@@ -1061,7 +1061,7 @@ const loginScreenCSS = `
     100% { opacity: 1; transform: translate(-50%, 0); }
   }
 
-  /* Responsive */
+  /* ── Responsive — desktop tall ───────────────────────────────────── */
   @media (max-height: 820px) {
     .ls-ext-caption { bottom: 56px; left: 56px; }
     .ls-ext-caption-name { font-size: 44px; }
@@ -1086,16 +1086,101 @@ const loginScreenCSS = `
     .ls-banner-foot { margin-top: 12px; padding-top: 12px; }
     .ls-zmanim { display: none; }
   }
+
+  /* ── Responsive — wide desktop ────────────────────────────────────── */
   @media (max-width: 1100px) {
     .ls-page { --ls-seam-top: 55%; --ls-seam-bottom: 70%; --ls-banner-w: 360px; }
     .ls-ext-caption-name { font-size: 44px; }
     .ls-ext-caption { max-width: 360px; }
   }
+
+  /* ── Responsive — tablet (820px) ─────────────────────────────────── */
   @media (max-width: 820px) {
-    .ls-page { --ls-seam-top: 40%; --ls-seam-bottom: 55%; --ls-banner-w: 92vw; }
+    .ls-page { --ls-seam-top: 40%; --ls-seam-bottom: 55%; --ls-banner-w: min(420px, 88vw); }
     .ls-ext-caption { display: none; }
     .ls-banner-wrap { left: 50%; }
+    .ls-zmanim { display: none; }
   }
+
+  /* ── Responsive — mobile (640px) ─────────────────────────────────── */
+  @media (max-width: 640px) {
+    /* Hide split-screen elements — full exterior photo only */
+    .ls-int { display: none; }
+    .ls-seam { display: none; }
+
+    /* Darker overlay so text is readable */
+    .ls-ext-tint {
+      background:
+        linear-gradient(180deg,
+          rgba(15,27,45,0.20) 0%,
+          rgba(15,27,45,0.40) 50%,
+          rgba(15,27,45,0.72) 100%);
+    }
+
+    /* Clock — compact, stays top-right */
+    .ls-clock {
+      top: 14px; right: 14px;
+      padding: 6px 12px 6px 10px; gap: 7px;
+    }
+    .ls-clock-time { font-size: 13px; }
+    .ls-clock-sep, .ls-clock-day { display: none; }
+
+    /* Banner — centered, full-width with padding */
+    .ls-page { --ls-banner-w: min(400px, calc(100vw - 32px)); }
+    .ls-banner-wrap {
+      left: 50%;
+      top: 50%;
+      /* shift up slightly so the clock doesn't overlap */
+      transform: translate(-50%, calc(-50% - 8px));
+    }
+    .ls-banner-halo { display: none; }
+    .ls-banner {
+      padding: 24px 20px 20px;
+      border-radius: 20px;
+    }
+    .ls-banner::before { border-radius: 20px 20px 0 0; }
+    .ls-banner-emblem { width: 42px; height: 42px; border-radius: 12px; margin-bottom: 10px; }
+    .ls-banner-emblem-letter { font-size: 20px; }
+    .ls-banner-title { font-size: 21px; }
+    .ls-banner-sub { font-size: 11px; letter-spacing: 0.12em; }
+    .ls-banner-head { margin-bottom: 16px; }
+
+    /* ID boxes — slightly smaller to fit 9 in a row on narrow screens */
+    .ls-id-boxes { gap: 3px; }
+    .ls-id-box { height: 42px; font-size: 17px; border-radius: 8px; }
+    .ls-id-box[data-sep="true"] { margin-inline-start: 5px; }
+
+    /* Admin field */
+    .ls-field-shell { height: 46px; }
+
+    /* Submit & footer */
+    .ls-submit { height: 46px; font-size: 14px; }
+    .ls-helper { margin-top: 8px; margin-bottom: 14px; }
+    .ls-banner-foot { margin-top: 14px; padding-top: 14px; }
+
+    /* Zmanim — hidden on mobile (no space) */
+    .ls-zmanim { display: none; }
+  }
+
+  /* ── Responsive — very small phones (360px) ──────────────────────── */
+  @media (max-width: 360px) {
+    .ls-page { --ls-banner-w: calc(100vw - 24px); }
+    .ls-banner { padding: 20px 16px 18px; }
+    .ls-banner-emblem { display: none; }
+    .ls-id-boxes { gap: 2px; }
+    .ls-id-box { height: 38px; font-size: 16px; border-radius: 7px; }
+    .ls-id-box[data-sep="true"] { margin-inline-start: 4px; }
+    .ls-banner-title { font-size: 19px; }
+  }
+
+  /* ── Safe area insets (iPhone notch / Dynamic Island) ────────────── */
+  @supports (padding: max(0px)) {
+    .ls-clock {
+      top: max(14px, env(safe-area-inset-top));
+      right: max(14px, env(safe-area-inset-right));
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .ls-page *, .ls-page *::before, .ls-page *::after {
       animation-duration: 0.001ms !important;
