@@ -146,6 +146,15 @@ export class SupabaseApiClient implements IApiClient {
     return this.sendPushNotification(title, body)
   }
 
+  async sendAuditPush(params: { sessionId: string; adminPin: string; title?: string; message?: string }): Promise<{ sent: number; failed: number; removed: number; total: number; lastError?: string } | { error: string }> {
+    // One call → Edge Function does server-side fan-out with concurrency cap.
+    // The Edge Function verifies the admin PIN itself; we don't need to pre-check.
+    const { data, error } = await supabase.functions.invoke('send-audit-push', { body: params })
+    if (error) throw error
+    if (data && typeof data === 'object' && 'error' in data) return { error: (data as { error: string }).error }
+    return data as { sent: number; failed: number; removed: number; total: number; lastError?: string }
+  }
+
   async addStudent(student: AddStudentPayload): Promise<AppResult<Student>> {
     if (!/^\d{9}$/.test(student.idNumber)) {
       return { error: { message: 'מספר זהות חייב להיות 9 ספרות' } }

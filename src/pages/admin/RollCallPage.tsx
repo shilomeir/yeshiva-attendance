@@ -182,13 +182,22 @@ export function RollCallPage() {
       toast({ title: 'ביקורת פנימית נפתחה', description: `${result.totalStudentsSnapshot} תלמידים בביקורת` })
 
       if (auditMode === 'location') {
-        // NOTE: client-side push fan-out was disabled. Sending one push per
-        // student from the browser scaled poorly (381 parallel HTTP calls to
-        // the Edge Function) and had no audit_push_log writes. A dedicated
-        // server-side batch Edge Function (`send-audit-push`) is the right
-        // home for this and is tracked for a follow-up PR. Students with the
-        // PWA in foreground still detect the active LOCATION audit via
-        // checkAuditSession polling and see the GPS-share banner.
+        // Master plan R-7 / B-19: server-side batched push via the dedicated
+        // send-audit-push Edge Function. One HTTP call from the browser; the
+        // function verifies the admin PIN, fans out to all students in the
+        // snapshot with a concurrency cap of 20, logs per-batch outcomes to
+        // audit_push_log, and cleans up gone tokens. Push is advisory (R-5)
+        // — failure here does NOT block the audit. Students with the PWA in
+        // foreground still see the GPS-share banner via the polling refresh.
+        api.sendAuditPush({ sessionId: result.id, adminPin })
+          .then((pushResult) => {
+            if ('error' in pushResult) {
+              if (pushResult.error === 'AUTH') return // cached PIN stale; ignore — admin already inside the session
+              toast({ title: 'הביקורת נפתחה — שליחת התראות נכשלה', description: pushResult.error, variant: 'destructive' })
+            }
+            // success → silent; the audit banner is the primary surface
+          })
+          .catch(() => { /* network blip; audit still works */ })
         runLocationRollCall()
       } else {
         // Broadcast to supervisors
