@@ -597,18 +597,32 @@ export function ClassSupervisorDashboard() {
   useEffect(() => {
     if (!classId) return
 
-    const auditCh = supabase
-      .channel('audit-supervisor-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshAuditSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshAuditSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshAuditSession)
-      .subscribe()
+    // Master plan R-35: server-side filter on session_id so we only get
+    // events for the active session. Without a sessionId we don't subscribe
+    // — polling handles the "is a session starting?" case.
+    let auditCh: ReturnType<typeof supabase.channel> | null = null
+    const sid = activeAuditSession?.id
+    if (sid) {
+      auditCh = supabase
+        .channel(`audit-supervisor-live:${sid}:${classId}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` }, refreshAuditSession)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries', filter: `session_id=eq.${sid}` }, (payload) => {
+          // Defence in depth: even after the server-side filter, we double-check
+          // the row's class_id matches this supervisor's class before refreshing.
+          const row = (payload.new ?? payload.old) as { class_id?: string } | undefined
+          if (!row || !row.class_id || row.class_id === classId) refreshAuditSession()
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states', filter: `session_id=eq.${sid}` }, (payload) => {
+          const row = (payload.new ?? payload.old) as { class_id?: string } | undefined
+          if (!row || !row.class_id || row.class_id === classId) refreshAuditSession()
+        })
+        .subscribe()
+    }
 
-    // Legacy broadcast channel — admin still emits this from RollCallPage so a
-    // supervisor in the affected class jumps to the new session without waiting
-    // for the realtime DB stream to land. We call refreshAuditSession so the
-    // entries map is built from session.entries (AUTO_DEFAULT seeds included)
-    // instead of starting empty.
+    // Legacy `audit-control` broadcast — kept for backward compatibility while
+    // any old admin tabs are still open. New admin code no longer emits it
+    // (master plan R-17), so over time this listener becomes a no-op and can
+    // be removed.
     const broadcastCh = supabase
       .channel('audit-control')
       .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
@@ -618,8 +632,11 @@ export function ClassSupervisorDashboard() {
       })
       .subscribe()
 
-    return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
-  }, [classId, refreshAuditSession])
+    return () => {
+      if (auditCh) supabase.removeChannel(auditCh)
+      supabase.removeChannel(broadcastCh)
+    }
+  }, [classId, activeAuditSession?.id, refreshAuditSession])
 
   const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId

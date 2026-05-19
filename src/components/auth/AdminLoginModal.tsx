@@ -34,6 +34,15 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
     e.preventDefault()
     if (!pin) return
 
+    // Master plan B-18: _resolve_supervisor_class silently returns NULL for
+    // PINs shorter than 4 chars, which would surface as a confusing AUTH
+    // error for a 3-digit typo. Validate length up front so the user gets a
+    // clear message instead.
+    if (pin.length < 4) {
+      setError('הזן לפחות 4 ספרות')
+      return
+    }
+
     setIsLoading(true)
     setError('')
 

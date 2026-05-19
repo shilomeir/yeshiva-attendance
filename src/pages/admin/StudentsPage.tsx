@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import * as XLSX from 'xlsx'
 import { Download, UserPlus } from 'lucide-react'
 import { FilterBar } from '@/components/admin/FilterBar'
 import { StudentTable } from '@/components/admin/StudentTable'
@@ -11,8 +10,11 @@ import { cn } from '@/lib/utils/cn'
 import type { Student } from '@/types'
 
 // ── Excel export ──────────────────────────────────────────────────────────────
+// Master plan B-15: lazy-import xlsx (~100KB raw) only when the user clicks
+// "Export". The admin bundle stays lean for users who never export.
 
-function exportToXlsx(students: Student[]) {
+async function exportToXlsx(students: Student[]) {
+  const XLSX = await import('xlsx')
   const wb = XLSX.utils.book_new()
 
   for (const level of GRADE_LEVELS) {

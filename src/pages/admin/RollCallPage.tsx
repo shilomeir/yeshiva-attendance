@@ -330,18 +330,28 @@ export function RollCallPage() {
   }, [])
 
   // Listen for audit session lifecycle changes (start/close/timeout) AND entry changes.
-  // submit_audit_entry only mutates audit_entries — not audit_sessions — so without
-  // the entries subscription the admin's progress counters stay stale while a
-  // supervisor marks students. We refetch the whole active session on any change.
+  // submit_audit_entry only mutates audit_entries — not audit_sessions — so
+  // without the entries subscription the admin's progress counters stay
+  // stale while a supervisor marks students. We refetch the whole active
+  // session on any change.
+  //
+  // Master plan R-35: filters are applied **server-side** via the
+  // postgres_changes `filter:` arg so the channel only receives events for
+  // the current session id. Without this we'd see every audit_entries row
+  // across history. The audit_sessions filter scopes to id; the others to
+  // session_id. The channel name is scoped per session to avoid two-admin
+  // subscriptions ping-ponging.
   useEffect(() => {
+    if (!activeSession?.id) return
+    const sid = activeSession.id
     const channel = supabase
-      .channel('audit-admin-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshActiveSession)
+      .channel(`audit-admin-live:${sid}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` }, refreshActiveSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries', filter: `session_id=eq.${sid}` }, refreshActiveSession)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states', filter: `session_id=eq.${sid}` }, refreshActiveSession)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [refreshActiveSession])
+  }, [activeSession?.id, refreshActiveSession])
 
   useEffect(() => {
     return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }

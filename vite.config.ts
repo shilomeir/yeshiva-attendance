@@ -4,6 +4,18 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
 
+// Master plan R-50: surface VAPID configuration drift early. We warn (not
+// fail) during build so a Vercel preview without the env still builds —
+// but the warning is loud enough to catch in CI/PR review. The runtime
+// guard in src/lib/pwa/webPush.ts is the second line of defence.
+if (process.env.NODE_ENV === 'production' && !process.env.VITE_VAPID_PUBLIC_KEY) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '\n⚠️  VITE_VAPID_PUBLIC_KEY is empty — Web Push subscriptions will be disabled in this build.\n' +
+    '   Set it in Vercel project env vars (Production + Preview) before relying on push.\n'
+  )
+}
+
 export default defineConfig({
   plugins: [
     react(),
