@@ -4,6 +4,7 @@ import { LoginScreen } from '@/components/auth/LoginScreen'
 import { PinPromptProvider } from '@/components/auth/PinPromptDialog'
 import { SplashScreen } from '@/components/shared/SplashScreen'
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
+import { PwaUpdateToast } from '@/components/shared/PwaUpdateToast'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
@@ -129,6 +130,7 @@ export default function App() {
     <ErrorBoundary>
     <PinPromptProvider>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
+      <PwaUpdateToast />
 
       {!authReady ? (
         <PageFallback />

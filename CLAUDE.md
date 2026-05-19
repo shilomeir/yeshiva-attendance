@@ -179,11 +179,12 @@ submit_departure(RPC)
 - Full access to all pages and actions.
 
 ### Class Supervisor (רכז כיתה)
-- PIN format: `{adminPin}{classCode}` (3-digit code, e.g. `1234001`).
-- Class codes auto-generated on sync, stored in `app_settings` as `class_code_{classId}`.
-- **If Admin PIN changes — all supervisors need new PINs. No automatic notification — manual process.**
-- Supervisor can only view/manage their assigned class.
-- All supervisor actions are logged in `admin_overrides`.
+- Two parallel models exist:
+  - **Legacy (still working)**: PIN format `{adminPin}{classCode}` (3-digit code, e.g. `1234001`). Class codes auto-generated on sync, stored in `app_settings` as `class_code_{classId}`.
+  - **`supervisors` table** (newer schema): PIN is hashed (`pin_hash`) per row, resolved via `verify_supervisor_pin` RPC. Both paths converge through `_resolve_supervisor_class`.
+- **If Admin PIN changes — supervisors using the legacy format need new PINs. No automatic notification — manual process.**
+- Supervisor can only view/manage their assigned class. The `_resolve_supervisor_class` SQL function silently returns NULL for PINs shorter than 4 chars — the supervisor login form enforces ≥ 4 chars client-side.
+- All supervisor audit actions are logged via DB triggers; departure-side actions are logged in `admin_overrides`.
 
 ---
 
@@ -346,15 +347,18 @@ Every admin/supervisor lifecycle action is recorded here automatically (DB trigg
 
 ### Admin (`/admin`)
 - **Dashboard:** Stats, charts, push broadcast.
-- **Students:** List with grade/class/status/search filters. **Read-only — no add/import.** Excel export available.
+- **Students:** List with grade/class/status/search filters. **Read-only — no add/import.** Excel export available (lazy-loaded on click).
 - **Requests:** Approve / reject pending requests.
-- **RollCall (ביקורת פנימית):** Broadcast GPS request to all devices.
-- **Audit Log:** All admin actions.
+- **Internal Inspection (`/admin/inspection`):** Live audit (MANUAL or LOCATION mode), Mission Control, alert queue.
+- **Inspection History (`/admin/inspection/history`):** Past sessions, drill-down, CSV export.
+- **Audit Log (`/admin/audit`):** Admin overrides log — **distinct feature from Internal Inspection above**.
 - **Settings:** Change admin PIN.
+- **Legacy routes** `/admin/rollcall` and `/admin/audits` redirect to the new `/admin/inspection` paths.
 
 ### Class Supervisor (`/class-supervisor`)
 - **Dashboard:** Their class students only, statuses, history.
-- All supervisor actions logged in `admin_overrides`.
+- **Audit panel:** Active inspection shows inline in the dashboard when admin opens one for this class (master plan R-16 — not a separate route).
+- All supervisor audit marks go through `submit_audit_entry` (PIN-protected). Departure-related actions still logged in `admin_overrides`.
 
 ---
 

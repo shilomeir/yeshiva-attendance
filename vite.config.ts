@@ -20,7 +20,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Master plan R-54: was 'autoUpdate' (silent install). Switched to
+      // 'prompt' so PwaUpdateToast can show users the "רענן" prompt instead
+      // of leaving them with stale chunks until they manually reload.
+      registerType: 'prompt',
       includeAssets: ['favicon.ico', 'icons/*.png', 'push-sw.js'],
       manifest: {
         name: 'ישיבת שבי חברון',
