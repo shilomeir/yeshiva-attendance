@@ -21,6 +21,7 @@ import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
 import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
+import { subscribeToAuditSession } from '@/lib/audit/realtimeManager'
 import { AuditMissionControl } from '@/components/admin/AuditMissionControl'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
@@ -352,14 +353,11 @@ export function RollCallPage() {
   // subscriptions ping-ponging.
   useEffect(() => {
     if (!activeSession?.id) return
-    const sid = activeSession.id
-    const channel = supabase
-      .channel(`audit-admin-live:${sid}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries', filter: `session_id=eq.${sid}` }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states', filter: `session_id=eq.${sid}` }, refreshActiveSession)
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Master plan R-11: one shared channel per session via the audit
+    // realtime manager. The manager applies the R-35 server-side filters
+    // and ref-counts subscribers so multiple hooks watching the same
+    // session don't open competing channels.
+    return subscribeToAuditSession(activeSession.id, refreshActiveSession)
   }, [activeSession?.id, refreshActiveSession])
 
   useEffect(() => {

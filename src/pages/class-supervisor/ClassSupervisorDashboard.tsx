@@ -20,6 +20,7 @@ import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
+import { subscribeToAuditSession } from '@/lib/audit/realtimeManager'
 import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
@@ -597,27 +598,13 @@ export function ClassSupervisorDashboard() {
   useEffect(() => {
     if (!classId) return
 
-    // Master plan R-35: server-side filter on session_id so we only get
-    // events for the active session. Without a sessionId we don't subscribe
-    // — polling handles the "is a session starting?" case.
-    let auditCh: ReturnType<typeof supabase.channel> | null = null
+    // Master plan R-11: shared audit realtime channel via the manager.
+    // The manager applies R-35 server-side filters internally; we don't
+    // need to filter again here because refreshAuditSession re-fetches
+    // the supervisor-scoped view via getActiveAuditForSupervisor and the
+    // server already scopes to this supervisor's class.
     const sid = activeAuditSession?.id
-    if (sid) {
-      auditCh = supabase
-        .channel(`audit-supervisor-live:${sid}:${classId}`)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` }, refreshAuditSession)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries', filter: `session_id=eq.${sid}` }, (payload) => {
-          // Defence in depth: even after the server-side filter, we double-check
-          // the row's class_id matches this supervisor's class before refreshing.
-          const row = (payload.new ?? payload.old) as { class_id?: string } | undefined
-          if (!row || !row.class_id || row.class_id === classId) refreshAuditSession()
-        })
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states', filter: `session_id=eq.${sid}` }, (payload) => {
-          const row = (payload.new ?? payload.old) as { class_id?: string } | undefined
-          if (!row || !row.class_id || row.class_id === classId) refreshAuditSession()
-        })
-        .subscribe()
-    }
+    const auditUnsub = sid ? subscribeToAuditSession(sid, refreshAuditSession) : null
 
     // Legacy `audit-control` broadcast — kept for backward compatibility while
     // any old admin tabs are still open. New admin code no longer emits it
@@ -633,7 +620,7 @@ export function ClassSupervisorDashboard() {
       .subscribe()
 
     return () => {
-      if (auditCh) supabase.removeChannel(auditCh)
+      if (auditUnsub) auditUnsub()
       supabase.removeChannel(broadcastCh)
     }
   }, [classId, activeAuditSession?.id, refreshAuditSession])
