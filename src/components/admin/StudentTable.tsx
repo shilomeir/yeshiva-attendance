@@ -1,23 +1,12 @@
-import { useRef, useState } from 'react'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { useState } from 'react'
 import { StudentRow } from '@/components/admin/StudentRow'
 import { StudentEditModal } from '@/components/admin/StudentEditModal'
 import { useStudentsStore } from '@/store/studentsStore'
 import type { Student } from '@/types'
 
-const ROW_HEIGHT = 72
-
 export function StudentTable() {
   const { filteredStudents, loadStudents, refreshStudent } = useStudentsStore()
-  const parentRef = useRef<HTMLDivElement>(null)
   const [editingStudent, setEditingStudent] = useState<Student | null>(null)
-
-  const virtualizer = useVirtualizer({
-    count: filteredStudents.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 10,
-  })
 
   if (filteredStudents.length === 0) {
     return (
@@ -29,39 +18,18 @@ export function StudentTable() {
 
   return (
     <>
-      {/* Virtualizer — contain:strict clips fixed/absolute children, so modal is rendered outside */}
-      <div
-        ref={parentRef}
-        className="h-full overflow-auto"
-        style={{ contain: 'strict' }}
-      >
-        <div
-          className="relative w-full"
-          style={{ height: `${virtualizer.getTotalSize()}px` }}
-        >
-          {virtualizer.getVirtualItems().map((virtualItem) => {
-            const student = filteredStudents[virtualItem.index]
-            return (
-              <div
-                key={virtualItem.key}
-                className="absolute w-full"
-                style={{
-                  height: `${virtualItem.size}px`,
-                  transform: `translateY(${virtualItem.start}px)`,
-                }}
-              >
-                <StudentRow
-                  student={student}
-                  onUpdate={loadStudents}
-                  onEditClass={setEditingStudent}
-                />
-              </div>
-            )
-          })}
-        </div>
+      <div>
+        {filteredStudents.map((student) => (
+          <div key={student.id} style={{ height: 72 }}>
+            <StudentRow
+              student={student}
+              onUpdate={loadStudents}
+              onEditClass={setEditingStudent}
+            />
+          </div>
+        ))}
       </div>
 
-      {/* Edit modal rendered OUTSIDE contain:strict so fixed positioning works correctly */}
       {editingStudent && (
         <StudentEditModal
           student={editingStudent}
