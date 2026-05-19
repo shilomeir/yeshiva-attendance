@@ -453,6 +453,11 @@ export function ClassSupervisorDashboard() {
   const [activeAuditSession, setActiveAuditSession] = useState<AuditSessionWithDetails | null>(null)
   const [auditEntries, setAuditEntries] = useState<Map<string, AuditEntryStatus>>(new Map())
   const [auditNotes, setAuditNotes] = useState<Map<string, string | null>>(new Map())
+  // When the supervisor has no PIN cached yet, we cannot fetch the full audit
+  // (the scoped RPC is PIN-protected). minimalAuditInfo lets us still surface
+  // a "ביקורת פעילה — לחץ על תלמיד כדי להתחיל" banner from the anon-callable
+  // minimal endpoint.
+  const [minimalAuditInfo, setMinimalAuditInfo] = useState<{ id: string; mode: 'MANUAL' | 'LOCATION'; title: string | null } | null>(null)
   const [noteDialog, setNoteDialog] = useState<{ studentId: string; studentName: string; draft: string } | null>(null)
   const [isSavingNote, setIsSavingNote] = useState(false)
   const [showAuditWarning, setShowAuditWarning] = useState(false)
@@ -503,18 +508,49 @@ export function ClassSupervisorDashboard() {
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Shared refresh — initial mount, realtime listeners, polling fallback, and
-  // the legacy broadcast channel all call this. Filters to sessions covering
-  // the supervisor's own class; everything else resets local audit state.
+  // Shared refresh — initial mount, polling fallback, and post-mutation
+  // re-fetches all call this.
+  //
+  // The full session (entries, snapshot, classState) is only fetched once the
+  // supervisor PIN is cached in memory via the PinPromptDialog. Without PIN
+  // we fall back to the anon-callable minimal endpoint, which returns just
+  // session metadata so the dashboard can show the "audit active" banner.
+  //
+  // The previous getActiveAuditSession() call is now admin-only (authenticated
+  // role required) — that's why supervisors must go through the
+  // get_active_audit_for_supervisor RPC.
   const refreshAuditSession = useCallback(async () => {
     if (!classId) return
     try {
-      const session = await api.getActiveAuditSession()
-      if (session && session.classIds.includes(classId)) {
-        setActiveAuditSession(session)
+      const pin = useAuthStore.getState().getSupervisorPin()
+      if (pin) {
+        const result = await api.getActiveAuditForSupervisor(pin)
+        if (!result || 'error' in result) {
+          // result === null → no active session; { error } → stale PIN (server
+          // changed) or some other auth issue. Either way, clear local state.
+          setActiveAuditSession(null)
+          setMinimalAuditInfo(null)
+          setAuditEntries(new Map())
+          setAuditNotes(new Map())
+          return
+        }
+        if (!result.isInActiveSession) {
+          // Session exists but this supervisor's class isn't part of it.
+          setActiveAuditSession(null)
+          setMinimalAuditInfo({
+            id: result.session.id,
+            mode: result.session.mode,
+            title: result.session.title,
+          })
+          setAuditEntries(new Map())
+          setAuditNotes(new Map())
+          return
+        }
+        setActiveAuditSession(result.session)
+        setMinimalAuditInfo(null)
         const map = new Map<string, AuditEntryStatus>()
         const notes = new Map<string, string | null>()
-        for (const e of session.entries) {
+        for (const e of result.session.entries) {
           if (e.classId === classId && e.studentId) {
             map.set(e.studentId, e.status)
             notes.set(e.studentId, e.note)
@@ -523,7 +559,15 @@ export function ClassSupervisorDashboard() {
         setAuditEntries(map)
         setAuditNotes(notes)
       } else {
+        // No PIN cached yet — fall back to the minimal endpoint so we can at
+        // least surface that an audit is happening for this class.
+        const minimal = await api.getActiveAuditSessionMinimal()
         setActiveAuditSession(null)
+        if (minimal && minimal.classIds.includes(classId)) {
+          setMinimalAuditInfo({ id: minimal.id, mode: minimal.mode, title: minimal.title })
+        } else {
+          setMinimalAuditInfo(null)
+        }
         setAuditEntries(new Map())
         setAuditNotes(new Map())
       }
@@ -541,9 +585,15 @@ export function ClassSupervisorDashboard() {
   useReloadOnVisibilityAndInterval(refreshAuditSession, AUDIT_POLL_FALLBACK_MS)
 
   // Subscribe to audit session realtime changes + manual audit broadcasts.
-  // We listen to both audit_sessions (lifecycle) AND audit_entries (per-mark)
-  // so a re-mark by the admin or another supervisor on the same class shows up
-  // here without a manual refresh.
+  //
+  // IMPORTANT: after the RLS lockdown (anon can no longer SELECT from audit_*
+  // tables), Supabase realtime postgres_changes events for these tables will
+  // NOT reach anon-authenticated supervisor clients. The 30s polling fallback
+  // (useReloadOnVisibilityAndInterval above) is the primary mechanism for
+  // staying in sync; authenticated admin clients will still receive realtime
+  // events for the same channel. The subscription below is kept as a no-op
+  // safety net for admin-as-supervisor cases and to keep the channel-cleanup
+  // pattern uniform.
   useEffect(() => {
     if (!classId) return
 
@@ -661,6 +711,10 @@ export function ClassSupervisorDashboard() {
         }
       } else {
         setAuditEntries(prev => new Map(prev).set(studentId, status))
+        // If we were on the minimal banner (no PIN yet), this successful mark
+        // just cached the supervisor PIN — pull the full session now so the
+        // dashboard expands from "audit detected" to the full per-student view.
+        if (!activeAuditSession && minimalAuditInfo) refreshAuditSession()
       }
     } catch (err) {
       toast({ title: 'שגיאה בסימון נוכחות', description: getErrorMessage(err, 'שמירת הסימון נכשלה'), variant: 'destructive' })
@@ -809,6 +863,37 @@ export function ClassSupervisorDashboard() {
       </header>
 
       <div className="flex flex-col gap-5 p-4 lg:p-6">
+        {/* Minimal banner — shown when the supervisor has detected an active
+            audit but hasn't entered their PIN yet, so the full session can't
+            be fetched. Tapping the CTA triggers the PIN prompt; on success
+            the dashboard expands to the full audit panel below. */}
+        {!activeAuditSession && minimalAuditInfo && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <ClipboardList className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <div className="min-w-0">
+                <p className="font-semibold text-amber-700 dark:text-amber-300 truncate">
+                  ביקורת פנימית פעילה
+                  {minimalAuditInfo.title && ` — ${minimalAuditInfo.title}`}
+                </p>
+                <p className="text-xs text-amber-600/90 dark:text-amber-400/90 mt-0.5">
+                  הזן PIN אחראי כדי לטעון את נתוני הביקורת
+                </p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              className="bg-amber-500 hover:bg-amber-600 text-white shrink-0"
+              onClick={async () => {
+                const pin = await requestPin('supervisor', 'נדרש PIN אחראי כיתה לצפייה בנתוני הביקורת.')
+                if (pin) refreshAuditSession()
+              }}
+            >
+              טען נתוני ביקורת
+            </Button>
+          </div>
+        )}
+
         {/* Active audit session banner */}
         {activeAuditSession && (
           <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30 p-4">

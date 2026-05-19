@@ -63,11 +63,31 @@ export const useAuthStore = create<AuthState>()(
           }
           const now = new Date().toISOString()
           const deviceToken = get().deviceToken
-          // Stamp lastSeen and bind the locally-generated device token to the
-          // student row so device-token-authenticated RPCs (e.g. submit_student_audit_gps
-          // for the LOCATION-mode audit) can verify this device on later calls.
-          // Pre-existing RLS policy 'anon_update_students' permits this update.
-          supabase.from('students').update({ lastSeen: now, deviceToken }).eq('id', student.id).then(() => {})
+          // Bind the locally-generated device token to the student row so
+          // device-token-authenticated RPCs (submit_student_audit_gps for the
+          // LOCATION-mode audit) can verify this device on later calls. The
+          // pre-existing 'anon_update_students' RLS policy permits the update.
+          //
+          // This is awaited so a silent failure doesn't leave the student in a
+          // half-bound state where GPS submission later fails with AUTH. If
+          // the bind fails (network, RLS regression, schema drift) we still
+          // let the student in to use the rest of the app, but surface a
+          // warning toast so they can retry by logging out and back in.
+          const { error: bindError } = await supabase
+            .from('students')
+            .update({ lastSeen: now, deviceToken })
+            .eq('id', student.id)
+          if (bindError) {
+            // Continue with login but warn — the student can still use
+            // check-in/check-out etc., but GPS audit will fail until they
+            // retry.
+            set({
+              currentUser: { ...student, lastSeen: now, deviceToken },
+              isAdmin: false, classSupervisor: null, isLoading: false,
+              error: 'התחברת, אך שיוך המכשיר נכשל — אם תתבקש לשתף מיקום בביקורת, התנתק והיכנס שוב.',
+            })
+            return true
+          }
           set({ currentUser: { ...student, lastSeen: now, deviceToken }, isAdmin: false, classSupervisor: null, isLoading: false })
           return true
         } catch (err) {

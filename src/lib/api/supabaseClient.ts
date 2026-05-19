@@ -742,11 +742,50 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async getActiveAuditSession(): Promise<AuditSessionWithDetails | null> {
+    // Admin-only — anon execute revoked. Supervisor/student clients should use
+    // getActiveAuditForSupervisor / getActiveAuditForStudent instead.
     const { data, error } = await supabase.rpc('get_active_audit_session')
     if (error) throw error
     if (!data) return null
     const d = data as { session: AuditSessionWithDetails; entries: AuditEntry[]; classStates: AuditClassState[] }
     return { ...d.session, entries: d.entries ?? [], classStates: d.classStates ?? [] }
+  }
+
+  async getActiveAuditSessionMinimal(): Promise<import('./types').ActiveAuditSessionMinimal | null> {
+    const { data, error } = await supabase.rpc('get_active_audit_session_minimal')
+    if (error) throw error
+    if (!data) return null
+    return data as import('./types').ActiveAuditSessionMinimal
+  }
+
+  async getActiveAuditForStudent(studentId: string, deviceToken: string): Promise<import('./types').ActiveAuditForStudent | { error: string } | null> {
+    const { data, error } = await supabase.rpc('get_active_audit_for_student', {
+      p_student_id: studentId,
+      p_device_token: deviceToken,
+    })
+    if (error) throw error
+    if (!data) return null
+    if ((data as { error?: string }).error) return { error: (data as { error: string }).error }
+    return data as import('./types').ActiveAuditForStudent
+  }
+
+  async getActiveAuditForSupervisor(supervisorPin: string): Promise<import('./types').ActiveAuditForSupervisor | { error: string } | null> {
+    const { data, error } = await supabase.rpc('get_active_audit_for_supervisor', {
+      p_supervisor_pin: supervisorPin,
+    })
+    if (error) throw error
+    if (!data) return null
+    if ((data as { error?: string }).error) return { error: (data as { error: string }).error }
+    // The DB returns a shape with { session, isInActiveSession, entries, classState }.
+    // Lift entries + classState onto the session object so callers can consume it
+    // as AuditSessionWithDetails (same as getActiveAuditSession admin response).
+    const d = data as { session: AuditSessionWithDetails; isInActiveSession: boolean; entries?: AuditEntry[]; classState?: AuditClassState | null }
+    const session: AuditSessionWithDetails = {
+      ...d.session,
+      entries: d.entries ?? [],
+      classStates: d.classState ? [d.classState] : [],
+    }
+    return { session, isInActiveSession: d.isInActiveSession }
   }
 
   async getAuditSession(id: string): Promise<AuditSessionWithDetails | null> {

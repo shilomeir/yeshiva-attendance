@@ -823,6 +823,40 @@ export class MockApiClient implements IApiClient {
     return this._mockAuditSession?.status === 'ACTIVE' ? this._mockAuditSession : null
   }
 
+  async getActiveAuditSessionMinimal() {
+    const s = this._mockAuditSession
+    if (!s || s.status !== 'ACTIVE') return null
+    return { id: s.id, title: s.title, mode: s.mode, startedAt: s.startedAt, classIds: s.classIds, totalStudentsSnapshot: s.totalStudentsSnapshot, status: 'ACTIVE' as const }
+  }
+
+  async getActiveAuditForStudent(studentId: string, deviceToken: string) {
+    if (!deviceToken) return { error: 'AUTH' }
+    const s = this._mockAuditSession
+    if (!s || s.status !== 'ACTIVE') return null
+    const snap = s.studentSnapshot.find(x => x.id === studentId)
+    const isInActiveSession = !!snap && s.classIds.includes(snap.classId)
+    const myEntry = s.entries.find(e => e.studentId === studentId) ?? null
+    return {
+      session: { id: s.id, title: s.title, mode: s.mode, startedAt: s.startedAt, classIds: s.classIds, status: 'ACTIVE' as const },
+      isInActiveSession,
+      myEntry: myEntry ? {
+        id: myEntry.id, status: myEntry.status, source: myEntry.source,
+        submittedAt: myEntry.submittedAt,
+        distanceFromCampusM: myEntry.distanceFromCampusM ?? null,
+        distanceBucket: myEntry.distanceBucket ?? null,
+      } : null,
+    }
+  }
+
+  async getActiveAuditForSupervisor(supervisorPin: string) {
+    if (!supervisorPin) return { error: 'AUTH' }
+    const s = this._mockAuditSession
+    if (!s || s.status !== 'ACTIVE') return null
+    // Mock has no PIN-to-class mapping; return full session for backwards parity.
+    // The real server scopes by class — tests should rely on the server smoke test.
+    return { session: s, isInActiveSession: true }
+  }
+
   async getAuditSession(id: string): Promise<AuditSessionWithDetails | null> {
     return this._mockAuditSession?.id === id ? this._mockAuditSession : null
   }

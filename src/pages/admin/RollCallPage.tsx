@@ -267,25 +267,26 @@ export function RollCallPage() {
     if (waitTimerRef.current) clearTimeout(waitTimerRef.current)
 
     try {
-      // 1. Broadcast via Supabase Realtime
-      const channel = supabase.channel('location-requests')
-      await new Promise<void>((resolve) => {
-        channel.subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            channel.send({ type: 'broadcast', event: 'request_location', payload: {} })
-            resolve()
-          }
-        })
-      })
-      supabase.removeChannel(channel)
+      // NOTE: the legacy supabase.channel('location-requests') broadcast was
+      // removed. It (a) captured GPS on student devices without an explicit
+      // tap, violating consent; (b) only wrote to students.lastLocation, never
+      // to audit_entries; (c) wasn't scoped by session/class. Audit-mode GPS
+      // now flows entirely through the explicit student "שתף מיקום" banner
+      // and submit_student_audit_gps RPC, which writes the audit_entries row
+      // with distance/bucket data.
+      //
+      // The student-list view below remains for the legacy "where is everyone
+      // right now" admin glance based on the last GPS each student voluntarily
+      // shared. It is *not* the source of truth for the active audit — that
+      // lives in the Mission Control panel (which reads audit_entries via
+      // realtime + polling).
 
-      // 2. Load current data immediately
       const initial = await api.getStudents()
       enrichAndSet(initial)
       setLastRun(new Date())
       setIsLoading(false)
 
-      // 3. Wait for students to respond
+      // Give students ~15s to open the app and share GPS via the banner.
       setIsWaiting(true)
       waitTimerRef.current = setTimeout(async () => {
         try {
