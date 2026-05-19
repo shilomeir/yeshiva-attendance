@@ -38,6 +38,9 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
         // Load our push + badge handler as a classic script inside the generated SW
         importScripts: ['/push-sw.js'],
       },

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface SplashScreenProps {
   onDone: () => void
@@ -6,15 +6,20 @@ interface SplashScreenProps {
 
 export function SplashScreen({ onDone }: SplashScreenProps) {
   const [exiting, setExiting] = useState(false)
+  const onDoneRef = useRef(onDone)
+
+  useEffect(() => {
+    onDoneRef.current = onDone
+  }, [onDone])
 
   useEffect(() => {
     const exitTimer = setTimeout(() => setExiting(true), 2000)
-    const doneTimer = setTimeout(onDone, 2500)
+    const doneTimer = setTimeout(() => onDoneRef.current(), 2500)
     return () => {
       clearTimeout(exitTimer)
       clearTimeout(doneTimer)
     }
-  }, [onDone])
+  }, [])
 
   return (
     <div
