@@ -188,6 +188,7 @@ export const useStudentsStore = create<StudentsState>()((set, get) => ({
         filteredStudents: applyFilter(students, filter, searchQuery, selectedGrade, selectedClass),
         error: getErrorMessage(error, 'מחיקת התלמיד נכשלה'),
       })
+      throw error
     }
   },
 

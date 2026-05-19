@@ -120,16 +120,17 @@ Events are linked to a departure via `departure_id` FK.
 
 ## 5. Departure Quota System
 
-### Formula: `GREATEST(1, ROUND((classSize × 3) / 25))`
+### Formula: `GREATEST(1, FLOOR(classSize × 0.135))`
 
 | Class size | Quota |
 |-----------|-------|
-| 25 | 3 |
-| 26–29 | 3 |
+| 9–14 | 1 |
+| 15–21 | 2 |
+| 22–29 | 3 |
 | 30–37 | 4 |
-| 38–45 | 5 |
-| 46–54 | 6 |
-| 85 (אברכים ובוגרצ) | 10 |
+| 38–44 | 5 |
+| 45–51 | 6 |
+| 85 (אברכים ובוגרצ) | 11 |
 
 **Rules:**
 - Quota is calculated from the **actual enrolled student count**, not static capacity.

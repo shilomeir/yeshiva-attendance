@@ -7,56 +7,25 @@ interface StatusBadgeProps {
   showDot?: boolean
 }
 
-const STATUS_CONFIG: Record<
-  StudentStatus,
-  { label: string; dotColor: string; bg: string; text: string; border: string }
-> = {
-  ON_CAMPUS: {
-    label: 'בישיבה',
-    dotColor: '#22C55E',
-    bg: 'rgba(34,197,94,0.1)',
-    text: '#16A34A',
-    border: 'rgba(34,197,94,0.25)',
-  },
-  OFF_CAMPUS: {
-    label: 'מחוץ לישיבה',
-    dotColor: '#F97316',
-    bg: 'rgba(249,115,22,0.1)',
-    text: '#EA580C',
-    border: 'rgba(249,115,22,0.25)',
-  },
-  OVERDUE: {
-    label: 'מחוץ לישיבה',
-    dotColor: '#F97316',
-    bg: 'rgba(249,115,22,0.1)',
-    text: '#EA580C',
-    border: 'rgba(249,115,22,0.25)',
-  },
-  PENDING: {
-    label: 'ממתין',
-    dotColor: '#94A3B8',
-    bg: 'rgba(148,163,184,0.1)',
-    text: '#64748B',
-    border: 'rgba(148,163,184,0.25)',
-  },
+const STATUS_CONFIG: Record<StudentStatus, { label: string; color: string; soft: string }> = {
+  ON_CAMPUS:  { label: 'בישיבה',        color: 'var(--good)',     soft: 'var(--good-soft)' },
+  OFF_CAMPUS: { label: 'מחוץ לישיבה',   color: 'var(--warn)',     soft: 'var(--warn-soft)' },
+  OVERDUE:    { label: 'מחוץ לישיבה',   color: 'var(--warn)',     soft: 'var(--warn-soft)' },
+  PENDING:    { label: 'ממתין',          color: 'var(--info)',     soft: 'var(--info-soft)' },
 }
 
 export function StatusBadge({ status, className, showDot = true }: StatusBadgeProps) {
-  const cfg = STATUS_CONFIG[status]
+  const cfg = STATUS_CONFIG[status] ?? STATUS_CONFIG.PENDING
 
   return (
     <span
-      className={cn('inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold', className)}
-      style={{
-        background: cfg.bg,
-        color: cfg.text,
-        border: `1px solid ${cfg.border}`,
-      }}
+      className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold', className)}
+      style={{ background: cfg.soft, color: cfg.color, border: `1px solid ${cfg.color}33` }}
     >
       {showDot && (
         <span
-          className="pulse-dot inline-block h-2 w-2 shrink-0 rounded-full"
-          style={{ background: cfg.dotColor }}
+          className="pulse-dot inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ background: cfg.color }}
         />
       )}
       {cfg.label}

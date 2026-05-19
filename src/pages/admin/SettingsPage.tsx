@@ -1,21 +1,29 @@
 import { useState } from 'react'
 import { KeyRound, Eye, EyeOff } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { toast } from '@/hooks/use-toast'
 import { useAuthStore } from '@/store/authStore'
+
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  borderRadius: 10,
+  border: '1px solid var(--hairline)',
+  background: 'rgba(255,255,255,0.7)',
+  color: 'var(--ink)',
+  padding: '10px 14px',
+  fontSize: 14,
+  fontFamily: 'inherit',
+  outline: 'none',
+}
 
 export function SettingsPage() {
   const { changeAdminPin } = useAuthStore()
 
-  // PIN change state
   const [oldPin, setOldPin] = useState('')
   const [newPin, setNewPin] = useState('')
   const [confirmPin, setConfirmPin] = useState('')
   const [showPins, setShowPins] = useState(false)
   const [pinError, setPinError] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const handleChangePin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,14 +38,17 @@ export function SettingsPage() {
       return
     }
 
+    setSaving(true)
     const result = await changeAdminPin(oldPin, newPin)
+    setSaving(false)
+
     if (!result.success) {
-      const messages = {
+      const messages: Record<string, string> = {
         'invalid-current-pin': 'הסיסמה הנוכחית שגויה',
         'change-failed': 'הסיסמה לא שונתה בגלל שגיאת מערכת. נסה שוב.',
         'login-verification-failed': 'הסיסמה שונתה, אבל לא הצלחנו לאמת כניסה מחדש. יש להתנתק ולהיכנס שוב עם הסיסמה החדשה.',
       }
-      setPinError(messages[result.error])
+      setPinError(messages[result.error] ?? result.error)
       return
     }
 
@@ -48,80 +59,104 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6 p-4 lg:p-6 max-w-2xl">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap)', maxWidth: 560 }}>
+      {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-[var(--text)]">הגדרות</h2>
-        <p className="text-sm text-[var(--text-muted)]">הגדרות מערכת וניהול סיסמה</p>
+        <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}>
+          ניהול מערכת
+        </div>
+        <h1 style={{ fontFamily: 'Fraunces, serif', fontSize: 'clamp(34px, 3vw, 50px)', fontWeight: 500, lineHeight: 1, letterSpacing: '-0.03em', color: 'var(--ink)', margin: 0 }}>
+          הגדרות
+        </h1>
+        <p style={{ marginTop: 8, color: 'var(--ink-muted)', fontSize: 14.5 }}>הגדרות מערכת וניהול סיסמה</p>
       </div>
 
-      {/* Change admin PIN */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <KeyRound className="h-4 w-4 text-[var(--purple)]" />
-            שינוי סיסמת מנהל
-          </CardTitle>
-          <CardDescription>שנה את קוד הגישה לפאנל הניהול</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleChangePin} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="oldPin">סיסמה נוכחית</Label>
-              <div className="relative">
-                <Input
-                  id="oldPin"
-                  type={showPins ? 'text' : 'password'}
-                  value={oldPin}
-                  onChange={(e) => { setOldPin(e.target.value); setPinError('') }}
-                  placeholder="הזן סיסמה נוכחית"
-                  className="pe-10"
-                  autoComplete="current-password"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPins(!showPins)}
-                  className="absolute end-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text)]"
-                >
-                  {showPins ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="newPin">סיסמה חדשה</Label>
-              <Input
-                id="newPin"
+      {/* PIN change card */}
+      <div className="glass" style={{ padding: 'var(--card-pad)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--plum-soft)', color: 'var(--plum)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <KeyRound size={16} />
+          </div>
+          <div>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)' }}>שינוי סיסמת מנהל</div>
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>שנה את קוד הגישה לפאנל הניהול</div>
+          </div>
+        </div>
+
+        <form onSubmit={handleChangePin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <input type="text" autoComplete="username" style={{ display: 'none' }} readOnly value="admin" />
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-muted)' }}>סיסמה נוכחית</label>
+            <div style={{ position: 'relative' }}>
+              <input
+                id="oldPin"
                 type={showPins ? 'text' : 'password'}
-                value={newPin}
-                onChange={(e) => { setNewPin(e.target.value); setPinError('') }}
-                placeholder="לפחות 4 תווים"
-                autoComplete="new-password"
+                value={oldPin}
+                onChange={(e) => { setOldPin(e.target.value); setPinError('') }}
+                placeholder="הזן סיסמה נוכחית"
+                autoComplete="current-password"
+                style={{ ...inputStyle, paddingInlineEnd: 40 }}
               />
+              <button
+                type="button"
+                onClick={() => setShowPins(!showPins)}
+                style={{ position: 'absolute', insetInlineEnd: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ink-faint)', display: 'flex' }}
+              >
+                {showPins ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
             </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="confirmPin">אישור סיסמה חדשה</Label>
-              <Input
-                id="confirmPin"
-                type={showPins ? 'text' : 'password'}
-                value={confirmPin}
-                onChange={(e) => { setConfirmPin(e.target.value); setPinError('') }}
-                placeholder="הזן שוב את הסיסמה החדשה"
-                autoComplete="new-password"
-              />
-            </div>
-            {pinError && (
-              <p className="text-sm text-[var(--red)]" role="alert">{pinError}</p>
-            )}
-            <Button
-              type="submit"
-              disabled={!oldPin || !newPin || !confirmPin}
-              className="w-full lg:w-auto lg:self-start"
-            >
-              <KeyRound className="h-4 w-4" />
-              שנה סיסמה
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-muted)' }}>סיסמה חדשה</label>
+            <input
+              id="newPin"
+              type={showPins ? 'text' : 'password'}
+              value={newPin}
+              onChange={(e) => { setNewPin(e.target.value); setPinError('') }}
+              placeholder="לפחות 4 תווים"
+              autoComplete="new-password"
+              style={inputStyle}
+            />
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-muted)' }}>אישור סיסמה חדשה</label>
+            <input
+              id="confirmPin"
+              type={showPins ? 'text' : 'password'}
+              value={confirmPin}
+              onChange={(e) => { setConfirmPin(e.target.value); setPinError('') }}
+              placeholder="הזן שוב את הסיסמה החדשה"
+              autoComplete="new-password"
+              style={inputStyle}
+            />
+          </div>
+
+          {pinError && (
+            <p style={{ fontSize: 13, color: 'var(--bad)', margin: 0 }} role="alert">{pinError}</p>
+          )}
+
+          <button
+            type="submit"
+            disabled={!oldPin || !newPin || !confirmPin || saving}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '10px 20px', borderRadius: 10,
+              background: 'linear-gradient(135deg, var(--ink), var(--accent))',
+              border: 'none', cursor: !oldPin || !newPin || !confirmPin || saving ? 'not-allowed' : 'pointer',
+              opacity: !oldPin || !newPin || !confirmPin || saving ? 0.5 : 1,
+              color: '#fff', fontSize: 13.5, fontWeight: 600, fontFamily: 'inherit',
+              alignSelf: 'flex-start',
+              transition: 'opacity 0.15s',
+            }}
+          >
+            <KeyRound size={14} />
+            {saving ? 'שומר...' : 'שנה סיסמה'}
+          </button>
+        </form>
+      </div>
     </div>
   )
 }

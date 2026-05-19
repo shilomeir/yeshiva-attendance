@@ -1,13 +1,12 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import {
-  AlertOctagon, Phone, User, Clock, CheckCircle, AlertTriangle, ShieldCheck,
-  TrendingUp, TrendingDown, Minus,
+  AlertOctagon, Phone, Clock, CheckCircle, AlertTriangle, ShieldCheck,
+  TrendingUp, TrendingDown, Minus, Filter, X as XIcon,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
@@ -23,8 +22,7 @@ function timeAgo(isoStr: string | null): string {
   if (diffMins < 60) return `לפני ${diffMins} דקות`
   const diffHours = Math.floor(diffMins / 60)
   if (diffHours < 24) return `לפני ${diffHours} שעות`
-  const diffDays = Math.floor(diffHours / 24)
-  return `לפני ${diffDays} ימים`
+  return `לפני ${Math.floor(diffHours / 24)} ימים`
 }
 
 function fmt2(n: number) { return n.toString().padStart(2, '0') }
@@ -56,11 +54,43 @@ interface DepartureInfo {
 }
 
 interface WeeklyPoint {
-  day: string       // short Hebrew day name
-  dayFull: string   // full Hebrew day name
+  day: string
+  dayFull: string
   thisWeek: number
   lastWeek: number
-  date: string      // YYYY-MM-DD of this-week date
+  date: string
+}
+
+// ─── CategoryCard ─────────────────────────────────────────────────────────────
+
+function CategoryCard({ icon, label, tone, count, desc }: {
+  icon: React.ReactNode; label: string; tone: string
+  count: number; desc: string
+}) {
+  const map: Record<string, { c: string; s: string }> = {
+    bad:  { c: 'var(--bad)',  s: 'var(--bad-soft)'  },
+    plum: { c: 'var(--plum)', s: 'var(--plum-soft)' },
+    info: { c: 'var(--info)', s: 'var(--info-soft)'  },
+  }
+  const m = map[tone] ?? map.info
+  return (
+    <div className="glass" style={{ padding: 'var(--card-pad)', borderTop: `3px solid ${m.c}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+        <div style={{
+          width: 40, height: 40, borderRadius: 12,
+          background: m.s, color: m.c,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {icon}
+        </div>
+        <div style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}>{label}</div>
+      </div>
+      <div className="font-mono-num" style={{ fontSize: 42, fontWeight: 600, color: m.c, lineHeight: 1, letterSpacing: '-0.03em' }}>
+        {count}
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--ink-faint)', marginTop: 8, lineHeight: 1.45 }}>{desc}</p>
+    </div>
+  )
 }
 
 // ─── DepartureTimeline ───────────────────────────────────────────────────────
@@ -69,216 +99,105 @@ function DepartureTimeline({ items, now }: { items: DepartureInfo[]; now: Date }
   if (items.length === 0) return null
 
   const nowMs = now.getTime()
-
-  // Build time window: 30 min before earliest departure → 30 min after latest expected return
   const departureTimes = items.map(i => i.departedAt.getTime())
   const returnTimes    = items.map(i => i.expectedReturn?.getTime() ?? nowMs + 2 * 3600_000)
   const windowStart    = new Date(Math.min(...departureTimes) - 30 * 60_000)
   const windowEnd      = new Date(Math.max(Math.max(...returnTimes) + 30 * 60_000, nowMs + 60 * 60_000))
   const windowDur      = windowEnd.getTime() - windowStart.getTime()
 
-  const pct = (ms: number) =>
-    Math.max(0, Math.min(100, ((ms - windowStart.getTime()) / windowDur) * 100))
-
+  const pct = (ms: number) => Math.max(0, Math.min(100, ((ms - windowStart.getTime()) / windowDur) * 100))
   const nowPct = pct(nowMs)
 
-  // Hour ticks for the ruler
   const ticks: Date[] = []
   const t = new Date(windowStart)
   t.setMinutes(0, 0, 0)
   if (t <= windowStart) t.setHours(t.getHours() + 1)
-  while (t <= windowEnd) {
-    ticks.push(new Date(t))
-    t.setHours(t.getHours() + 1)
-  }
+  while (t <= windowEnd) { ticks.push(new Date(t)); t.setHours(t.getHours() + 1) }
 
   return (
-    <div
-      className="overflow-hidden rounded-2xl animate-slide-up"
-      style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        boxShadow: 'var(--shadow-card)',
-      }}
-    >
-      {/* ── Header ── */}
-      <div
-        className="flex items-center justify-between px-5 py-4"
-        style={{ borderBottom: '1px solid var(--border)' }}
-      >
-        <div className="flex items-center gap-3">
-          <div className="relative flex h-8 w-8 items-center justify-center rounded-xl"
-            style={{ background: 'rgba(239,68,68,0.1)' }}>
-            <Clock className="h-4 w-4 text-[var(--red)]" />
-            <span
-              className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-[var(--red)]"
-              style={{ animation: 'pulse-dot 2s ease-in-out infinite' }}
-            />
-          </div>
-          <div>
-            <p className="text-base font-bold text-[var(--text)]">לוח יציאות — עכשיו</p>
-            <p className="text-xs text-[var(--text-muted)]">{items.length} תלמידים מחוץ לישיבה</p>
-          </div>
+    <div className="glass" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--hairline)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>תזמון</div>
+          <h3 style={{ marginTop: 4, fontSize: 17, fontWeight: 500, color: 'var(--ink)' }}>לוח יציאות פעילות</h3>
         </div>
-        <span
-          className="font-mono text-sm font-semibold tabular-nums text-[var(--text-muted)]"
-          style={{ letterSpacing: '0.05em' }}
-        >
-          {fmtTime(now)}
-        </span>
+        <div className="font-mono-num" style={{ fontSize: 13, color: 'var(--bad)', fontWeight: 600, padding: '4px 12px', background: 'var(--bad-soft)', borderRadius: 999 }}>
+          ● {fmtTime(now)}
+        </div>
       </div>
 
-      {/* ── Timeline grid ── */}
-      <div className="overflow-x-auto px-4 pb-4 pt-2" style={{ minWidth: 0 }}>
-        <div style={{ minWidth: '480px' }}>
-
-          {/* ── Ruler row ── */}
-          <div className="flex items-end gap-3 mb-1">
-            {/* Name column spacer */}
-            <div className="shrink-0" style={{ width: '9rem' }} />
-
-            {/* Ruler area */}
-            <div className="relative flex-1 h-7">
-              {/* Baseline */}
-              <div
-                className="absolute bottom-0 inset-x-0 h-px"
-                style={{ background: 'var(--border)' }}
-              />
-              {/* Hour ticks */}
+      <div style={{ padding: '14px 22px', overflowX: 'auto' }}>
+        <div style={{ minWidth: 480 }}>
+          {/* Ruler */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14, marginBottom: 8 }}>
+            <div style={{ width: 150, flexShrink: 0 }} />
+            <div style={{ flex: 1, height: 24, position: 'relative', borderBottom: '1px solid var(--hairline)' }}>
               {ticks.map((tick, i) => {
                 const p = pct(tick.getTime())
                 if (p < 0 || p > 100) return null
                 return (
-                  <div
-                    key={i}
-                    className="absolute bottom-0 flex flex-col items-center"
-                    style={{ left: `${p}%`, transform: 'translateX(-50%)' }}
-                  >
-                    <span className="text-[10px] tabular-nums font-medium text-[var(--text-muted)] mb-1 whitespace-nowrap">
-                      {fmt2(tick.getHours())}:00
-                    </span>
-                    <div className="h-2 w-px" style={{ background: 'var(--border)' }} />
+                  <div key={i} style={{ position: 'absolute', insetInlineStart: `${p}%`, transform: 'translateX(50%)', bottom: 0 }}>
+                    <span className="font-mono-num" style={{ fontSize: 10, color: 'var(--ink-faint)' }}>{fmt2(tick.getHours())}:00</span>
+                    <div style={{ width: 1, height: 4, background: 'var(--hairline-2)', margin: '2px auto 0' }} />
                   </div>
                 )
               })}
-              {/* NOW label on ruler */}
-              {nowPct >= 0 && nowPct <= 100 && (
-                <div
-                  className="absolute bottom-0 flex flex-col items-center z-10"
-                  style={{ left: `${nowPct}%`, transform: 'translateX(-50%)' }}
-                >
-                  <span className="text-[10px] font-bold text-[var(--red)] mb-1 whitespace-nowrap tabular-nums">
-                    {fmtTime(now)}
-                  </span>
-                  <div className="h-2.5 w-0.5 bg-[var(--red)]" />
-                </div>
-              )}
             </div>
-
-            {/* Status column spacer */}
-            <div className="shrink-0" style={{ width: '5rem' }} />
           </div>
 
-          {/* ── Student rows ── */}
+          {/* Rows */}
           {items.map((item, idx) => {
             const startP = pct(item.departedAt.getTime())
             const endMs  = item.expectedReturn?.getTime() ?? nowMs + 2 * 3600_000
             const endP   = pct(endMs)
-            const barW   = Math.max(1, endP - startP)
-
-            const isOverdue    = !!item.expectedReturn && item.expectedReturn.getTime() < nowMs
-            const minsLeftMs   = item.expectedReturn ? item.expectedReturn.getTime() - nowMs : null
-            const isAlmostDue  = minsLeftMs !== null && minsLeftMs > 0 && minsLeftMs < 30 * 60_000
-
+            const isOverdue   = !!item.expectedReturn && item.expectedReturn.getTime() < nowMs
+            const minsLeftMs  = item.expectedReturn ? item.expectedReturn.getTime() - nowMs : null
+            const isAlmostDue = minsLeftMs !== null && minsLeftMs > 0 && minsLeftMs < 30 * 60_000
             const barColor =
-              isOverdue    ? 'var(--red)'
-              : isAlmostDue ? 'var(--orange)'
-              : item.variant === 'noApproval'  ? 'var(--orange)'
-              : item.variant === 'withUrgent'  ? '#818CF8'
-              : 'var(--blue)'
+              isOverdue    ? 'var(--bad)'
+              : isAlmostDue ? 'var(--warn)'
+              : item.variant === 'noApproval'  ? 'var(--warn)'
+              : item.variant === 'withUrgent'  ? 'var(--plum)'
+              : 'var(--info)'
+            const barW = Math.max(1, Math.abs(endP - startP))
 
             return (
-              <div
-                key={item.student.id}
-                className="timeline-row-enter flex items-center gap-3 py-1.5"
-                style={{ animationDelay: `${idx * 55}ms` }}
-              >
-                {/* ── Name column (RTL) ── */}
-                <div
-                  dir="rtl"
-                  className="shrink-0 text-right leading-tight"
-                  style={{ width: '9rem' }}
-                >
-                  <p className="text-sm font-semibold text-[var(--text)] truncate">
-                    {item.student.fullName}
-                  </p>
-                  <p className="text-xs text-[var(--text-muted)] truncate">
-                    {item.student.classId}
-                  </p>
+              <div key={item.student.id} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '8px 0', borderBottom: idx < items.length - 1 ? '1px solid var(--hairline)' : 'none' }}>
+                <div style={{ width: 150, flexShrink: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.student.fullName}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.student.classId}</div>
                 </div>
-
-                {/* ── Bar area ── */}
-                <div className="flex-1 relative h-9">
-                  {/* Track */}
-                  <div
-                    className="absolute inset-0 rounded-lg"
-                    style={{ background: 'var(--bg-2)' }}
-                  />
-
-                  {/* NOW vertical line */}
+                <div style={{ flex: 1, position: 'relative', height: 32 }}>
+                  <div style={{ position: 'absolute', insetInline: 0, top: 14, height: 4, background: 'rgba(20,18,25,0.05)', borderRadius: 999 }} />
                   {nowPct >= 0 && nowPct <= 100 && (
-                    <div
-                      className="timeline-now-line absolute top-0 bottom-0 w-0.5 z-10 rounded-full"
-                      style={{ left: `${nowPct}%`, background: 'var(--red)' }}
-                    />
+                    <div style={{ position: 'absolute', insetInlineStart: `${nowPct}%`, top: 0, bottom: 0, width: 1, background: 'var(--bad)', zIndex: 2 }} />
                   )}
-
-                  {/* Departure bar */}
-                  <div
-                    className={`timeline-bar-enter absolute top-1.5 bottom-1.5 rounded-md ${isOverdue ? 'timeline-overdue' : ''}`}
-                    style={{
-                      left: `${startP}%`,
-                      width: `${barW}%`,
-                      background: barColor,
-                      animationDelay: `${idx * 55}ms`,
-                    }}
-                  />
-
-                  {/* Time labels inside bar (only if bar is wide enough) */}
-                  {barW > 18 && (
-                    <div
-                      className="absolute top-1.5 bottom-1.5 z-20 flex items-center justify-between px-2 pointer-events-none overflow-hidden"
-                      style={{ left: `${startP}%`, width: `${barW}%` }}
-                    >
-                      <span className="text-[10px] font-bold text-white/90 whitespace-nowrap tabular-nums">
-                        {fmtTime(item.departedAt)}
-                      </span>
-                      {item.expectedReturn && barW > 28 && (
-                        <span className="text-[10px] font-bold text-white/90 whitespace-nowrap tabular-nums">
-                          {fmtTime(item.expectedReturn)}
-                        </span>
-                      )}
-                    </div>
-                  )}
+                  <div style={{
+                    position: 'absolute',
+                    insetInlineStart: `${Math.min(startP, endP)}%`,
+                    width: `${barW}%`,
+                    top: 8, height: 16, borderRadius: 999,
+                    background: `linear-gradient(90deg, ${barColor}, color-mix(in oklch, ${barColor} 60%, white))`,
+                    boxShadow: `0 2px 8px -2px ${barColor}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '0 6px', fontSize: 10, color: 'white', fontWeight: 600,
+                    overflow: 'hidden',
+                  }} dir="ltr">
+                    <span className="font-mono-num">{fmtTime(item.departedAt)}</span>
+                    {barW > 12 && item.expectedReturn && <span className="font-mono-num">{fmtTime(item.expectedReturn)}</span>}
+                  </div>
                 </div>
-
-                {/* ── Status badge ── */}
-                <div className="shrink-0 text-center" style={{ width: '5rem' }}>
+                <div style={{ width: 80, flexShrink: 0, textAlign: 'left' }}>
                   {isOverdue ? (
-                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
-                      <Clock className="h-3 w-3" />
-                      איחור
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 999, background: 'var(--bad-soft)', color: 'var(--bad)', fontSize: 11, fontWeight: 600 }}>
+                      <Clock size={10} /> איחור
                     </span>
                   ) : minsLeftMs !== null ? (
-                    <span
-                      className={`text-xs font-semibold tabular-nums whitespace-nowrap ${
-                        isAlmostDue ? 'text-orange-500' : 'text-[var(--text-muted)]'
-                      }`}
-                    >
+                    <span className="font-mono-num" style={{ fontSize: 11, color: isAlmostDue ? 'var(--warn)' : 'var(--ink-muted)', fontWeight: 500 }}>
                       {fmtMinsLeft(minsLeftMs)}
                     </span>
                   ) : (
-                    <span className="text-xs text-[var(--text-muted)]">ללא ח.ז.</span>
+                    <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>ללא ח.ז.</span>
                   )}
                 </div>
               </div>
@@ -293,128 +212,40 @@ function DepartureTimeline({ items, now }: { items: DepartureInfo[]; now: Date }
 // ─── WeeklyComparisonChart ───────────────────────────────────────────────────
 
 function WeeklyComparisonChart({ data }: { data: WeeklyPoint[] }) {
-  // Summary: total off-campus this week vs last week
   const thisTotal = data.reduce((s, d) => s + d.thisWeek, 0)
   const lastTotal = data.reduce((s, d) => s + d.lastWeek, 0)
   const diff      = thisTotal - lastTotal
   const pctChange = lastTotal > 0 ? Math.round(Math.abs(diff) / lastTotal * 100) : 0
-
-  const TrendIcon =
-    diff > 0 ? TrendingUp
-    : diff < 0 ? TrendingDown
-    : Minus
-
-  const trendColor =
-    diff > 0 ? 'text-red-500'   // more departures = bad
-    : diff < 0 ? 'text-green-500'
-    : 'text-[var(--text-muted)]'
-
-  const trendLabel =
-    diff > 0 ? `+${pctChange}% לעומת שבוע שעבר`
-    : diff < 0 ? `${pctChange}% פחות מהשבוע שעבר`
-    : 'זהה לשבוע שעבר'
+  const TrendIcon = diff > 0 ? TrendingUp : diff < 0 ? TrendingDown : Minus
+  const trendColor = diff > 0 ? 'var(--bad)' : diff < 0 ? 'var(--good)' : 'var(--ink-muted)'
+  const trendLabel = diff > 0 ? `+${pctChange}% לעומת שבוע שעבר` : diff < 0 ? `${pctChange}% פחות מהשבוע שעבר` : 'זהה לשבוע שעבר'
 
   return (
-    <div
-      className="overflow-hidden rounded-2xl animate-slide-up delay-200"
-      style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        boxShadow: 'var(--shadow-card)',
-      }}
-    >
-      {/* ── Header ── */}
-      <div
-        className="flex items-center justify-between px-5 py-4"
-        style={{ borderBottom: '1px solid var(--border)' }}
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className="flex h-8 w-8 items-center justify-center rounded-xl"
-            style={{ background: 'rgba(59,130,246,0.1)' }}
-          >
-            <TrendingUp className="h-4 w-4 text-[var(--blue)]" />
-          </div>
-          <div>
-            <p className="text-base font-bold text-[var(--text)]">השוואה שבועית — יציאות</p>
-            <p className="text-xs text-[var(--text-muted)]">יציאות לפי יום: השבוע מול שבוע שעבר</p>
-          </div>
+    <div className="glass" style={{ padding: 'var(--card-pad)' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>השוואה</div>
+          <h3 style={{ marginTop: 4, fontSize: 16, fontWeight: 500, color: 'var(--ink)' }}>יציאות שבועיות</h3>
         </div>
-
-        {/* Trend badge */}
-        <div className={`flex items-center gap-1.5 text-sm font-semibold ${trendColor}`}>
-          <TrendIcon className="h-4 w-4" />
-          <span>{trendLabel}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: trendColor }}>
+          <TrendIcon size={14} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{trendLabel}</span>
         </div>
       </div>
-
-      {/* ── Chart ── */}
-      <div className="px-4 pt-4 pb-2" dir="ltr">
+      <div dir="ltr">
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-            <CartesianGrid
-              strokeDasharray="3 3"
-              stroke="var(--border)"
-              vertical={false}
-            />
-            <XAxis
-              dataKey="day"
-              tick={{ fill: 'var(--text-muted)', fontSize: 12, fontFamily: 'Heebo, sans-serif' }}
-              axisLine={false}
-              tickLine={false}
-            />
-            <YAxis
-              allowDecimals={false}
-              tick={{ fill: 'var(--text-muted)', fontSize: 11, fontFamily: 'Heebo, sans-serif' }}
-              axisLine={false}
-              tickLine={false}
-            />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--hairline)" vertical={false} />
+            <XAxis dataKey="day" tick={{ fill: 'var(--ink-faint)', fontSize: 12, fontFamily: 'Heebo, sans-serif' }} axisLine={false} tickLine={false} />
+            <YAxis allowDecimals={false} tick={{ fill: 'var(--ink-faint)', fontSize: 11 }} axisLine={false} tickLine={false} />
             <Tooltip
-              contentStyle={{
-                background: 'var(--surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '10px',
-                direction: 'rtl',
-                fontFamily: 'Heebo, sans-serif',
-                fontSize: '13px',
-              }}
-              formatter={(value: number, name: string) => [
-                `${value} יציאות`,
-                name === 'thisWeek' ? 'השבוע' : 'שבוע שעבר',
-              ]}
-              labelFormatter={(label) => {
-                const point = data.find(d => d.day === label)
-                return point ? `${point.dayFull}` : label
-              }}
+              contentStyle={{ background: 'var(--glass-3)', border: '1px solid var(--hairline)', borderRadius: 10, direction: 'rtl', fontFamily: 'Heebo, sans-serif', fontSize: 13 }}
+              formatter={(value: number, name: string) => [`${value} יציאות`, name === 'thisWeek' ? 'השבוע' : 'שבוע שעבר']}
+              labelFormatter={(label) => { const point = data.find(d => d.day === label); return point?.dayFull ?? label }}
             />
-            <Legend
-              formatter={(value) => (
-                <span style={{ color: 'var(--text-muted)', fontSize: '12px', fontFamily: 'Heebo, sans-serif' }}>
-                  {value === 'thisWeek' ? 'השבוע' : 'שבוע שעבר'}
-                </span>
-              )}
-            />
-            <Line
-              type="monotone"
-              dataKey="thisWeek"
-              name="thisWeek"
-              stroke="var(--blue)"
-              strokeWidth={2.5}
-              dot={{ r: 4, fill: 'var(--blue)', strokeWidth: 0 }}
-              activeDot={{ r: 6, fill: 'var(--blue)' }}
-              connectNulls={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="lastWeek"
-              name="lastWeek"
-              stroke="var(--text-muted)"
-              strokeWidth={2}
-              strokeDasharray="6 4"
-              dot={{ r: 3, fill: 'var(--text-muted)', strokeWidth: 0 }}
-              activeDot={{ r: 5 }}
-              connectNulls={false}
-            />
+            <Legend formatter={(value) => <span style={{ color: 'var(--ink-muted)', fontSize: 12, fontFamily: 'Heebo, sans-serif' }}>{value === 'thisWeek' ? 'השבוע' : 'שבוע שעבר'}</span>} />
+            <Line type="monotone" dataKey="thisWeek" name="thisWeek" stroke="var(--accent)" strokeWidth={2.5} dot={{ r: 4, fill: 'var(--accent)', strokeWidth: 0 }} activeDot={{ r: 6 }} connectNulls={false} />
+            <Line type="monotone" dataKey="lastWeek" name="lastWeek" stroke="var(--ink-faint)" strokeWidth={2} strokeDasharray="6 4" dot={{ r: 3, fill: 'var(--ink-faint)', strokeWidth: 0 }} connectNulls={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -422,174 +253,91 @@ function WeeklyComparisonChart({ data }: { data: WeeklyPoint[] }) {
   )
 }
 
-// ─── sub-components ──────────────────────────────────────────────────────────
+// ─── CategorySection ──────────────────────────────────────────────────────────
 
-interface SectionHeaderProps {
-  icon: React.ReactNode
-  title: string
-  count: number
-  colorClass: string
-  bgClass: string
-  borderClass: string
-}
-
-function SectionHeader({ icon, title, count, colorClass, bgClass, borderClass }: SectionHeaderProps) {
+function CategorySection({ title, tone, students }: { title: string; tone: string; students: Student[] }) {
+  const colorMap: Record<string, string> = { bad: 'var(--bad)', plum: 'var(--plum)', info: 'var(--info)' }
+  const color = colorMap[tone] ?? 'var(--info)'
   return (
-    <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${bgClass} ${borderClass}`}>
-      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${bgClass}`}>
-        <span className={colorClass}>{icon}</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ width: 6, height: 24, background: color, borderRadius: 3 }} />
+        <h3 style={{ fontSize: 17, fontWeight: 500, color, margin: 0 }}>{title}</h3>
+        <span style={{ padding: '2px 8px', borderRadius: 999, background: color + '18', color, fontSize: 12, fontWeight: 600 }}>{students.length}</span>
       </div>
-      <div className="flex-1 min-w-0">
-        <p className={`font-semibold ${colorClass}`}>{title}</p>
-      </div>
-      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm font-bold ${colorClass} ${bgClass} border ${borderClass}`}>
-        {count}
-      </span>
-    </div>
-  )
-}
-
-interface StudentCardProps {
-  student: Student
-  variant: 'overdue' | 'noApproval' | 'withApproval' | 'withUrgent'
-}
-
-function StudentCard({ student: s, variant }: StudentCardProps) {
-  const isOverdue    = variant === 'overdue'
-  const isNoApproval = variant === 'noApproval'
-  const isUrgent     = variant === 'withUrgent'
-
-  const borderColor =
-    isOverdue     ? 'border-red-200 dark:border-red-800/40'
-    : isNoApproval ? 'border-orange-200 dark:border-orange-800/40'
-    : isUrgent     ? 'border-indigo-200 dark:border-indigo-800/40'
-    :                'border-blue-200 dark:border-blue-800/40'
-
-  const bgColor =
-    isOverdue     ? 'bg-red-50/60 dark:bg-red-950/10'
-    : isNoApproval ? 'bg-orange-50/60 dark:bg-orange-950/10'
-    : isUrgent     ? 'bg-indigo-50/60 dark:bg-indigo-950/10'
-    :                'bg-blue-50/60 dark:bg-blue-950/10'
-
-  const lastSeenColor =
-    isOverdue     ? 'text-red-600 dark:text-red-400'
-    : isNoApproval ? 'text-orange-600 dark:text-orange-400'
-    : isUrgent     ? 'text-indigo-600 dark:text-indigo-400'
-    :                'text-blue-600 dark:text-blue-400'
-
-  return (
-    <Card className={`border ${borderColor} ${bgColor}`}>
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--bg-2)]">
-                <User className="h-4 w-4 text-[var(--text-muted)]" />
-              </div>
-              <div className="min-w-0">
-                <p className="font-semibold text-[var(--text)] leading-tight">{s.fullName}</p>
-                <p className="text-xs text-[var(--text-muted)]">{s.classId}</p>
-              </div>
+      <div className="glass" style={{ padding: 0, overflow: 'hidden' }}>
+        {students.map((s, i) => (
+          <div key={s.id} style={{
+            display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px',
+            borderBottom: i === students.length - 1 ? 'none' : '1px solid var(--hairline)',
+          }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+              background: `hsl(${[...s.fullName].reduce((a, c) => a + c.charCodeAt(0), 0) % 360}, 55%, 72%)`,
+              color: `hsl(${[...s.fullName].reduce((a, c) => a + c.charCodeAt(0), 0) % 360}, 55%, 28%)`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 700,
+            }}>
+              {s.fullName.slice(0, 2)}
             </div>
-
-            <p className="text-xs text-[var(--text-muted)] pr-10">ת.ז. {s.idNumber}</p>
-
-            <div className={`flex items-center gap-1.5 pr-10 text-xs font-medium ${lastSeenColor}`}>
-              <Clock className="h-3.5 w-3.5 shrink-0" />
-              {isOverdue
-                ? <span>באיחור — נעדר {timeAgo(s.lastSeen)}</span>
-                : <span>יצא {timeAgo(s.lastSeen)}</span>
-              }
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>{s.fullName}</div>
+              <div style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>{s.classId} · ת.ז. {s.idNumber}</div>
             </div>
-
-            {isNoApproval && (
-              <div className="pr-10">
-                <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-300">
-                  <AlertTriangle className="h-3 w-3" />
-                  ללא אישור
-                </span>
-              </div>
-            )}
-
-            {isUrgent && (
-              <div className="pr-10">
-                <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-                  <ShieldCheck className="h-3 w-3" />
-                  אישור חריג
-                </span>
-              </div>
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)', textAlign: 'left', flexShrink: 0 }}>
+              <div>נראה לאחרונה</div>
+              <div style={{ color: 'var(--ink-muted)', fontWeight: 500 }}>{timeAgo(s.lastSeen)}</div>
+            </div>
+            {s.phone && (
+              <a href={`tel:${s.phone}`} style={{
+                padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.6)',
+                border: '1px solid var(--hairline)', color: 'var(--accent-deep)',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                fontSize: 12, fontWeight: 500, textDecoration: 'none',
+              }}>
+                <Phone size={13} /> {s.phone}
+              </a>
             )}
           </div>
-
-          {s.phone && (
-            <a
-              href={`tel:${s.phone}`}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm font-medium text-[var(--blue)] shadow-sm hover:bg-blue-50 transition-colors dark:bg-slate-800 dark:hover:bg-slate-700"
-            >
-              <Phone className="h-4 w-4" />
-              <span className="hidden sm:inline">{s.phone}</span>
-            </a>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+        ))}
+      </div>
+    </div>
   )
 }
 
 // ─── main page ───────────────────────────────────────────────────────────────
 
 export function ExceptionsPage() {
-  const [categorised, setCategorised] = useState<CategorisedStudents>({
-    noApproval: [],
-    withApproval: [],
-    withUrgent: [],
-  })
+  const [categorised, setCategorised] = useState<CategorisedStudents>({ noApproval: [], withApproval: [], withUrgent: [] })
   const [departures,   setDepartures]   = useState<DepartureInfo[]>([])
   const [weeklyData,   setWeeklyData]   = useState<WeeklyPoint[]>([])
   const [now,          setNow]          = useState<Date>(new Date())
   const [isLoading,    setIsLoading]    = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [filterGrade,  setFilterGrade]  = useState('all')
+  const [filterClass,  setFilterClass]  = useState('all')
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Tick every 30 s to keep "now" line and countdowns fresh
   useEffect(() => {
     tickRef.current = setInterval(() => setNow(new Date()), 30_000)
     return () => { if (tickRef.current) clearInterval(tickRef.current) }
   }, [])
 
-  // ── Build weekly chart data from 14 days of presence ──────────────────────
   function buildWeeklyPoints(raw: DailyPresenceData[]): WeeklyPoint[] {
-    // Build a map date → offCampus
     const byDate = new Map(raw.map(d => [d.date, d.offCampus]))
-
-    const today   = new Date()
+    const today = new Date()
     const points: WeeklyPoint[] = []
-
     for (let i = 6; i >= 0; i--) {
-      // This-week day
-      const thisDay  = new Date(today)
-      thisDay.setDate(today.getDate() - i)
+      const thisDay = new Date(today); thisDay.setDate(today.getDate() - i)
+      const lastDay = new Date(thisDay); lastDay.setDate(thisDay.getDate() - 7)
       const thisDayStr = thisDay.toISOString().slice(0, 10)
-
-      // Last-week same weekday
-      const lastDay  = new Date(thisDay)
-      lastDay.setDate(thisDay.getDate() - 7)
       const lastDayStr = lastDay.toISOString().slice(0, 10)
-
-      const dowIdx = thisDay.getDay() // 0=Sun
-      points.push({
-        day:      HE_DAYS_SHORT[dowIdx],
-        dayFull:  HE_DAYS[dowIdx],
-        date:     thisDayStr,
-        thisWeek: byDate.get(thisDayStr) ?? 0,
-        lastWeek: byDate.get(lastDayStr) ?? 0,
-      })
+      const dowIdx = thisDay.getDay()
+      points.push({ day: HE_DAYS_SHORT[dowIdx], dayFull: HE_DAYS[dowIdx], date: thisDayStr, thisWeek: byDate.get(thisDayStr) ?? 0, lastWeek: byDate.get(lastDayStr) ?? 0 })
     }
-
     return points
   }
 
-  // ── Load all data ──────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     setIsLoading(true)
     setErrorMessage(null)
@@ -599,33 +347,20 @@ export function ExceptionsPage() {
         api.listDepartures({ status: 'ACTIVE' }) as Promise<CalendarDeparture[]>,
         api.getDailyPresence(14),
       ])
-
-      // Build map: student_id → active departure
       const depMap = new Map<string, CalendarDeparture>()
       for (const dep of activeDeps) depMap.set(dep.student_id, dep)
-
-      // Off-campus students (union of currentStatus + active departures)
       const activeIds = new Set(activeDeps.map(d => d.student_id))
       const outsideStudents = allStudents.filter(
         (s: Student) => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE' || activeIds.has(s.id)
       )
-
       const noApproval   = outsideStudents.filter((s: Student) => !depMap.has(s.id))
       const withUrgent   = outsideStudents.filter((s: Student) => depMap.get(s.id)?.is_urgent === true)
       const withApproval = outsideStudents.filter((s: Student) => depMap.has(s.id) && !depMap.get(s.id)?.is_urgent)
       setCategorised({ noApproval, withApproval, withUrgent })
-
-      // ── Build timeline from departure data (no events query needed) ──
       const infos: DepartureInfo[] = outsideStudents.map((s: Student) => {
         const dep = depMap.get(s.id)
-        return {
-          student:        s,
-          departedAt:     dep ? new Date(dep.start_at) : new Date(s.lastSeen ?? Date.now()),
-          expectedReturn: dep ? new Date(dep.end_at) : null,
-          variant:        dep ? (dep.is_urgent ? 'withUrgent' : 'withApproval') : 'noApproval',
-        }
+        return { student: s, departedAt: dep ? new Date(dep.start_at) : new Date(s.lastSeen ?? Date.now()), expectedReturn: dep ? new Date(dep.end_at) : null, variant: dep ? (dep.is_urgent ? 'withUrgent' : 'withApproval') : 'noApproval' }
       })
-
       infos.sort((a, b) => {
         const nowMs = Date.now()
         const aMs = a.expectedReturn?.getTime() ?? Infinity
@@ -637,51 +372,84 @@ export function ExceptionsPage() {
         return aMs - bMs
       })
       setDepartures(infos)
-
       setWeeklyData(buildWeeklyPoints(presenceRaw))
     } catch (err) {
-      console.error('Failed to load exceptions data', err)
       setErrorMessage(getErrorMessage(err, 'טעינת נתוני החריגות נכשלה'))
     } finally {
       setIsLoading(false)
     }
   }, [])
 
-  // ── Realtime subscriptions ─────────────────────────────────────────────────
   useEffect(() => {
     loadData()
-
-    const studentsChannel = supabase
-      .channel('exceptions-students')
+    const studentsChannel = supabase.channel('exceptions-students')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData())
       .subscribe()
-
     return () => { supabase.removeChannel(studentsChannel) }
   }, [loadData])
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  const totalOutside =
-    categorised.noApproval.length +
-    categorised.withApproval.length +
-    categorised.withUrgent.length
+  // Derived filter options
+  const allOutside = useMemo(() => [
+    ...categorised.noApproval,
+    ...categorised.withApproval,
+    ...categorised.withUrgent,
+  ], [categorised])
 
-  // ── Loading ────────────────────────────────────────────────────────────────
+  const availableGrades = useMemo(() => [...new Set(allOutside.map(s => s.grade).filter(Boolean))], [allOutside])
+
+  const classOptions = useMemo(() => {
+    const source = filterGrade === 'all' ? allOutside : allOutside.filter(s => s.grade === filterGrade)
+    return [...new Set(source.map(s => s.classId).filter(Boolean))]
+  }, [allOutside, filterGrade])
+
+  const filteredCategorised = useMemo(() => {
+    const pass = (s: Student) => {
+      if (filterGrade !== 'all' && s.grade !== filterGrade) return false
+      if (filterClass !== 'all' && s.classId !== filterClass) return false
+      return true
+    }
+    return {
+      noApproval:   categorised.noApproval.filter(pass),
+      withApproval: categorised.withApproval.filter(pass),
+      withUrgent:   categorised.withUrgent.filter(pass),
+    }
+  }, [categorised, filterGrade, filterClass])
+
+  const filteredDepartures = useMemo(() => {
+    if (filterGrade === 'all' && filterClass === 'all') return departures
+    const passIds = new Set([
+      ...filteredCategorised.noApproval.map(s => s.id),
+      ...filteredCategorised.withApproval.map(s => s.id),
+      ...filteredCategorised.withUrgent.map(s => s.id),
+    ])
+    return departures.filter(d => passIds.has(d.student.id))
+  }, [departures, filteredCategorised, filterGrade, filterClass])
+
+  const totalOutside = categorised.noApproval.length + categorised.withApproval.length + categorised.withUrgent.length
+  const filteredTotal = filteredCategorised.noApproval.length + filteredCategorised.withApproval.length + filteredCategorised.withUrgent.length
+
+  const selectStyle: React.CSSProperties = {
+    padding: '5px 10px', borderRadius: 8,
+    background: 'rgba(255,255,255,0.7)', border: '1px solid var(--hairline)',
+    fontSize: 12.5, fontFamily: 'inherit', color: 'var(--ink)',
+    cursor: 'pointer', outline: 'none',
+  }
+
   if (isLoading) {
     return (
-      <div className="flex flex-col gap-6 p-4 lg:p-6">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap)' }} dir="rtl">
         <div>
-          <h2 className="text-2xl font-bold text-[var(--text)]">חריגות עכשיו</h2>
-          <p className="text-sm text-[var(--text-muted)]">מעקב בזמן אמת אחר תלמידים מחוץ לישיבה</p>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--bad)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--bad)', display: 'inline-block' }} />
+            עכשיו · בזמן אמת
+          </div>
+          <h1 style={{ fontSize: 'clamp(34px, 3vw, 50px)', fontWeight: 500, lineHeight: 1, letterSpacing: '-0.03em', color: 'var(--ink)', fontFamily: 'Fraunces, serif', margin: 0 }}>חריגות עכשיו</h1>
         </div>
-        {/* Skeleton shimmer */}
-        <div className="flex flex-col gap-3">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {[1, 2, 3].map(i => (
-            <div
-              key={i}
-              className="h-16 rounded-2xl animate-pulse"
-              style={{ background: 'var(--bg-2)', animationDelay: `${i * 100}ms` }}
-            />
+            <div key={i} className="glass" style={{ height: 72, borderRadius: 20, animation: 'admin-pulse 1.5s ease-in-out infinite', animationDelay: `${i * 0.1}s` }} />
           ))}
         </div>
       </div>
@@ -690,112 +458,108 @@ export function ExceptionsPage() {
 
   if (errorMessage) {
     return (
-      <div className="flex flex-col gap-6 p-4 lg:p-6" dir="rtl">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap)' }} dir="rtl">
         <div>
-          <h2 className="text-2xl font-bold text-[var(--text)]">חריגות עכשיו</h2>
-          <p className="text-sm text-[var(--text-muted)]">מעקב בזמן אמת אחר תלמידים מחוץ לישיבה</p>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--bad)', marginBottom: 6 }}>עכשיו · בזמן אמת</div>
+          <h1 style={{ fontSize: 'clamp(34px, 3vw, 50px)', fontWeight: 500, lineHeight: 1, letterSpacing: '-0.03em', color: 'var(--ink)', fontFamily: 'Fraunces, serif', margin: 0 }}>חריגות עכשיו</h1>
         </div>
-        <div className="rounded-2xl border border-red-200 bg-red-50/70 p-4 text-sm text-red-700 dark:border-red-800/40 dark:bg-red-950/20 dark:text-red-300">
-          {errorMessage}
+        <div className="glass" style={{ padding: 16, borderInlineStart: '3px solid var(--bad)', background: 'var(--bad-soft)' }}>
+          <p style={{ fontSize: 13, color: 'var(--bad)' }}>{errorMessage}</p>
         </div>
       </div>
     )
   }
 
-  // ── Empty state ────────────────────────────────────────────────────────────
-  if (totalOutside === 0) {
-    return (
-      <div className="flex flex-col gap-6 p-4 lg:p-6" dir="rtl">
-        <div>
-          <h2 className="text-2xl font-bold text-[var(--text)]">חריגות עכשיו</h2>
-          <p className="text-sm text-[var(--text-muted)]">מעקב בזמן אמת אחר תלמידים מחוץ לישיבה</p>
-        </div>
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-green-200 bg-green-50/60 py-16 dark:border-green-800/40 dark:bg-green-950/10">
-          <CheckCircle className="h-14 w-14 text-green-500" />
-          <p className="text-lg font-semibold text-green-700 dark:text-green-400">
-            אין חריגות — כל התלמידים בישיבה
-          </p>
-        </div>
-        {/* Weekly chart still visible when all are on campus */}
-        {weeklyData.length > 0 && <WeeklyComparisonChart data={weeklyData} />}
-      </div>
-    )
-  }
-
-  // ── Main view ──────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col gap-6 p-4 lg:p-6" dir="rtl">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap)' }} dir="rtl">
 
-      {/* Page header */}
-      <div className="flex items-start justify-between gap-3">
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
         <div>
-          <h2 className="text-2xl font-bold text-[var(--text)]">חריגות עכשיו</h2>
-          <p className="text-sm text-[var(--text-muted)]">
-            {totalOutside} תלמידים מחוץ לישיבה כרגע
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--bad)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--bad)', display: 'inline-block', animation: 'admin-shimmer-pulse 1.4s ease-in-out infinite' }} />
+            עכשיו · בזמן אמת
+          </div>
+          <h1 style={{ fontSize: 'clamp(34px, 3vw, 50px)', fontWeight: 500, lineHeight: 1, letterSpacing: '-0.03em', color: 'var(--ink)', fontFamily: 'Fraunces, serif', margin: 0 }}>
+            <span className="font-mono-num">{totalOutside}</span>
+            {' '}
+            <span style={{ color: 'var(--ink-muted)', fontWeight: 400 }}>מחוץ לישיבה</span>
+          </h1>
+          <p style={{ marginTop: 8, color: 'var(--ink-muted)', fontSize: 14.5 }}>
+            מעקב בזמן אמת אחר תלמידים שנמצאים מחוץ לישיבה, יחד עם סטטוס אישורים.
           </p>
-        </div>
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50 dark:bg-red-950/20">
-          <AlertOctagon className="h-5 w-5 text-[var(--red)]" />
         </div>
       </div>
 
-      {/* ── Departure Timeline (flight board) ── */}
-      <DepartureTimeline items={departures} now={now} />
+      {/* ── Filter row ────────────────────────────────────────────────── */}
+      <div className="glass" style={{ padding: '12px 18px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <Filter size={15} style={{ color: 'var(--ink-muted)' }} />
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-muted)' }}>סינון תצוגה:</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>שכבה</span>
+          <select value={filterGrade} onChange={e => { setFilterGrade(e.target.value); setFilterClass('all') }} style={selectStyle}>
+            <option value="all">כל השכבות</option>
+            {availableGrades.map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>כיתה</span>
+          <select value={filterClass} onChange={e => setFilterClass(e.target.value)} style={selectStyle} disabled={classOptions.length <= 1}>
+            <option value="all">כל הכיתות</option>
+            {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        {(filterGrade !== 'all' || filterClass !== 'all') && (
+          <button
+            onClick={() => { setFilterGrade('all'); setFilterClass('all') }}
+            style={{ marginInlineStart: 'auto', padding: '5px 10px', borderRadius: 8, background: 'transparent', border: '1px solid var(--hairline)', color: 'var(--ink-muted)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <XIcon size={11} /> נקה סינון
+          </button>
+        )}
+        <span style={{ marginInlineStart: filterGrade === 'all' && filterClass === 'all' ? 'auto' : '0', fontSize: 12, color: 'var(--ink-faint)' }}>
+          {filteredTotal} תלמידים מתאימים
+        </span>
+      </div>
 
-      {/* ── Weekly comparison chart ── */}
-      {weeklyData.length > 0 && <WeeklyComparisonChart data={weeklyData} />}
-
-      {/* ── Category 1: OFF_CAMPUS without approval ── */}
-      {categorised.noApproval.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <SectionHeader
-            icon={<AlertTriangle className="h-4.5 w-4.5" />}
-            title="בחוץ ללא אישור"
-            count={categorised.noApproval.length}
-            colorClass="text-orange-600 dark:text-orange-400"
-            bgClass="bg-orange-50 dark:bg-orange-950/20"
-            borderClass="border-orange-200 dark:border-orange-800/40"
-          />
-          {categorised.noApproval.map((s) => (
-            <StudentCard key={s.id} student={s} variant="noApproval" />
-          ))}
-        </section>
+      {/* ── Empty state ───────────────────────────────────────────────── */}
+      {totalOutside === 0 && (
+        <>
+          <div className="glass" style={{ padding: 60, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <CheckCircle size={56} style={{ color: 'var(--good)', opacity: 0.8 }} />
+            <p style={{ fontSize: 18, fontWeight: 500, color: 'var(--good)' }}>אין חריגות — כל התלמידים בישיבה</p>
+          </div>
+          {weeklyData.length > 0 && <WeeklyComparisonChart data={weeklyData} />}
+        </>
       )}
 
-      {/* ── Category 2: OFF_CAMPUS with urgent approval ── */}
-      {categorised.withUrgent.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <SectionHeader
-            icon={<ShieldCheck className="h-4.5 w-4.5" />}
-            title="בחוץ חריג"
-            count={categorised.withUrgent.length}
-            colorClass="text-indigo-600 dark:text-indigo-400"
-            bgClass="bg-indigo-50 dark:bg-indigo-950/20"
-            borderClass="border-indigo-200 dark:border-indigo-800/40"
-          />
-          {categorised.withUrgent.map((s) => (
-            <StudentCard key={s.id} student={s} variant="withUrgent" />
-          ))}
-        </section>
-      )}
+      {/* ── Category cards ────────────────────────────────────────────── */}
+      {totalOutside > 0 && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--gap-sm)' }}>
+            <CategoryCard icon={<AlertTriangle size={20} />} label="ללא אישור" tone="bad" count={filteredCategorised.noApproval.length} desc="לא נוכחים בישיבה ואין להם אישור פעיל" />
+            <CategoryCard icon={<ShieldCheck size={20} />} label="באישור חריג" tone="plum" count={filteredCategorised.withUrgent.length} desc='אושר ע"י הר"מ או ראש הישיבה' />
+            <CategoryCard icon={<CheckCircle size={20} />} label="באישור רגיל" tone="info" count={filteredCategorised.withApproval.length} desc="יציאה מתוכננת ומאושרת מראש" />
+          </div>
 
-      {/* ── Category 3: OFF_CAMPUS with regular approval ── */}
-      {categorised.withApproval.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <SectionHeader
-            icon={<CheckCircle className="h-4.5 w-4.5" />}
-            title="בחוץ באישור"
-            count={categorised.withApproval.length}
-            colorClass="text-blue-600 dark:text-blue-400"
-            bgClass="bg-blue-50 dark:bg-blue-950/20"
-            borderClass="border-blue-200 dark:border-blue-800/40"
-          />
-          {categorised.withApproval.map((s) => (
-            <StudentCard key={s.id} student={s} variant="withApproval" />
-          ))}
-        </section>
-      )}
+          {/* Timeline */}
+          <DepartureTimeline items={filteredDepartures} now={now} />
 
+          {/* Weekly chart */}
+          {weeklyData.length > 0 && <WeeklyComparisonChart data={weeklyData} />}
+
+          {/* Category sections */}
+          {filteredCategorised.noApproval.length > 0 && (
+            <CategorySection title="בחוץ ללא אישור" tone="bad" students={filteredCategorised.noApproval} />
+          )}
+          {filteredCategorised.withUrgent.length > 0 && (
+            <CategorySection title="בחוץ — אישור חריג" tone="plum" students={filteredCategorised.withUrgent} />
+          )}
+          {filteredCategorised.withApproval.length > 0 && (
+            <CategorySection title="בחוץ באישור" tone="info" students={filteredCategorised.withApproval} />
+          )}
+        </>
+      )}
     </div>
   )
 }

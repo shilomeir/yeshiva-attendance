@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
 import { ArrowUpRight, ArrowDownLeft, Clock, CheckCircle, XCircle, AlertOctagon, Activity, CalendarIcon, Play } from 'lucide-react'
-import { Card, CardContent } from '@/components/ui/card'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
@@ -13,6 +12,16 @@ import type { Event, CalendarDeparture } from '@/types'
 type TimelineItem =
   | { kind: 'event'; data: Event; sortKey: string }
   | { kind: 'departure'; data: CalendarDeparture; sortKey: string }
+
+function formatDateHebrewFull(isoStr: string): string {
+  const d = new Date(isoStr)
+  const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+  const monthNames = [
+    'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
+    'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר',
+  ]
+  return `יום ${dayNames[d.getDay()]}, ${d.getDate()} ב${monthNames[d.getMonth()]}`
+}
 
 function formatDateHebrew(isoStr: string): string {
   const d = new Date(isoStr)
@@ -30,6 +39,22 @@ function getTimeStr(isoStr: string): string {
 
 function getDateStr(isoStr: string): string {
   return new Date(isoStr).toISOString().slice(0, 10)
+}
+
+function isToday(dateStr: string): boolean {
+  return dateStr === new Date().toISOString().slice(0, 10)
+}
+
+function isYesterday(dateStr: string): boolean {
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  return dateStr === yesterday.toISOString().slice(0, 10)
+}
+
+function dateLabel(dateStr: string): string {
+  if (isToday(dateStr)) return 'היום'
+  if (isYesterday(dateStr)) return 'אתמול'
+  return formatDateHebrewFull(`${dateStr}T12:00:00`)
 }
 
 export function HistoryPage() {
@@ -58,7 +83,6 @@ export function HistoryPage() {
 
   useEffect(() => { loadData() }, [currentUser?.id])
 
-  // Events realtime (CHECK_IN events from returnDeparture, OVERRIDE events)
   useEffect(() => {
     if (!currentUser) return
     const ch = supabase
@@ -68,11 +92,8 @@ export function HistoryPage() {
     return () => { supabase.removeChannel(ch) }
   }, [currentUser?.id])
 
-  // Departures realtime
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  // Only show OVERRIDE events — CHECK_OUT/CHECK_IN linked to a departure
-  // are represented by the departure card itself.
   const auditEvents = events.filter((e) => e.type === 'OVERRIDE')
 
   const eventItems: TimelineItem[] = auditEvents.map((e) => ({
@@ -91,91 +112,160 @@ export function HistoryPage() {
     b.sortKey.localeCompare(a.sortKey)
   )
 
+  // Group by date
+  const grouped = new Map<string, TimelineItem[]>()
+  for (const item of timeline) {
+    const key = getDateStr(item.sortKey)
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key)!.push(item)
+  }
+  const groupedEntries = Array.from(grouped.entries()).sort((a, b) => b[0].localeCompare(a[0]))
+
   return (
-    <div className="flex flex-col gap-4 p-4 pt-6" dir="rtl">
-      <h2 className="text-xl font-bold text-[var(--text)]">ציר הזמן</h2>
+    <div className="flex flex-col gap-0 p-4 pt-6" dir="rtl">
+      {/* Page header */}
+      <div className="mb-5 flex items-center gap-3">
+        <div style={{
+          width: 40, height: 40, borderRadius: 14,
+          background: 'linear-gradient(135deg, var(--accent), #3730a3)',
+          display: 'grid', placeItems: 'center', flexShrink: 0,
+          boxShadow: '0 6px 16px rgba(79,70,229,0.3)',
+        }}>
+          <CalendarIcon style={{ width: 18, height: 18, color: '#fff' }} />
+        </div>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 800, color: 'var(--text)', lineHeight: 1.2 }}>ציר הזמן</h2>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
+            {timeline.length > 0 ? `${timeline.length} רשומות` : 'היסטוריית יציאות'}
+          </p>
+        </div>
+      </div>
 
       {isLoading ? (
-        <div className="flex justify-center py-8">
-          <div className="text-[var(--text-muted)]">טוען...</div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}>
+          <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>טוען...</div>
         </div>
       ) : timeline.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-2 py-8 text-center">
-            <CalendarIcon className="h-10 w-10 text-[var(--text-muted)]" />
-            <p className="text-[var(--text-muted)]">אין פעילות עדיין</p>
-          </CardContent>
-        </Card>
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          gap: 12, padding: '48px 16px', textAlign: 'center',
+          borderRadius: 20,
+          background: 'rgba(255,255,255,0.6)',
+          border: '1px solid rgba(15,23,42,0.06)',
+          backdropFilter: 'blur(12px)',
+        }}>
+          <CalendarIcon style={{ width: 44, height: 44, color: 'var(--text-muted)', opacity: 0.5 }} />
+          <p style={{ color: 'var(--text-muted)', fontSize: 15, fontWeight: 500 }}>אין פעילות עדיין</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: 12, opacity: 0.7 }}>יציאות ואירועים יופיעו כאן</p>
+        </div>
       ) : (
-        <div className="flex flex-col gap-3">
-          {timeline.map((item) => {
-            if (item.kind === 'event') {
-              return <EventItem key={`event-${item.data.id}`} event={item.data} />
-            }
-            return <DepartureItem key={`dep-${item.data.id}`} departure={item.data} />
-          })}
+        <div className="flex flex-col gap-6">
+          {groupedEntries.map(([dateStr, items]) => (
+            <div key={dateStr} className="flex flex-col gap-2">
+              {/* Day header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <span className="day-chip">
+                  <span style={{
+                    width: 5, height: 5, borderRadius: '50%',
+                    background: isToday(dateStr) ? '#22c55e' : 'var(--text-muted)',
+                    display: 'inline-block', flexShrink: 0,
+                  }} />
+                  {dateLabel(dateStr)}
+                </span>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 500 }}>
+                  {items.length} {items.length === 1 ? 'רשומה' : 'רשומות'}
+                </span>
+              </div>
+
+              {/* Items for this day */}
+              <div className="flex flex-col gap-2">
+                {items.map((item) => {
+                  if (item.kind === 'event') {
+                    return <EventItem key={`event-${item.data.id}`} event={item.data} />
+                  }
+                  return <DepartureItem key={`dep-${item.data.id}`} departure={item.data} />
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
   )
 }
 
-// ─── Event item (OVERRIDE only) ──────────────────────────────────────────────
+// ── Event item ────────────────────────────────────────────────────────────────
 
 function EventItem({ event }: { event: Event }) {
+  let accentColor: string
   let iconBg: string
-  let iconColor: string
   let label: string
   let IconComponent: React.ElementType
 
   if (event.type === 'CHECK_OUT') {
-    iconBg = 'bg-orange-100 dark:bg-orange-950/30'
-    iconColor = 'text-[var(--orange)]'
+    accentColor = 'var(--orange)'
+    iconBg = 'rgba(249,115,22,0.12)'
     label = 'יציאה'
     IconComponent = ArrowUpRight
   } else if (event.type === 'CHECK_IN') {
-    iconBg = 'bg-green-100 dark:bg-green-950/30'
-    iconColor = 'text-[var(--green)]'
+    accentColor = 'var(--green)'
+    iconBg = 'rgba(34,197,94,0.12)'
     label = 'כניסה'
     IconComponent = ArrowDownLeft
   } else {
-    iconBg = 'bg-gray-100 dark:bg-gray-800/40'
-    iconColor = 'text-[var(--text-muted)]'
+    accentColor = 'var(--text-muted)'
+    iconBg = 'rgba(100,116,139,0.1)'
     label = 'עדכון ידני'
     IconComponent = Activity
   }
 
   return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-start gap-3">
-          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconBg} ${iconColor}`}>
-            <IconComponent className="h-5 w-5" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="font-medium text-[var(--text)]">
-              {label}
-              {event.reason && ` — ${event.reason}`}
-            </p>
-            <p className="mt-0.5 text-sm text-[var(--text-muted)]">
-              {formatDateTimeHebrew(event.timestamp)}
-            </p>
-          </div>
+    <div style={{
+      borderRadius: 16,
+      background: 'rgba(255,255,255,0.72)',
+      border: '1px solid rgba(255,255,255,0.9)',
+      boxShadow: '0 2px 12px rgba(15,23,42,0.07)',
+      backdropFilter: 'blur(12px)',
+      padding: '12px 14px',
+      borderInlineStart: `3px solid ${accentColor}`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{
+          width: 34, height: 34, borderRadius: 11, flexShrink: 0,
+          background: iconBg,
+          display: 'grid', placeItems: 'center',
+          color: accentColor,
+        }}>
+          <IconComponent style={{ width: 16, height: 16 }} />
         </div>
-      </CardContent>
-    </Card>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>
+            {label}
+            {event.reason && <span style={{ fontWeight: 500, color: 'var(--text-muted)' }}> — {event.reason}</span>}
+          </p>
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+            {formatDateTimeHebrew(event.timestamp)}
+          </p>
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', flexShrink: 0 }}>
+          {getTimeStr(event.timestamp)}
+        </span>
+      </div>
+    </div>
   )
 }
 
-// ─── Departure item ───────────────────────────────────────────────────────────
+// ── Departure item ─────────────────────────────────────────────────────────────
 
 function DepartureItem({ departure: dep }: { departure: CalendarDeparture }) {
   const depDateStr = getDateStr(dep.start_at)
   const endDateStr = getDateStr(dep.end_at)
-  const dateLabel = endDateStr !== depDateStr
+  const isMultiDay = endDateStr !== depDateStr
+  const dateLabel2 = isMultiDay
     ? `${formatDateHebrew(dep.start_at)} — ${formatDateHebrew(dep.end_at)}`
     : formatDateHebrew(dep.start_at)
 
+  let accentColor: string
   let iconBg: string
   let iconColor: string
   let statusLabel: string
@@ -183,73 +273,109 @@ function DepartureItem({ departure: dep }: { departure: CalendarDeparture }) {
 
   switch (dep.status) {
     case 'PENDING':
-      iconBg = 'bg-yellow-100 dark:bg-yellow-950/30'
-      iconColor = 'text-[var(--orange)]'
-      statusLabel = 'בקשה ממתינה'
+      accentColor = 'var(--orange)'
+      iconBg = 'rgba(249,115,22,0.12)'
+      iconColor = 'var(--orange)'
+      statusLabel = 'ממתינה לאישור'
       IconComponent = Clock
       break
     case 'APPROVED':
-      iconBg = 'bg-blue-100 dark:bg-blue-950/30'
-      iconColor = 'text-blue-600 dark:text-blue-400'
-      statusLabel = 'בקשה אושרה'
+      accentColor = 'var(--info)'
+      iconBg = 'var(--info-soft)'
+      iconColor = 'var(--info)'
+      statusLabel = 'אושרה'
       IconComponent = CheckCircle
       break
     case 'ACTIVE':
-      iconBg = 'bg-orange-100 dark:bg-orange-950/30'
-      iconColor = 'text-[var(--orange)]'
-      statusLabel = 'מחוץ לישיבה'
+      accentColor = 'var(--orange)'
+      iconBg = 'rgba(249,115,22,0.12)'
+      iconColor = 'var(--orange)'
+      statusLabel = 'בתוקף — בחוץ'
       IconComponent = Play
       break
     case 'COMPLETED':
-      iconBg = 'bg-green-100 dark:bg-green-950/30'
-      iconColor = 'text-[var(--green)]'
-      statusLabel = 'יציאה הסתיימה'
+      accentColor = 'var(--green)'
+      iconBg = 'rgba(34,197,94,0.1)'
+      iconColor = 'var(--green)'
+      statusLabel = 'הסתיימה'
       IconComponent = CheckCircle
       break
     case 'REJECTED':
-      iconBg = 'bg-red-100 dark:bg-red-950/30'
-      iconColor = 'text-[var(--red)]'
-      statusLabel = 'בקשה נדחתה'
+      accentColor = 'var(--red)'
+      iconBg = 'rgba(239,68,68,0.1)'
+      iconColor = 'var(--red)'
+      statusLabel = 'נדחתה'
       IconComponent = XCircle
       break
     default:
-      iconBg = 'bg-gray-100 dark:bg-gray-800/40'
-      iconColor = 'text-[var(--text-muted)]'
+      accentColor = 'var(--text-muted)'
+      iconBg = 'rgba(100,116,139,0.08)'
+      iconColor = 'var(--text-muted)'
       statusLabel = 'בוטלה'
       IconComponent = XCircle
   }
 
   return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-start gap-3">
-          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconBg} ${iconColor}`}>
-            <IconComponent className="h-5 w-5" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="font-medium text-[var(--text)]">{statusLabel}</p>
-              {dep.is_urgent && (
-                <span className="flex items-center gap-0.5 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-600 dark:bg-orange-900/30">
-                  <AlertOctagon className="h-2.5 w-2.5" />
-                  חריג
-                </span>
-              )}
-            </div>
-            <p className="mt-0.5 text-sm text-[var(--text-muted)]">{dateLabel}</p>
-            <div className="mt-0.5 flex items-center gap-1 text-xs text-[var(--text-muted)]">
-              <Clock className="h-3.5 w-3.5" />
-              {getTimeStr(dep.start_at)} — {getTimeStr(dep.end_at)}
-            </div>
-            {dep.reason && <p className="mt-1 text-sm text-[var(--text-muted)]">{dep.reason}</p>}
-            {dep.admin_note && (
-              <p className="mt-1.5 text-xs text-[var(--text-muted)] italic">
-                הערת מנהל: {dep.admin_note}
-              </p>
+    <div style={{
+      borderRadius: 16,
+      background: 'rgba(255,255,255,0.72)',
+      border: '1px solid rgba(255,255,255,0.9)',
+      boxShadow: '0 2px 12px rgba(15,23,42,0.07)',
+      backdropFilter: 'blur(12px)',
+      padding: '12px 14px',
+      borderInlineStart: `3px solid ${accentColor}`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{
+          width: 34, height: 34, borderRadius: 11, flexShrink: 0,
+          background: iconBg,
+          display: 'grid', placeItems: 'center',
+          color: iconColor,
+        }}>
+          <IconComponent style={{ width: 16, height: 16 }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{statusLabel}</span>
+            {dep.is_urgent && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                borderRadius: 999,
+                background: 'rgba(249,115,22,0.12)',
+                padding: '2px 6px',
+                fontSize: 10, fontWeight: 800, color: 'var(--orange)',
+              }}>
+                <AlertOctagon style={{ width: 9, height: 9 }} />
+                חריג
+              </span>
             )}
           </div>
+          {!isMultiDay && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3 }}>
+              <Clock style={{ width: 11, height: 11, color: 'var(--text-muted)', flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {getTimeStr(dep.start_at)} — {getTimeStr(dep.end_at)}
+              </span>
+            </div>
+          )}
+          {isMultiDay && (
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>{dateLabel2}</p>
+          )}
+          {dep.reason && (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>{dep.reason}</p>
+          )}
+          {dep.admin_note && (
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontStyle: 'italic' }}>
+              הערת מנהל: {dep.admin_note}
+            </p>
+          )}
         </div>
-      </CardContent>
-    </Card>
+        {!isMultiDay && (
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', flexShrink: 0, paddingTop: 2 }}>
+            {getTimeStr(dep.start_at)}
+          </span>
+        )}
+      </div>
+    </div>
   )
 }

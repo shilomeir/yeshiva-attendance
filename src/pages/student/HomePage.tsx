@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Clock, Undo2 } from 'lucide-react'
+import { Clock, Undo2, Calendar } from 'lucide-react'
 import { StatusButtons } from '@/components/student/StatusButtons'
-import { StatusBadge } from '@/components/shared/StatusBadge'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import { formatRelativeTime } from '@/lib/utils/formatTime'
@@ -21,11 +20,71 @@ function getMinutesFromNow(isoStr: string): number {
   return Math.round((new Date(isoStr).getTime() - Date.now()) / 60000)
 }
 
+/* ── Floating status widget (blue gradient card) ── */
+function StatusWidget({ student }: { student: Student }) {
+  const isOn = student.currentStatus === 'ON_CAMPUS'
+  return (
+    <div
+      className="hero-widget-status"
+      style={{
+        width: 124, padding: '12px 14px',
+        borderRadius: 20,
+        transform: 'rotate(-3deg)',
+        color: '#fff',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+        </svg>
+        <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.85 }}>סטטוס</span>
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 800, lineHeight: 1.15, marginBottom: 2 }}>
+        {isOn ? 'נוכח כעת' : 'בחוץ כרגע'}
+      </div>
+      <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.78)', fontWeight: 500 }}>
+        {formatRelativeTime(student.lastSeen)}
+      </div>
+    </div>
+  )
+}
+
+/* ── Floating history widget (white glass card) ── */
+function HistoryWidget({ count }: { count: number }) {
+  return (
+    <div
+      className="hero-widget-history"
+      style={{
+        width: 116, padding: '12px 14px',
+        borderRadius: 20,
+        transform: 'rotate(4deg)',
+        color: 'var(--text)',
+      }}
+    >
+      <div style={{
+        width: 28, height: 28, borderRadius: 8,
+        background: '#dbeafe',
+        display: 'grid', placeItems: 'center', marginBottom: 8,
+        color: '#2563eb',
+      }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="4" width="18" height="18" rx="3" /><path d="M3 10h18M8 2v4M16 2v4" />
+        </svg>
+      </div>
+      <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.15 }}>היסטוריה</div>
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 500, marginTop: 2 }}>
+        {count > 0 ? `${count} יציאות` : 'ציר זמן'}
+      </div>
+    </div>
+  )
+}
+
 export function HomePage() {
   const { currentUser } = useAuthStore()
   const [student, setStudent] = useState<Student | null>(currentUser)
   const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; departureId: string } | null>(null)
   const [activeDeparture, setActiveDeparture] = useState<CalendarDeparture | null>(null)
+  const [recentCount, setRecentCount] = useState(0)
   const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -41,11 +100,9 @@ export function HomePage() {
       studentId: currentUser.id,
       status: ['ACTIVE', 'APPROVED'],
     })
-    // Find a departure that hasn't been over for more than 60 minutes
-    const relevant = deps.find(
-      (d) => getMinutesFromNow(d.end_at) > -60
-    )
+    const relevant = deps.find((d) => getMinutesFromNow(d.end_at) > -60)
     setActiveDeparture(relevant ?? null)
+    setRecentCount(deps.length)
   }, [currentUser?.id])
 
   useEffect(() => {
@@ -53,14 +110,12 @@ export function HomePage() {
     refreshDeparture()
   }, [currentUser?.id])
 
-  // Tick every minute to update countdown
   useEffect(() => {
     if (!activeDeparture) return
     const id = setInterval(() => setTick((t) => t + 1), 60000)
     return () => clearInterval(id)
   }, [activeDeparture])
 
-  // Undo timeout
   useEffect(() => {
     if (!undoCheckout) return
     const remaining = undoCheckout.expiresAt - Date.now()
@@ -69,7 +124,6 @@ export function HomePage() {
     return () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current) }
   }, [undoCheckout])
 
-  // GPS location broadcast listener
   useEffect(() => {
     if (!currentUser) return
     const channel = supabase.channel('location-requests')
@@ -84,7 +138,6 @@ export function HomePage() {
     return () => { supabase.removeChannel(channel) }
   }, [currentUser?.id])
 
-  // Realtime updates on departures table
   useDeparturesRealtime({
     onAnyChange: () => {
       refreshStudent()
@@ -111,10 +164,11 @@ export function HomePage() {
   const undoRemainingMin = Math.ceil(undoRemainingMs / 60000)
 
   return (
-    <div className="flex flex-col gap-4 p-4 pt-5 animate-fade-in">
-      {/* ── Undo checkout banner ────────────────────────────────────── */}
+    <div className="animate-fade-in" dir="rtl">
+
+      {/* ── Undo checkout banner ── */}
       {undoCheckout && Date.now() < undoCheckout.expiresAt && (
-        <div className="animate-slide-up flex items-center justify-between gap-3 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3.5 dark:border-orange-900/50 dark:bg-orange-950/20">
+        <div className="animate-slide-up mx-4 mt-4 flex items-center justify-between gap-3 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3.5 dark:border-orange-900/50 dark:bg-orange-950/20">
           <div className="flex items-center gap-2.5">
             <Undo2 className="h-4 w-4 shrink-0 text-[var(--orange)]" />
             <span className="text-sm font-medium text-orange-800 dark:text-orange-300">
@@ -130,14 +184,14 @@ export function HomePage() {
         </div>
       )}
 
-      {/* ── Active/approved departure banner ────────────────────────── */}
+      {/* ── Active/approved departure banner ── */}
       {activeDeparture && (() => {
         const minsToStart = getMinutesFromNow(activeDeparture.start_at)
         const minsToEnd = getMinutesFromNow(activeDeparture.end_at)
         if (minsToEnd <= -60) return null
         const isActive = minsToStart <= 0 && minsToEnd > 0
         return (
-          <div className="animate-slide-up delay-100 flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3.5 dark:border-blue-900/50 dark:bg-blue-950/20">
+          <div className="animate-slide-up delay-100 mx-4 mt-3 flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3.5 dark:border-blue-900/50 dark:bg-blue-950/20">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-100 dark:bg-blue-900/30">
               <Clock className="h-4 w-4 text-blue-600 dark:text-blue-400" />
             </div>
@@ -155,42 +209,78 @@ export function HomePage() {
         )
       })()}
 
-      {/* ── Current status card ─────────────────────────────────────── */}
-      <div
-        className="animate-slide-up delay-200 flex items-center justify-between rounded-2xl px-5 py-4"
-        style={{
-          background: 'var(--surface)',
-          border: '1px solid var(--border)',
-          boxShadow: 'var(--shadow-card)',
-        }}
-      >
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-            סטטוס נוכחי
-          </p>
-          <p className="mt-1 text-xs text-[var(--text-muted)]">
-            עדכון אחרון: {formatRelativeTime(student.lastSeen)}
-          </p>
-        </div>
-        <StatusBadge status={student.currentStatus} />
-      </div>
+      {/* ── Hero section with floating widgets + orb ── */}
+      <div className="relative" style={{ minHeight: 480 }}>
 
-      {/* ── Status buttons ──────────────────────────────────────────── */}
-      <div className="animate-slide-up delay-300 flex-1">
-        <StatusButtons
-          currentStatus={student.currentStatus}
-          onStatusChange={async (newStatus) => {
-            setStudent((prev) => prev ? { ...prev, currentStatus: newStatus } : prev)
-            await refreshStudent()
-            if (newStatus === 'ON_CAMPUS') {
-              setUndoCheckout(null)
-              setActiveDeparture(null)
-            }
+        {/* Floating status widget — left, rotated */}
+        <div
+          className="animate-slide-up"
+          style={{
+            position: 'absolute', top: 40, left: 12, zIndex: 6,
+            animationDelay: '0.15s',
           }}
-          onCheckoutSuccess={(departureId) => {
-            setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000, departureId })
+        >
+          <StatusWidget student={student} />
+        </div>
+
+        {/* Floating history widget — right, rotated */}
+        <div
+          className="animate-slide-up"
+          style={{
+            position: 'absolute', top: 290, right: 12, zIndex: 6,
+            animationDelay: '0.25s',
           }}
-        />
+        >
+          <HistoryWidget count={recentCount} />
+        </div>
+
+        {/* Status buttons (orb + CTA bar) centered */}
+        <div
+          className="animate-slide-up"
+          style={{
+            position: 'relative', zIndex: 10,
+            paddingTop: 60,
+            animationDelay: '0.05s',
+          }}
+        >
+          <StatusButtons
+            currentStatus={student.currentStatus}
+            onStatusChange={async (newStatus) => {
+              setStudent((prev) => prev ? { ...prev, currentStatus: newStatus } : prev)
+              await refreshStudent()
+              if (newStatus === 'ON_CAMPUS') {
+                setUndoCheckout(null)
+                setActiveDeparture(null)
+              }
+            }}
+            onCheckoutSuccess={(departureId) => {
+              setUndoCheckout({ expiresAt: Date.now() + 5 * 60 * 1000, departureId })
+            }}
+          />
+        </div>
+
+        {/* Calendar hint at bottom */}
+        <div
+          className="animate-fade-in"
+          style={{
+            position: 'absolute', bottom: 16, left: 0, right: 0,
+            display: 'flex', justifyContent: 'center',
+            animationDelay: '0.4s',
+          }}
+        >
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 14px', borderRadius: 999,
+            background: 'rgba(255,255,255,0.6)',
+            border: '1px solid rgba(15,23,42,0.06)',
+            backdropFilter: 'blur(8px)',
+          }}>
+            <Calendar style={{ width: 12, height: 12, color: 'var(--text-muted)' }} />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 500 }}>
+              עדכון אחרון: {formatRelativeTime(student.lastSeen)}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   )

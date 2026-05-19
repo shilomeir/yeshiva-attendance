@@ -39,16 +39,18 @@ export function StudentLayout() {
 
   const handleRememberYes = async () => {
     if (!currentUser) return
-    const subscription = await subscribeToPush()
-    if (subscription) {
-      await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
+    try {
+      const subscription = await subscribeToPush()
+      if (subscription) {
+        await api.updatePushToken(currentUser.id, JSON.stringify(subscription))
+      }
+    } catch {
+      // Push setup failed — still save the remembered ID below
     }
-    const lastId = sessionStorage.getItem('last_login_id')
-    if (lastId) {
-      localStorage.setItem(SAVED_ID_KEY, lastId)
-      localStorage.setItem('yeshiva_remembered_id', lastId)
-      sessionStorage.removeItem('last_login_id')
-    }
+    const idToSave = sessionStorage.getItem('last_login_id') ?? currentUser.idNumber
+    localStorage.setItem(SAVED_ID_KEY, idToSave)
+    localStorage.setItem('yeshiva_remembered_id', idToSave)
+    sessionStorage.removeItem('last_login_id')
     setBannerVisible(false)
   }
 
@@ -57,7 +59,6 @@ export function StudentLayout() {
     setBannerVisible(false)
   }
 
-  // Initials avatar color based on name
   const getAvatarColor = (name: string) => {
     const colors = [
       ['#1E3A6E', '#60A5FA'],
@@ -74,39 +75,36 @@ export function StudentLayout() {
     ? currentUser.fullName.split(' ').map((w) => w[0]).slice(0, 2).join('')
     : '?'
 
+  const firstName = currentUser?.fullName?.split(' ')[0] ?? 'תלמיד'
   const avatarColors = getAvatarColor(currentUser?.fullName ?? '')
 
   return (
-    <div className="flex flex-col min-h-screen bg-[var(--bg)]">
-      {/* Top header */}
-      <header
-        className="sticky top-0 z-40"
-        style={{
-          background: 'var(--surface)',
-          borderBottom: '1px solid var(--border)',
-          boxShadow: '0 1px 8px rgba(14, 30, 70, 0.06)',
-        }}
-      >
+    <div className="flex flex-col min-h-screen student-bg">
+      {/* Glass top header */}
+      <header className="sticky top-0 z-40 student-header">
         <SyncStatusBar />
         <div className="flex items-center justify-between px-4 py-3">
           {/* Student identity */}
           <div className="flex items-center gap-3">
-            {/* Avatar circle with initials */}
             <div
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold"
+              className="shrink-0 flex items-center justify-center text-sm font-bold"
               style={{
-                background: `linear-gradient(135deg, ${avatarColors[0]}, ${avatarColors[0]}DD)`,
+                width: 46,
+                height: 46,
+                borderRadius: 16,
+                background: `linear-gradient(135deg, ${avatarColors[0]} 0%, ${avatarColors[0]}DD 100%)`,
                 color: avatarColors[1],
                 border: `1.5px solid ${avatarColors[1]}40`,
+                boxShadow: `0 6px 14px ${avatarColors[0]}52`,
               }}
             >
               {initials}
             </div>
             <div>
-              <h1 className="text-sm font-bold text-[var(--text)] leading-tight">
-                {currentUser?.fullName ?? 'תלמיד'}
+              <h1 className="text-sm font-bold leading-tight" style={{ color: 'var(--text)' }}>
+                שלום, {firstName}
               </h1>
-              <p className="text-[11px] text-[var(--text-muted)]">ישיבת שבי חברון</p>
+              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>ישיבת שבי חברון</p>
             </div>
           </div>
 
@@ -116,80 +114,61 @@ export function StudentLayout() {
             <ThemeToggle />
             <button
               onClick={handleLogout}
-              className="flex items-center justify-center rounded-xl p-2 text-[var(--text-muted)] hover:bg-[var(--bg-2)] hover:text-[var(--red)] transition-colors"
+              className="flex items-center justify-center rounded-xl p-2 transition-colors"
+              style={{ color: 'var(--text-muted)' }}
               aria-label="התנתקות"
               title="התנתקות"
             >
-              <LogOut className="h-4.5 w-4.5" style={{ height: '1.125rem', width: '1.125rem' }} />
+              <LogOut style={{ height: '1.125rem', width: '1.125rem' }} />
             </button>
           </div>
         </div>
       </header>
 
-      {/* Page content */}
-      <main className="flex-1 overflow-y-auto pb-20">
+      {/* Page content — extra bottom padding for floating tab bar */}
+      <main className="flex-1 overflow-y-auto pb-28">
         <Outlet />
       </main>
 
-      {/* Bottom tab bar */}
-      <nav
-        className="fixed bottom-0 inset-x-0 z-40 safe-area-pb"
-        style={{
-          background: 'var(--surface)',
-          borderTop: '1px solid var(--border)',
-          boxShadow: '0 -4px 20px rgba(14, 30, 70, 0.08)',
-        }}
-      >
-        <div className="grid grid-cols-3 h-16">
-          {NAV_ITEMS.map(({ to, icon: Icon, label, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className="relative flex flex-col items-center justify-center gap-1"
-            >
-              {({ isActive }) => (
-                <>
-                  {/* Active indicator bar at top */}
-                  <span
-                    className="absolute top-0 inset-x-4 h-0.5 rounded-full transition-all duration-300"
-                    style={{
-                      background: isActive ? 'var(--blue)' : 'transparent',
-                      boxShadow: isActive ? '0 0 8px rgba(59,130,246,0.5)' : 'none',
-                    }}
+      {/* Floating glass pill tab bar */}
+      <nav className="student-tab-bar" dir="rtl">
+        {NAV_ITEMS.map(({ to, icon: Icon, label, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className="relative flex flex-col items-center justify-center gap-1 flex-1"
+          >
+            {({ isActive }) => (
+              <>
+                <div
+                  className={cn(
+                    'flex items-center justify-center rounded-xl transition-all duration-200',
+                    isActive ? 'scale-110' : 'scale-100'
+                  )}
+                  style={{
+                    width: 44,
+                    height: 32,
+                    background: isActive ? 'rgba(99,102,241,0.12)' : 'transparent',
+                  }}
+                >
+                  <Icon
+                    className="h-5 w-5 transition-colors"
+                    style={{ color: isActive ? '#4f46e5' : 'var(--text-muted)' }}
                   />
-
-                  {/* Icon */}
-                  <div
-                    className={cn(
-                      'flex items-center justify-center rounded-xl p-1.5 transition-all duration-200',
-                      isActive ? 'scale-110' : 'scale-100'
-                    )}
-                    style={{
-                      background: isActive ? 'rgba(59,130,246,0.1)' : 'transparent',
-                    }}
-                  >
-                    <Icon
-                      className="h-5 w-5 transition-colors"
-                      style={{ color: isActive ? 'var(--blue)' : 'var(--text-muted)' }}
-                    />
-                  </div>
-
-                  {/* Label */}
-                  <span
-                    className="text-[11px] font-semibold transition-colors"
-                    style={{ color: isActive ? 'var(--blue)' : 'var(--text-muted)' }}
-                  >
-                    {label}
-                  </span>
-                </>
-              )}
-            </NavLink>
-          ))}
-        </div>
+                </div>
+                <span
+                  className="text-[10px] font-bold transition-colors"
+                  style={{ color: isActive ? '#4f46e5' : 'var(--text-muted)' }}
+                >
+                  {label}
+                </span>
+              </>
+            )}
+          </NavLink>
+        ))}
       </nav>
 
-      {/* "Remember me" banner */}
       {bannerVisible && (
         <RememberMeBanner onYes={handleRememberYes} onNo={handleRememberNo} />
       )}
