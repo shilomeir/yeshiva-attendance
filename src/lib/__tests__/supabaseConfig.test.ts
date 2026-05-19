@@ -11,4 +11,13 @@ describe('resolveSupabaseConfig', () => {
     expect(config.supabaseUrl).toBe('https://frxjddevnehprauoapiv.supabase.co')
     expect(config.supabaseAnonKey).toBe('sb_publishable_project_key')
   })
+
+  it('uses the project URL encoded in a JWT anon key when env values are mismatched', () => {
+    const config = resolveSupabaseConfig({
+      url: 'https://frxjddevnehprauoapiv.supabase.co',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyZWYiOiJ0eWJwc2lsY2dwd2xtcXNld3JldSJ9.sig',
+    })
+
+    expect(config.supabaseUrl).toBe('https://tybpsilcgpwlmqsewreu.supabase.co')
+  })
 })
