@@ -856,17 +856,15 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }> {
-    const { data, error } = await supabase.rpc('submit_student_audit_gps', {
-      p_session_id:   params.sessionId,
-      p_student_id:   params.studentId,
-      p_device_token: params.deviceToken,
-      p_gps_lat:      params.gpsLat,
-      p_gps_lng:      params.gpsLng,
-      p_accuracy_m:   params.accuracyM ?? null,
-      p_gps_status:   params.gpsStatus ?? 'OK',
-    })
+    // Master plan B-26: goes through the submit-audit-gps Edge Function
+    // proxy, not the RPC directly. The Edge Function validates inputs
+    // (coordinate bounds, required fields) before delegating to the
+    // submit_student_audit_gps RPC with the service-role client. Future
+    // hardening (rate limiting, geofence anomaly detection) lives in the
+    // function body, not in every client.
+    const { data, error } = await supabase.functions.invoke('submit-audit-gps', { body: params })
     if (error) throw error
-    if (data?.error) return { error: data.error as string }
+    if (data && typeof data === 'object' && 'error' in data) return { error: (data as { error: string }).error }
     const r = data as { distanceM: number; distanceBucket: string; status: AuditEntryStatus }
     return { distanceM: r.distanceM, distanceBucket: r.distanceBucket, status: r.status }
   }
