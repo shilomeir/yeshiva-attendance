@@ -102,6 +102,48 @@ export interface AddStudentPayload {
 export type UpdateStudentPayload = Partial<Pick<Student, 'fullName' | 'phone' | 'grade' | 'classId'>>
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Scoped active-audit response shapes
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ActiveAuditSessionMinimal {
+  id: string
+  title: string | null
+  mode: AuditSessionMode
+  startedAt: string
+  classIds: string[]
+  totalStudentsSnapshot: number
+  status: 'ACTIVE'
+}
+
+export interface ActiveAuditForStudent {
+  session: {
+    id: string
+    title: string | null
+    mode: AuditSessionMode
+    startedAt: string
+    classIds: string[]
+    status: 'ACTIVE'
+  }
+  isInActiveSession: boolean
+  myEntry: {
+    id: string
+    status: AuditEntryStatus
+    source: 'SUPERVISOR' | 'AUTO_DEFAULT' | 'AUTO_GPS'
+    submittedAt: string
+    distanceFromCampusM: number | null
+    distanceBucket: 'GREEN' | 'BLUE' | 'ORANGE' | 'RED' | null
+  } | null
+}
+
+export interface ActiveAuditForSupervisor {
+  /** Session with snapshots filtered to the supervisor's class. shape matches
+   *  AuditSessionWithDetails so existing UI code (Mission Control reuse,
+   *  ClassSupervisorDashboard) can consume it identically. */
+  session: AuditSessionWithDetails
+  isInActiveSession: boolean
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IApiClient — single interface for Supabase + Mock implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -175,7 +217,23 @@ export interface IApiClient {
 
   // ── Internal Audit Session ─────────────────────────────────────────────────
   startAuditSession(params: { classIds: string[]; title?: string; adminPin: string; mode?: AuditSessionMode }): Promise<AuditSessionWithDetails | { error: string; existingId?: string }>
+  /** Admin-only (authenticated role required). Returns the full active session
+   *  including all snapshots, entries, notes, and GPS. Anon callers should use
+   *  getActiveAuditSessionMinimal / ForStudent / ForSupervisor instead. */
   getActiveAuditSession(): Promise<AuditSessionWithDetails | null>
+  /** Anon-callable. Returns session metadata only — no snapshots, no entries,
+   *  no GPS. Use this to detect that an audit is happening without exposing
+   *  participant data. */
+  getActiveAuditSessionMinimal(): Promise<ActiveAuditSessionMinimal | null>
+  /** Anon-callable, token-validated. Returns session metadata plus only this
+   *  student's own entry (with their own GPS data). Other students are not
+   *  exposed. Returns { error: 'AUTH' } if the device token doesn't match. */
+  getActiveAuditForStudent(studentId: string, deviceToken: string): Promise<ActiveAuditForStudent | { error: string } | null>
+  /** Anon-callable, PIN-validated. Returns session metadata plus the supervisor's
+   *  class snapshot/entries/classState only. Admin PIN returns the full session
+   *  (covers the admin-using-supervisor-view case). Returns { error: 'AUTH' }
+   *  if the PIN doesn't match a supervisor or admin. */
+  getActiveAuditForSupervisor(supervisorPin: string): Promise<ActiveAuditForSupervisor | { error: string } | null>
   getAuditSession(id: string): Promise<AuditSessionWithDetails | null>
   listAuditSessions(limit?: number, offset?: number): Promise<AuditSessionSummary[]>
   closeAuditSession(id: string, adminPin: string): Promise<AuditSessionWithDetails | { error: string }>

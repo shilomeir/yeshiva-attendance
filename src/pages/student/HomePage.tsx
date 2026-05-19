@@ -8,7 +8,7 @@ import { getCurrentPosition, isGPSResult } from '@/lib/location/gps'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
-import type { Student, CalendarDeparture, AuditSessionWithDetails } from '@/types'
+import type { Student, CalendarDeparture } from '@/types'
 
 function getTimeStr(isoStr: string): string {
   const d = new Date(isoStr)
@@ -84,10 +84,11 @@ export function HomePage() {
   const [undoCheckout, setUndoCheckout] = useState<{ expiresAt: number; departureId: string } | null>(null)
   const [activeDeparture, setActiveDeparture] = useState<CalendarDeparture | null>(null)
   const [recentCount, setRecentCount] = useState(0)
-  // LOCATION-mode audit GPS state
-  const [activeAuditSession, setActiveAuditSession] = useState<AuditSessionWithDetails | null>(null)
+  // LOCATION-mode audit GPS state. The state is tagged with the session id so
+  // we never bleed a 'done' or 'error' status from a previous audit into a new one.
+  const [activeAuditSession, setActiveAuditSession] = useState<{ id: string; mode: 'MANUAL' | 'LOCATION'; title: string | null } | null>(null)
   const [gpsShareState, setGpsShareState] = useState<'idle' | 'capturing' | 'done' | 'error'>('idle')
-  const [gpsShareResult, setGpsShareResult] = useState<{ distanceM: number; distanceBucket: string } | null>(null)
+  const [gpsShareResult, setGpsShareResult] = useState<{ sessionId: string; distanceM: number; distanceBucket: string } | null>(null)
   const [, setTick] = useState(0)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -128,34 +129,51 @@ export function HomePage() {
   }, [undoCheckout])
 
   // Check for an active LOCATION-mode audit that includes this student's class.
-  // Also detects an existing AUTO_GPS entry so that after a refresh we don't
-  // prompt the student to share GPS again — they see the success state.
+  // Uses the student-scoped get_active_audit_for_student RPC: the server now
+  // returns ONLY this student's own entry (with GPS data), never the full
+  // session snapshot, entries for other students, supervisor notes, or other
+  // students' GPS coords. anon callers cannot read the full session anymore.
+  //
+  // Idempotency: if the student already has an AUTO_GPS entry for this session,
+  // surface the 'done' state instead of re-prompting on refresh. The result is
+  // tagged with sessionId so a state stale from a previous audit can never
+  // appear in a new audit.
   const checkAuditSession = useCallback(async () => {
-    if (!currentUser) return
+    if (!currentUser || !deviceToken) return
     try {
-      const session = await api.getActiveAuditSession()
-      if (session && session.mode === 'LOCATION' && session.classIds.includes(currentUser.classId)) {
-        setActiveAuditSession(session)
-        // Surface an existing GPS entry so refresh mid-session doesn't re-prompt.
-        const existing = session.entries.find(
-          (e) => e.studentId === currentUser.id && e.source === 'AUTO_GPS',
-        )
-        if (existing && existing.distanceFromCampusM != null && existing.distanceBucket) {
-          setGpsShareState('done')
-          setGpsShareResult({
-            distanceM: Math.round(existing.distanceFromCampusM),
-            distanceBucket: existing.distanceBucket,
-          })
-        }
-      } else {
+      const result = await api.getActiveAuditForStudent(currentUser.id, deviceToken)
+      // null → no active audit; { error } → auth failed (server)
+      if (!result || 'error' in result) {
         setActiveAuditSession(null)
-        if (!session) {
-          setGpsShareState('idle') // reset when session ends
-          setGpsShareResult(null)
-        }
+        setGpsShareState('idle')
+        setGpsShareResult(null)
+        return
       }
-    } catch { /* ignore */ }
-  }, [currentUser?.id, currentUser?.classId])
+      const inLocation = result.isInActiveSession && result.session.mode === 'LOCATION'
+      if (!inLocation) {
+        setActiveAuditSession(null)
+        setGpsShareState('idle')
+        setGpsShareResult(null)
+        return
+      }
+      setActiveAuditSession({ id: result.session.id, mode: result.session.mode, title: result.session.title })
+      // Reconcile GPS state against the server. New session → reset stale state.
+      // Same session → surface done if we have a server entry.
+      const entry = result.myEntry
+      if (entry && entry.source === 'AUTO_GPS' && entry.distanceFromCampusM != null && entry.distanceBucket) {
+        setGpsShareState('done')
+        setGpsShareResult({
+          sessionId: result.session.id,
+          distanceM: Math.round(entry.distanceFromCampusM),
+          distanceBucket: entry.distanceBucket,
+        })
+      } else if (gpsShareResult && gpsShareResult.sessionId !== result.session.id) {
+        // Different session than what we have local state for — clear it.
+        setGpsShareState('idle')
+        setGpsShareResult(null)
+      }
+    } catch { /* ignore transient errors; existing state stays */ }
+  }, [currentUser?.id, deviceToken, gpsShareResult])
 
   useEffect(() => {
     checkAuditSession()
@@ -173,7 +191,11 @@ export function HomePage() {
         toast({ title: 'לא ניתן לגשת למיקום', description: 'אפשר גישה למיקום בהגדרות הדפדפן', variant: 'destructive' })
         return
       }
-      await api.updateStudentLocation(currentUser.id, pos.lat, pos.lng)
+      // Audit GPS is intentionally NOT written to students.lastLocation — that
+      // would leak precise coordinates outside the audit subsystem (the audit
+      // tables have RLS lockdown + retention policies; students.lastLocation
+      // does not). The audit_entries row created by the RPC below is the only
+      // place this GPS reading is stored.
       const result = await api.submitStudentAuditGps({
         sessionId: activeAuditSession.id,
         studentId: currentUser.id,
@@ -199,7 +221,7 @@ export function HomePage() {
         return
       }
       setGpsShareState('done')
-      setGpsShareResult({ distanceM: result.distanceM, distanceBucket: result.distanceBucket })
+      setGpsShareResult({ sessionId: activeAuditSession.id, distanceM: result.distanceM, distanceBucket: result.distanceBucket })
     } catch (err) {
       setGpsShareState('error')
       toast({ title: 'שגיאה בשיתוף מיקום', description: getErrorMessage(err, 'שיתוף מיקום נכשל'), variant: 'destructive' })
