@@ -3,6 +3,7 @@ import { X, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '@/lib/api'
 import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
 import { normalizeHebrew } from '@/store/studentsStore'
+import { ModalPortal } from '@/components/admin/modalPortal'
 import { StatusBadge } from '@/components/shared/StatusBadge'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
@@ -100,6 +101,7 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
   }
 
   return (
+    <ModalPortal>
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 100,
@@ -240,5 +242,6 @@ export function StudentEditModal({ student, onClose, onSaved }: StudentEditModal
         </div>
       </div>
     </div>
+    </ModalPortal>
   )
 }
