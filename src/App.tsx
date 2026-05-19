@@ -156,9 +156,16 @@ export default function App() {
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="settings" element={<SettingsPage />} />
-            <Route path="rollcall" element={<RollCallPage />} />
-            <Route path="audits" element={<AuditHistoryPage />} />
-            <Route path="audits/:id" element={<AuditDetailPage />} />
+            {/* New audit feature lives at /admin/inspection (master plan R-2).
+                /admin/audit is the legacy log; /admin/inspection is the new
+                "ביקורת פנימית". Old /admin/rollcall + /admin/audits paths
+                redirect for any users with stale bookmarks. */}
+            <Route path="inspection" element={<RollCallPage />} />
+            <Route path="inspection/history" element={<AuditHistoryPage />} />
+            <Route path="inspection/history/:id" element={<AuditDetailPage />} />
+            <Route path="rollcall" element={<Navigate to="/admin/inspection" replace />} />
+            <Route path="audits" element={<Navigate to="/admin/inspection/history" replace />} />
+            <Route path="audits/:id" element={<Navigate to="/admin/inspection/history" replace />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
           </Route>

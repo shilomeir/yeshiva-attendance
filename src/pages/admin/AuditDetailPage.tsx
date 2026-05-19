@@ -210,7 +210,7 @@ export function AuditDetailPage() {
   if (notFound || !session) {
     return (
       <div className="flex flex-col gap-4 p-4 lg:p-6">
-        <Link to="/admin/audits" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
+        <Link to="/admin/inspection/history" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
           <ArrowRight className="h-3 w-3" /> חזרה להיסטוריה
         </Link>
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--border)] py-16 text-center">
@@ -238,7 +238,7 @@ export function AuditDetailPage() {
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       {/* Back link + actions */}
       <div className="flex items-center justify-between gap-3">
-        <Link to="/admin/audits" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
+        <Link to="/admin/inspection/history" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
           <ArrowRight className="h-3 w-3" /> חזרה להיסטוריה
         </Link>
         <Button variant="outline" size="sm" onClick={handleExportCsv}>
