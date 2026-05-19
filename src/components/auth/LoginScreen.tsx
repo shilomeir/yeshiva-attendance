@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, Navigate } from 'react-router-dom'
+import { useNavigate, Navigate, useLocation } from 'react-router-dom'
 import { Shield, Loader2 } from 'lucide-react'
 import { AdminLoginModal } from '@/components/auth/AdminLoginModal'
 import { useAuthStore } from '@/store/authStore'
@@ -8,10 +8,22 @@ const SAVED_ID_KEY = 'yeshiva_last_id'
 
 export function LoginScreen() {
   const navigate = useNavigate()
+  const location = useLocation()
+  // Guards push the intended URL into location.state.from when redirecting
+  // here; on successful login we go back to that URL instead of the default
+  // dashboard (master plan B-29).
+  const fromUrl = typeof location.state === 'object' && location.state && 'from' in location.state
+    ? String((location.state as { from: unknown }).from)
+    : null
   const [idNumber, setIdNumber] = useState(() => localStorage.getItem(SAVED_ID_KEY) ?? '')
   const [showAdminModal, setShowAdminModal] = useState(false)
   const [autoLogging, setAutoLogging] = useState(false)
   const { login, isLoading, error, clearError, currentUser, isAdmin } = useAuthStore()
+
+  // Choose post-login destination per role. fromUrl wins if it matches the
+  // role's URL space, otherwise fall back to the role's default page.
+  const studentDest = fromUrl && fromUrl.startsWith('/student') ? fromUrl : '/student'
+  const adminDest = fromUrl && fromUrl.startsWith('/admin') ? fromUrl : '/admin'
 
   useEffect(() => {
     const rememberedId = localStorage.getItem('yeshiva_remembered_id')
@@ -19,7 +31,7 @@ export function LoginScreen() {
       setAutoLogging(true)
       login(rememberedId).then((success) => {
         if (success) {
-          navigate('/student', { replace: true })
+          navigate(studentDest, { replace: true })
         } else {
           localStorage.removeItem('yeshiva_remembered_id')
           setAutoLogging(false)
@@ -29,8 +41,8 @@ export function LoginScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  if (currentUser) return <Navigate to="/student" replace />
-  if (isAdmin) return <Navigate to="/admin" replace />
+  if (currentUser) return <Navigate to={studentDest} replace />
+  if (isAdmin) return <Navigate to={adminDest} replace />
 
   if (autoLogging) {
     return (
@@ -50,7 +62,7 @@ export function LoginScreen() {
     if (success) {
       sessionStorage.setItem('show_remember_me', '1')
       sessionStorage.setItem('last_login_id', idNumber.trim())
-      navigate('/student', { replace: true })
+      navigate(studentDest, { replace: true })
     }
   }
 
