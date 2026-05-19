@@ -965,7 +965,7 @@ export function ClassSupervisorDashboard() {
                   status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500' :
                   status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500' : 'bg-gray-400'
                 return (
-                  <div key={snap.id} className="flex flex-col gap-1 rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
+                  <div key={snap.id} data-testid={`inspection-supervisor-row-${snap.id}`} className="flex flex-col gap-1 rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-sm font-medium text-[var(--text)] flex-1 truncate">{snap.fullName}</span>
                       {isSubmitting ? (
@@ -979,14 +979,17 @@ export function ClassSupervisorDashboard() {
                       ) : (
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
+                            data-testid={`inspection-supervisor-button-IN_YESHIVA-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'IN_YESHIVA')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'IN_YESHIVA' ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
                           >בישיבה</button>
                           <button
+                            data-testid={`inspection-supervisor-button-OUT_WITH_PERMISSION-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'OUT_WITH_PERMISSION')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500 text-white' : 'border border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/20'}`}
                           >ביצ׳ רשות</button>
                           <button
+                            data-testid={`inspection-supervisor-button-OUT_WITHOUT_PERMISSION-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'OUT_WITHOUT_PERMISSION')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
                           >ביצ׳ ללא רשות</button>

@@ -587,6 +587,7 @@ export function RollCallPage() {
               <p className="text-sm font-semibold text-[var(--text)] mb-2">1. סוג הביקורת</p>
               <div className="grid grid-cols-2 gap-2">
                 <button
+                  data-testid="inspection-mode-card-location"
                   onClick={() => setAuditMode('location')}
                   className={`rounded-lg border p-3 text-sm text-start transition-all ${
                     auditMode === 'location'
@@ -599,6 +600,7 @@ export function RollCallPage() {
                   <p className="text-xs opacity-70 mt-0.5">שליחת בקשת GPS לתלמידים</p>
                 </button>
                 <button
+                  data-testid="inspection-mode-card-manual"
                   onClick={() => setAuditMode('manual')}
                   className={`rounded-lg border p-3 text-sm text-start transition-all ${
                     auditMode === 'manual'

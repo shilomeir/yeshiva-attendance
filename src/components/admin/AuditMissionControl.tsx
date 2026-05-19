@@ -100,12 +100,12 @@ export function AuditMissionControl({ session, isClosing, onClose }: Props) {
       <div className="flex flex-col gap-2">
         <div className="grid grid-cols-4 gap-2 text-center">
           {([
-            { label: 'בישיבה', count: inYeshiva, color: 'text-green-700 dark:text-green-400' },
-            { label: "ביצ' רשות", count: outPerm, color: 'text-blue-700 dark:text-blue-400' },
-            { label: "ביצ' ללא רשות", count: outNoPerm, color: 'text-red-700 dark:text-red-400' },
-            { label: 'לא סומן', count: unmarked, color: 'text-amber-600 dark:text-amber-400' },
-          ] as const).map(({ label, count, color }) => (
-            <div key={label} className="rounded-lg bg-white/60 dark:bg-amber-900/20 p-2">
+            { label: 'בישיבה', testid: 'inspection-kpi-in-yeshiva', count: inYeshiva, color: 'text-green-700 dark:text-green-400' },
+            { label: "ביצ' רשות", testid: 'inspection-kpi-out-with-permission', count: outPerm, color: 'text-blue-700 dark:text-blue-400' },
+            { label: "ביצ' ללא רשות", testid: 'inspection-kpi-out-without-permission', count: outNoPerm, color: 'text-red-700 dark:text-red-400' },
+            { label: 'לא סומן', testid: 'inspection-kpi-unmarked', count: unmarked, color: 'text-amber-600 dark:text-amber-400' },
+          ] as const).map(({ label, testid, count, color }) => (
+            <div key={label} data-testid={testid} className="rounded-lg bg-white/60 dark:bg-amber-900/20 p-2">
               <p className={`text-lg font-bold ${color}`}>{count}</p>
               <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-tight">{label}</p>
             </div>
@@ -135,6 +135,7 @@ export function AuditMissionControl({ session, isClosing, onClose }: Props) {
             return (
               <div
                 key={cls.classId}
+                data-testid={`inspection-class-card-${cls.classId}`}
                 className="rounded-lg bg-white/70 dark:bg-amber-900/20 border border-white/80 dark:border-amber-800/40 p-3"
               >
                 <div className="flex items-start justify-between gap-2 mb-1.5">
