@@ -484,7 +484,6 @@ export function ClassSupervisorDashboard() {
         })
       )
     } catch (err) {
-      console.error('Failed to load supervisor data', err)
       toast({ title: 'שגיאה בטעינת נתוני כיתה', description: getErrorMessage(err, 'טעינת נתוני אחראי הכיתה נכשלה'), variant: 'destructive' })
     } finally {
       setIsLoading(false)
@@ -653,6 +652,10 @@ export function ClassSupervisorDashboard() {
           setActiveAuditSession(null)
           setAuditEntries(new Map()); setAuditNotes(new Map())
           toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
+        } else if (result.error === 'CLASS_FINISHED') {
+          // Refresh so the UI reflects the server-side FINISHED state.
+          refreshAuditSession()
+          toast({ title: 'הביקורת כבר הסתיימה', description: 'הכיתה סומנה כסיימה — לא ניתן לעדכן עוד', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בסימון נוכחות', description: result.error, variant: 'destructive' })
         }
@@ -689,6 +692,10 @@ export function ClassSupervisorDashboard() {
         if (result.error === 'AUTH') {
           clearPin('supervisor')
           toast({ title: 'PIN שגוי', description: 'נסה שוב', variant: 'destructive' })
+        } else if (result.error === 'CLASS_FINISHED') {
+          refreshAuditSession()
+          setNoteDialog(null)
+          toast({ title: 'הביקורת כבר הסתיימה', description: 'לא ניתן לעדכן הערות אחרי סיום הביקורת', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בשמירת הערה', description: result.error, variant: 'destructive' })
         }
@@ -761,6 +768,9 @@ export function ClassSupervisorDashboard() {
           setActiveAuditSession(null)
           setAuditEntries(new Map()); setAuditNotes(new Map())
           toast({ title: 'הביקורת הסתיימה', description: 'המנהל סגר את הביקורת', variant: 'destructive' })
+        } else if (result.error === 'CLASS_FINISHED') {
+          refreshAuditSession()
+          toast({ title: 'הביקורת כבר הסתיימה', description: 'הכיתה סומנה כסיימה — לא ניתן לסמן עוד', variant: 'destructive' })
         } else {
           toast({ title: 'שגיאה בסימון מרובה', description: result.error, variant: 'destructive' })
         }
