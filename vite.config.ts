@@ -1,4 +1,7 @@
-// Supabase: Frankfurt (frxjddevnehprauoapiv) — migrated 2026-04-19
+// Supabase: Frankfurt (frxjddevnehprauoapiv) — migrated from Tokyo on 2026-04-19.
+// (A 2026-05-08 commit accidentally forced traffic back to the old Tokyo
+// project via src/lib/supabase.ts; that override was reverted in commit
+// 0cacd1d. Frankfurt remains the canonical project.)
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'

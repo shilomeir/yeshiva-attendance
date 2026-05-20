@@ -311,7 +311,7 @@ Every admin/supervisor lifecycle action is recorded here automatically (DB trigg
 - Sent via Edge Function `send-push` (VAPID + AES-128-GCM / RFC 8291).
 - **Use case:** Absence request approval notification.
 
-> **Note:** FCM / Firebase Cloud Messaging was removed along with the Capacitor Android APK. The `fcm_token` column remains in the DB schema for backward compatibility with existing rows but is no longer written or read by the app. The `broadcast-location-request` Edge Function has been deleted.
+> **Note:** FCM / Firebase Cloud Messaging was removed along with the Capacitor Android APK. The `fcm_token` column remains in the DB schema for backward compatibility with existing rows but is no longer written or read by the app. The `broadcast-location-request` Edge Function is **deprecated** — its body now returns 410 Gone. (Supabase MCP doesn't expose function-delete; the 410 stub is functionally equivalent.) For audit-mode GPS use `send-audit-push` + `submit-audit-gps` instead.
 
 ---
 
@@ -418,10 +418,12 @@ GoogleAppsScript.gs             # GAS code for sheet sync
 
 ### Frontend (`.env.local`)
 ```
-VITE_SUPABASE_URL=
+VITE_SUPABASE_URL=https://frxjddevnehprauoapiv.supabase.co
 VITE_SUPABASE_ANON_KEY=
 VITE_VAPID_PUBLIC_KEY=
 ```
+
+The canonical Supabase project is **Frankfurt (`frxjddevnehprauoapiv`)** — migrated from Tokyo on 2026-04-19. If `VITE_SUPABASE_URL` is unset, `src/lib/supabase.ts` falls back to Frankfurt. If it's set to the old Tokyo URL (`tybpsilcgpwlmqsewreu`) it's caught by the `STALE_SUPABASE_URLS` allow-list and overridden back to Frankfurt — but ideally the Vercel env should just point to Frankfurt directly.
 
 ### Supabase Edge Function Secrets
 ```
