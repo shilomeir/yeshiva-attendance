@@ -68,6 +68,10 @@ export function StudentLayout() {
       ['#2A1A3A', '#A78BFA'],
       ['#3A2A1A', '#FBBF24'],
     ]
+    // Empty string → charCodeAt(0) is NaN → NaN % n is NaN → colors[NaN] is
+    // undefined → downstream `avatarColors[0]` crashes the whole StudentLayout
+    // tree. Default to the first palette so the avatar always renders.
+    if (!name) return colors[0]
     const idx = name.charCodeAt(0) % colors.length
     return colors[idx]
   }
