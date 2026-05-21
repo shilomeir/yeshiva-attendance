@@ -66,15 +66,6 @@ function formatTimestamp(iso: string): string {
   })
 }
 
-function escapeCsv(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return ''
-  const s = String(value)
-  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-    return '"' + s.replace(/"/g, '""') + '"'
-  }
-  return s
-}
-
 function statusIcon(s: AuditEntryStatus | null) {
   if (s === 'IN_YESHIVA')
     return <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
@@ -160,8 +151,13 @@ export function AuditDetailPage() {
     })
   }, [session])
 
-  const handleExportCsv = () => {
+  // Master plan R-8: Excel-only export in v1 (PDF deferred to v1.1). xlsx
+  // is lazy-imported so users who never export the audit don't pay for the
+  // ~100KB dependency. Excel handles Hebrew/RTL natively without the BOM
+  // dance the previous CSV path required.
+  const handleExportExcel = async () => {
     if (!session) return
+    const XLSX = await import('xlsx')
     const header = [
       'שם תלמיד',
       'ת.ז.',
@@ -186,17 +182,25 @@ export function AuditDetailPage() {
       entry?.submittedBy ?? '',
       entry ? formatTimestamp(entry.submittedAt) : '',
     ])
-    const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\n')
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows])
+    ws['!cols'] = [
+      { wch: 22 }, // שם
+      { wch: 12 }, // ת.ז.
+      { wch: 14 }, // שכבה
+      { wch: 22 }, // כיתה
+      { wch: 14 }, // סטטוס
+      { wch: 22 }, // מקור
+      { wch: 12 }, // יציאה פעילה
+      { wch: 30 }, // הערה
+      { wch: 14 }, // סומן ע"י
+      { wch: 18 }, // זמן
+    ]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'ביקורת')
     const slug = (session.title ?? new Date(session.startedAt).toISOString().slice(0, 16))
       .replace(/[^\w֐-׿-]+/g, '_')
-    a.href = url
-    a.download = `audit_${slug}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
-    toast({ title: 'הקובץ הורד', description: `${rows.length} שורות יוצאו ל־CSV` })
+    XLSX.writeFile(wb, `ביקורת_${slug}.xlsx`)
+    toast({ title: 'הקובץ הורד', description: `${rows.length} שורות יוצאו ל־Excel` })
   }
 
   if (loading) {
@@ -210,7 +214,7 @@ export function AuditDetailPage() {
   if (notFound || !session) {
     return (
       <div className="flex flex-col gap-4 p-4 lg:p-6">
-        <Link to="/admin/audits" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
+        <Link to="/admin/inspection/history" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
           <ArrowRight className="h-3 w-3" /> חזרה להיסטוריה
         </Link>
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--border)] py-16 text-center">
@@ -238,12 +242,12 @@ export function AuditDetailPage() {
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       {/* Back link + actions */}
       <div className="flex items-center justify-between gap-3">
-        <Link to="/admin/audits" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
+        <Link to="/admin/inspection/history" className="text-sm text-[var(--blue)] hover:underline inline-flex items-center gap-1">
           <ArrowRight className="h-3 w-3" /> חזרה להיסטוריה
         </Link>
-        <Button variant="outline" size="sm" onClick={handleExportCsv}>
+        <Button variant="outline" size="sm" onClick={() => { void handleExportExcel() }}>
           <Download className="h-4 w-4" />
-          ייצא CSV
+          ייצא Excel
         </Button>
       </div>
 

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { Shield, Loader2 } from 'lucide-react'
 import {
   Dialog,
@@ -24,10 +24,24 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
   const [isLoading, setIsLoading] = useState(false)
   const { loginAdmin, loginClassSupervisor } = useAuthStore()
   const navigate = useNavigate()
+  const location = useLocation()
+  // Master plan B-29: bounce back to the URL the guard kicked us out of, if any.
+  const fromUrl = typeof location.state === 'object' && location.state && 'from' in location.state
+    ? String((location.state as { from: unknown }).from)
+    : null
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!pin) return
+
+    // Master plan B-18: _resolve_supervisor_class silently returns NULL for
+    // PINs shorter than 4 chars, which would surface as a confusing AUTH
+    // error for a 3-digit typo. Validate length up front so the user gets a
+    // clear message instead.
+    if (pin.length < 4) {
+      setError('הזן לפחות 4 ספרות')
+      return
+    }
 
     setIsLoading(true)
     setError('')
@@ -38,7 +52,7 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
     const adminOk = await loginAdmin(pin)
     if (adminOk) {
       onClose()
-      navigate('/admin')
+      navigate(fromUrl && fromUrl.startsWith('/admin') ? fromUrl : '/admin')
       setIsLoading(false)
       return
     }
@@ -47,7 +61,7 @@ export function AdminLoginModal({ open, onClose }: AdminLoginModalProps) {
     const supervisorOk = await loginClassSupervisor(pin)
     if (supervisorOk) {
       onClose()
-      navigate('/class-supervisor')
+      navigate(fromUrl && fromUrl.startsWith('/class-supervisor') ? fromUrl : '/class-supervisor')
       setIsLoading(false)
       return
     }

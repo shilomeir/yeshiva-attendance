@@ -111,7 +111,7 @@ export function AuditHistoryPage() {
               return (
                 <Link
                   key={s.id}
-                  to={`/admin/audits/${s.id}`}
+                  to={`/admin/inspection/history/${s.id}`}
                   className="group rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 hover:border-[var(--blue)] hover:shadow-md transition-all flex flex-col gap-3"
                 >
                   <div className="flex items-start justify-between gap-3">

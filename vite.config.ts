@@ -1,14 +1,32 @@
-// Supabase: Frankfurt (frxjddevnehprauoapiv) — migrated 2026-04-19
+// Supabase: Frankfurt (frxjddevnehprauoapiv) — migrated from Tokyo on 2026-04-19.
+// (A 2026-05-08 commit accidentally forced traffic back to the old Tokyo
+// project via src/lib/supabase.ts; that override was reverted in commit
+// 0cacd1d. Frankfurt remains the canonical project.)
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
 
+// Master plan R-50: surface VAPID configuration drift early. We warn (not
+// fail) during build so a Vercel preview without the env still builds —
+// but the warning is loud enough to catch in CI/PR review. The runtime
+// guard in src/lib/pwa/webPush.ts is the second line of defence.
+if (process.env.NODE_ENV === 'production' && !process.env.VITE_VAPID_PUBLIC_KEY) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '\n⚠️  VITE_VAPID_PUBLIC_KEY is empty — Web Push subscriptions will be disabled in this build.\n' +
+    '   Set it in Vercel project env vars (Production + Preview) before relying on push.\n'
+  )
+}
+
 export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Master plan R-54: was 'autoUpdate' (silent install). Switched to
+      // 'prompt' so PwaUpdateToast can show users the "רענן" prompt instead
+      // of leaving them with stale chunks until they manually reload.
+      registerType: 'prompt',
       includeAssets: ['favicon.ico', 'icons/*.png', 'push-sw.js'],
       manifest: {
         name: 'ישיבת שבי חברון',

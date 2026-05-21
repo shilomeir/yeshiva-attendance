@@ -5,6 +5,7 @@ import { SyncStatusBar } from '@/components/shared/SyncStatusBar'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { StudentHelpSheet } from '@/components/student/StudentHelpSheet'
+import { IosA2HSPrompt } from '@/components/student/IosA2HSPrompt'
 import { useAuthStore } from '@/store/authStore'
 import { api } from '@/lib/api'
 import { subscribeToPush } from '@/lib/pwa/webPush'
@@ -67,6 +68,10 @@ export function StudentLayout() {
       ['#2A1A3A', '#A78BFA'],
       ['#3A2A1A', '#FBBF24'],
     ]
+    // Empty string → charCodeAt(0) is NaN → NaN % n is NaN → colors[NaN] is
+    // undefined → downstream `avatarColors[0]` crashes the whole StudentLayout
+    // tree. Default to the first palette so the avatar always renders.
+    if (!name) return colors[0]
     const idx = name.charCodeAt(0) % colors.length
     return colors[idx]
   }
@@ -124,6 +129,9 @@ export function StudentLayout() {
           </div>
         </div>
       </header>
+
+      {/* iOS-only A2HS onboarding banner (master plan R-53). No-op on Android. */}
+      <IosA2HSPrompt />
 
       {/* Page content — extra bottom padding for floating tab bar */}
       <main className="flex-1 overflow-y-auto pb-28">

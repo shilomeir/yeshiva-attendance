@@ -146,6 +146,15 @@ export class SupabaseApiClient implements IApiClient {
     return this.sendPushNotification(title, body)
   }
 
+  async sendAuditPush(params: { sessionId: string; adminPin: string; title?: string; message?: string }): Promise<{ sent: number; failed: number; removed: number; total: number; lastError?: string } | { error: string }> {
+    // One call → Edge Function does server-side fan-out with concurrency cap.
+    // The Edge Function verifies the admin PIN itself; we don't need to pre-check.
+    const { data, error } = await supabase.functions.invoke('send-audit-push', { body: params })
+    if (error) throw error
+    if (data && typeof data === 'object' && 'error' in data) return { error: (data as { error: string }).error }
+    return data as { sent: number; failed: number; removed: number; total: number; lastError?: string }
+  }
+
   async addStudent(student: AddStudentPayload): Promise<AppResult<Student>> {
     if (!/^\d{9}$/.test(student.idNumber)) {
       return { error: { message: 'מספר זהות חייב להיות 9 ספרות' } }
@@ -847,17 +856,15 @@ export class SupabaseApiClient implements IApiClient {
   }
 
   async submitStudentAuditGps(params: { sessionId: string; studentId: string; deviceToken: string; gpsLat: number; gpsLng: number; accuracyM?: number | null; gpsStatus?: string }): Promise<{ distanceM: number; distanceBucket: string; status: AuditEntryStatus } | { error: string }> {
-    const { data, error } = await supabase.rpc('submit_student_audit_gps', {
-      p_session_id:   params.sessionId,
-      p_student_id:   params.studentId,
-      p_device_token: params.deviceToken,
-      p_gps_lat:      params.gpsLat,
-      p_gps_lng:      params.gpsLng,
-      p_accuracy_m:   params.accuracyM ?? null,
-      p_gps_status:   params.gpsStatus ?? 'OK',
-    })
+    // Master plan B-26: goes through the submit-audit-gps Edge Function
+    // proxy, not the RPC directly. The Edge Function validates inputs
+    // (coordinate bounds, required fields) before delegating to the
+    // submit_student_audit_gps RPC with the service-role client. Future
+    // hardening (rate limiting, geofence anomaly detection) lives in the
+    // function body, not in every client.
+    const { data, error } = await supabase.functions.invoke('submit-audit-gps', { body: params })
     if (error) throw error
-    if (data?.error) return { error: data.error as string }
+    if (data && typeof data === 'object' && 'error' in data) return { error: (data as { error: string }).error }
     const r = data as { distanceM: number; distanceBucket: string; status: AuditEntryStatus }
     return { distanceM: r.distanceM, distanceBucket: r.distanceBucket, status: r.status }
   }

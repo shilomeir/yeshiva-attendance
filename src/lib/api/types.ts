@@ -159,6 +159,11 @@ export interface IApiClient {
   updateStudentFcmToken(id: string, token: string): Promise<void>
   updatePushToken(id: string, token: string | null): Promise<void>
   sendPushNotification(title: string, body: string, target?: PushNotificationTarget): Promise<{ sent: number; failed: number; lastError?: string }>
+  /** Master plan R-7 / B-19: server-side batched push for LOCATION-mode audits.
+   *  One HTTP call from admin → Edge Function fans out to all students in
+   *  the session snapshot with concurrency cap, logs to audit_push_log,
+   *  cleans up gone tokens. Returns a per-batch summary. */
+  sendAuditPush(params: { sessionId: string; adminPin: string; title?: string; message?: string }): Promise<{ sent: number; failed: number; removed: number; total: number; lastError?: string } | { error: string }>
   sendPushToAll(title: string, body: string): Promise<{ sent: number; failed: number; lastError?: string }>
   /** Admin-only: add a new student from the dashboard. */
   addStudent(student: AddStudentPayload): Promise<AppResult<Student>>

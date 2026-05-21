@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { LoginScreen } from '@/components/auth/LoginScreen'
 import { PinPromptProvider } from '@/components/auth/PinPromptDialog'
 import { SplashScreen } from '@/components/shared/SplashScreen'
+import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
+import { PwaUpdateToast } from '@/components/shared/PwaUpdateToast'
 import { useAuthStore } from '@/store/authStore'
 import { useSyncStore } from '@/store/syncStore'
 import { useStudentsStore } from '@/store/studentsStore'
@@ -34,21 +36,29 @@ const ClassSupervisorDashboard = lazy(() =>
   import('@/pages/class-supervisor/ClassSupervisorDashboard').then(m => ({ default: m.ClassSupervisorDashboard }))
 )
 
+// Each guard preserves the intended URL via location state so the login screen
+// can bounce the user back after re-auth (master plan B-29). Without this, a
+// supervisor bookmarking /class-supervisor and refreshing landed on /student
+// after re-login instead of their dashboard.
+
 function StudentGuard({ children }: { children: React.ReactNode }) {
   const { currentUser } = useAuthStore()
-  if (!currentUser) return <Navigate to="/login" replace />
+  const location = useLocation()
+  if (!currentUser) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
   return <>{children}</>
 }
 
 function AdminGuard({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuthStore()
-  if (!isAdmin) return <Navigate to="/login" replace />
+  const location = useLocation()
+  if (!isAdmin) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
   return <>{children}</>
 }
 
 function ClassSupervisorGuard({ children }: { children: React.ReactNode }) {
   const { classSupervisor } = useAuthStore()
-  if (!classSupervisor) return <Navigate to="/login" replace />
+  const location = useLocation()
+  if (!classSupervisor) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
   return <>{children}</>
 }
 
@@ -117,8 +127,10 @@ export default function App() {
   }, [currentUser?.id])
 
   return (
+    <ErrorBoundary>
     <PinPromptProvider>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
+      <PwaUpdateToast />
 
       {!authReady ? (
         <PageFallback />
@@ -156,9 +168,16 @@ export default function App() {
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="settings" element={<SettingsPage />} />
-            <Route path="rollcall" element={<RollCallPage />} />
-            <Route path="audits" element={<AuditHistoryPage />} />
-            <Route path="audits/:id" element={<AuditDetailPage />} />
+            {/* New audit feature lives at /admin/inspection (master plan R-2).
+                /admin/audit is the legacy log; /admin/inspection is the new
+                "ביקורת פנימית". Old /admin/rollcall + /admin/audits paths
+                redirect for any users with stale bookmarks. */}
+            <Route path="inspection" element={<RollCallPage />} />
+            <Route path="inspection/history" element={<AuditHistoryPage />} />
+            <Route path="inspection/history/:id" element={<AuditDetailPage />} />
+            <Route path="rollcall" element={<Navigate to="/admin/inspection" replace />} />
+            <Route path="audits" element={<Navigate to="/admin/inspection/history" replace />} />
+            <Route path="audits/:id" element={<Navigate to="/admin/inspection/history" replace />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
           </Route>
@@ -179,5 +198,6 @@ export default function App() {
       </Suspense>
       )}
     </PinPromptProvider>
+    </ErrorBoundary>
   )
 }

@@ -20,6 +20,7 @@ import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
+import { subscribeToAuditSession } from '@/lib/audit/realtimeManager'
 import { calcQuota } from '@/lib/quota'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
@@ -597,18 +598,18 @@ export function ClassSupervisorDashboard() {
   useEffect(() => {
     if (!classId) return
 
-    const auditCh = supabase
-      .channel('audit-supervisor-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshAuditSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshAuditSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshAuditSession)
-      .subscribe()
+    // Master plan R-11: shared audit realtime channel via the manager.
+    // The manager applies R-35 server-side filters internally; we don't
+    // need to filter again here because refreshAuditSession re-fetches
+    // the supervisor-scoped view via getActiveAuditForSupervisor and the
+    // server already scopes to this supervisor's class.
+    const sid = activeAuditSession?.id
+    const auditUnsub = sid ? subscribeToAuditSession(sid, refreshAuditSession) : null
 
-    // Legacy broadcast channel — admin still emits this from RollCallPage so a
-    // supervisor in the affected class jumps to the new session without waiting
-    // for the realtime DB stream to land. We call refreshAuditSession so the
-    // entries map is built from session.entries (AUTO_DEFAULT seeds included)
-    // instead of starting empty.
+    // Legacy `audit-control` broadcast — kept for backward compatibility while
+    // any old admin tabs are still open. New admin code no longer emits it
+    // (master plan R-17), so over time this listener becomes a no-op and can
+    // be removed.
     const broadcastCh = supabase
       .channel('audit-control')
       .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
@@ -618,8 +619,11 @@ export function ClassSupervisorDashboard() {
       })
       .subscribe()
 
-    return () => { supabase.removeChannel(auditCh); supabase.removeChannel(broadcastCh) }
-  }, [classId, refreshAuditSession])
+    return () => {
+      if (auditUnsub) auditUnsub()
+      supabase.removeChannel(broadcastCh)
+    }
+  }, [classId, activeAuditSession?.id, refreshAuditSession])
 
   const quota = calcQuota(students.length)
   const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
@@ -948,7 +952,7 @@ export function ClassSupervisorDashboard() {
                   status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500' :
                   status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500' : 'bg-gray-400'
                 return (
-                  <div key={snap.id} className="flex flex-col gap-1 rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
+                  <div key={snap.id} data-testid={`inspection-supervisor-row-${snap.id}`} className="flex flex-col gap-1 rounded-lg bg-white dark:bg-amber-900/20 px-3 py-2">
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-sm font-medium text-[var(--text)] flex-1 truncate">{snap.fullName}</span>
                       {isSubmitting ? (
@@ -962,14 +966,17 @@ export function ClassSupervisorDashboard() {
                       ) : (
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
+                            data-testid={`inspection-supervisor-button-IN_YESHIVA-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'IN_YESHIVA')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'IN_YESHIVA' ? 'bg-green-500 text-white' : 'border border-green-300 text-green-700 hover:bg-green-50 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-950/20'}`}
                           >בישיבה</button>
                           <button
+                            data-testid={`inspection-supervisor-button-OUT_WITH_PERMISSION-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'OUT_WITH_PERMISSION')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITH_PERMISSION' ? 'bg-blue-500 text-white' : 'border border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/20'}`}
                           >ביצ׳ רשות</button>
                           <button
+                            data-testid={`inspection-supervisor-button-OUT_WITHOUT_PERMISSION-${snap.id}`}
                             onClick={() => handleMarkStudent(snap.id, 'OUT_WITHOUT_PERMISSION')}
                             className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${status === 'OUT_WITHOUT_PERMISSION' ? 'bg-red-500 text-white' : 'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950/20'}`}
                           >ביצ׳ ללא רשות</button>

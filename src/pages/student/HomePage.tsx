@@ -285,7 +285,7 @@ export function HomePage() {
 
       {/* ── LOCATION-mode audit GPS banner ── */}
       {activeAuditSession && (
-        <div className="animate-slide-up mx-4 mt-3">
+        <div data-testid="inspection-student-sheet" className="animate-slide-up mx-4 mt-3">
           {gpsShareState === 'done' && gpsShareResult ? (
             <div className="flex items-center gap-3 rounded-2xl border border-green-200 bg-green-50 px-4 py-3.5 dark:border-green-900/50 dark:bg-green-950/20">
               <CheckCircle2 className="h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
@@ -323,6 +323,7 @@ export function HomePage() {
                 </div>
               </div>
               <button
+                data-testid="inspection-student-confirm"
                 onClick={handleShareGps}
                 disabled={gpsShareState === 'capturing'}
                 className="shrink-0 rounded-xl bg-blue-500 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-blue-600 transition-colors disabled:opacity-50"

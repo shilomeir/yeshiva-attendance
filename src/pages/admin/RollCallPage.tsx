@@ -21,6 +21,7 @@ import { supabase } from '@/lib/supabase'
 import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/location/gps'
 import { usePinPrompt } from '@/components/auth/PinPromptDialog'
 import { useReloadOnVisibilityAndInterval } from '@/hooks/useReloadOnVisibilityAndInterval'
+import { subscribeToAuditSession } from '@/lib/audit/realtimeManager'
 import { AuditMissionControl } from '@/components/admin/AuditMissionControl'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
@@ -182,13 +183,22 @@ export function RollCallPage() {
       toast({ title: 'ביקורת פנימית נפתחה', description: `${result.totalStudentsSnapshot} תלמידים בביקורת` })
 
       if (auditMode === 'location') {
-        // NOTE: client-side push fan-out was disabled. Sending one push per
-        // student from the browser scaled poorly (381 parallel HTTP calls to
-        // the Edge Function) and had no audit_push_log writes. A dedicated
-        // server-side batch Edge Function (`send-audit-push`) is the right
-        // home for this and is tracked for a follow-up PR. Students with the
-        // PWA in foreground still detect the active LOCATION audit via
-        // checkAuditSession polling and see the GPS-share banner.
+        // Master plan R-7 / B-19: server-side batched push via the dedicated
+        // send-audit-push Edge Function. One HTTP call from the browser; the
+        // function verifies the admin PIN, fans out to all students in the
+        // snapshot with a concurrency cap of 20, logs per-batch outcomes to
+        // audit_push_log, and cleans up gone tokens. Push is advisory (R-5)
+        // — failure here does NOT block the audit. Students with the PWA in
+        // foreground still see the GPS-share banner via the polling refresh.
+        api.sendAuditPush({ sessionId: result.id, adminPin })
+          .then((pushResult) => {
+            if ('error' in pushResult) {
+              if (pushResult.error === 'AUTH') return // cached PIN stale; ignore — admin already inside the session
+              toast({ title: 'הביקורת נפתחה — שליחת התראות נכשלה', description: pushResult.error, variant: 'destructive' })
+            }
+            // success → silent; the audit banner is the primary surface
+          })
+          .catch(() => { /* network blip; audit still works */ })
         runLocationRollCall()
       } else {
         // Broadcast to supervisors
@@ -330,18 +340,25 @@ export function RollCallPage() {
   }, [])
 
   // Listen for audit session lifecycle changes (start/close/timeout) AND entry changes.
-  // submit_audit_entry only mutates audit_entries — not audit_sessions — so without
-  // the entries subscription the admin's progress counters stay stale while a
-  // supervisor marks students. We refetch the whole active session on any change.
+  // submit_audit_entry only mutates audit_entries — not audit_sessions — so
+  // without the entries subscription the admin's progress counters stay
+  // stale while a supervisor marks students. We refetch the whole active
+  // session on any change.
+  //
+  // Master plan R-35: filters are applied **server-side** via the
+  // postgres_changes `filter:` arg so the channel only receives events for
+  // the current session id. Without this we'd see every audit_entries row
+  // across history. The audit_sessions filter scopes to id; the others to
+  // session_id. The channel name is scoped per session to avoid two-admin
+  // subscriptions ping-ponging.
   useEffect(() => {
-    const channel = supabase
-      .channel('audit-admin-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_sessions' }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_entries' }, refreshActiveSession)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_class_states' }, refreshActiveSession)
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [refreshActiveSession])
+    if (!activeSession?.id) return
+    // Master plan R-11: one shared channel per session via the audit
+    // realtime manager. The manager applies the R-35 server-side filters
+    // and ref-counts subscribers so multiple hooks watching the same
+    // session don't open competing channels.
+    return subscribeToAuditSession(activeSession.id, refreshActiveSession)
+  }, [activeSession?.id, refreshActiveSession])
 
   useEffect(() => {
     return () => { if (waitTimerRef.current) clearTimeout(waitTimerRef.current) }
@@ -577,6 +594,7 @@ export function RollCallPage() {
               <p className="text-sm font-semibold text-[var(--text)] mb-2">1. סוג הביקורת</p>
               <div className="grid grid-cols-2 gap-2">
                 <button
+                  data-testid="inspection-mode-card-location"
                   onClick={() => setAuditMode('location')}
                   className={`rounded-lg border p-3 text-sm text-start transition-all ${
                     auditMode === 'location'
@@ -589,6 +607,7 @@ export function RollCallPage() {
                   <p className="text-xs opacity-70 mt-0.5">שליחת בקשת GPS לתלמידים</p>
                 </button>
                 <button
+                  data-testid="inspection-mode-card-manual"
                   onClick={() => setAuditMode('manual')}
                   className={`rounded-lg border p-3 text-sm text-start transition-all ${
                     auditMode === 'manual'

@@ -179,11 +179,12 @@ submit_departure(RPC)
 - Full access to all pages and actions.
 
 ### Class Supervisor (רכז כיתה)
-- PIN format: `{adminPin}{classCode}` (3-digit code, e.g. `1234001`).
-- Class codes auto-generated on sync, stored in `app_settings` as `class_code_{classId}`.
-- **If Admin PIN changes — all supervisors need new PINs. No automatic notification — manual process.**
-- Supervisor can only view/manage their assigned class.
-- All supervisor actions are logged in `admin_overrides`.
+- Two parallel models exist:
+  - **Legacy (still working)**: PIN format `{adminPin}{classCode}` (3-digit code, e.g. `1234001`). Class codes auto-generated on sync, stored in `app_settings` as `class_code_{classId}`.
+  - **`supervisors` table** (newer schema): PIN is hashed (`pin_hash`) per row, resolved via `verify_supervisor_pin` RPC. Both paths converge through `_resolve_supervisor_class`.
+- **If Admin PIN changes — supervisors using the legacy format need new PINs. No automatic notification — manual process.**
+- Supervisor can only view/manage their assigned class. The `_resolve_supervisor_class` SQL function silently returns NULL for PINs shorter than 4 chars — the supervisor login form enforces ≥ 4 chars client-side.
+- All supervisor audit actions are logged via DB triggers; departure-side actions are logged in `admin_overrides`.
 
 ---
 
@@ -310,7 +311,7 @@ Every admin/supervisor lifecycle action is recorded here automatically (DB trigg
 - Sent via Edge Function `send-push` (VAPID + AES-128-GCM / RFC 8291).
 - **Use case:** Absence request approval notification.
 
-> **Note:** FCM / Firebase Cloud Messaging was removed along with the Capacitor Android APK. The `fcm_token` column remains in the DB schema for backward compatibility with existing rows but is no longer written or read by the app. The `broadcast-location-request` Edge Function has been deleted.
+> **Note:** FCM / Firebase Cloud Messaging was removed along with the Capacitor Android APK. The `fcm_token` column remains in the DB schema for backward compatibility with existing rows but is no longer written or read by the app. The `broadcast-location-request` Edge Function is **deprecated** — its body now returns 410 Gone. (Supabase MCP doesn't expose function-delete; the 410 stub is functionally equivalent.) For audit-mode GPS use `send-audit-push` + `submit-audit-gps` instead.
 
 ---
 
@@ -346,15 +347,18 @@ Every admin/supervisor lifecycle action is recorded here automatically (DB trigg
 
 ### Admin (`/admin`)
 - **Dashboard:** Stats, charts, push broadcast.
-- **Students:** List with grade/class/status/search filters. **Read-only — no add/import.** Excel export available.
+- **Students:** List with grade/class/status/search filters. **Read-only — no add/import.** Excel export available (lazy-loaded on click).
 - **Requests:** Approve / reject pending requests.
-- **RollCall (ביקורת פנימית):** Broadcast GPS request to all devices.
-- **Audit Log:** All admin actions.
+- **Internal Inspection (`/admin/inspection`):** Live audit (MANUAL or LOCATION mode), Mission Control, alert queue.
+- **Inspection History (`/admin/inspection/history`):** Past sessions, drill-down, CSV export.
+- **Audit Log (`/admin/audit`):** Admin overrides log — **distinct feature from Internal Inspection above**.
 - **Settings:** Change admin PIN.
+- **Legacy routes** `/admin/rollcall` and `/admin/audits` redirect to the new `/admin/inspection` paths.
 
 ### Class Supervisor (`/class-supervisor`)
 - **Dashboard:** Their class students only, statuses, history.
-- All supervisor actions logged in `admin_overrides`.
+- **Audit panel:** Active inspection shows inline in the dashboard when admin opens one for this class (master plan R-16 — not a separate route).
+- All supervisor audit marks go through `submit_audit_entry` (PIN-protected). Departure-related actions still logged in `admin_overrides`.
 
 ---
 
@@ -414,10 +418,12 @@ GoogleAppsScript.gs             # GAS code for sheet sync
 
 ### Frontend (`.env.local`)
 ```
-VITE_SUPABASE_URL=
+VITE_SUPABASE_URL=https://frxjddevnehprauoapiv.supabase.co
 VITE_SUPABASE_ANON_KEY=
 VITE_VAPID_PUBLIC_KEY=
 ```
+
+The canonical Supabase project is **Frankfurt (`frxjddevnehprauoapiv`)** — migrated from Tokyo on 2026-04-19. If `VITE_SUPABASE_URL` is unset, `src/lib/supabase.ts` falls back to Frankfurt. If it's set to the old Tokyo URL (`tybpsilcgpwlmqsewreu`) it's caught by the `STALE_SUPABASE_URLS` allow-list and overridden back to Frankfurt — but ideally the Vercel env should just point to Frankfurt directly.
 
 ### Supabase Edge Function Secrets
 ```

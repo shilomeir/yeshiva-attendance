@@ -140,6 +140,16 @@ export class MockApiClient implements IApiClient {
     return this.sendPushNotification(title, body)
   }
 
+  async sendAuditPush(params: { sessionId: string; adminPin: string; title?: string; message?: string }): Promise<{ sent: number; failed: number; removed: number; total: number; lastError?: string } | { error: string }> {
+    // Mock: no actual push delivery, just return the snapshot count as 'sent'
+    // so calling code can render the success toast in dev/test.
+    const session = this._mockAuditSession
+    if (!session || session.id !== params.sessionId) return { error: 'SESSION_NOT_FOUND' }
+    if (session.status !== 'ACTIVE') return { error: 'SESSION_CLOSED' }
+    if (!params.adminPin) return { error: 'AUTH' }
+    return { sent: session.studentSnapshot.length, failed: 0, removed: 0, total: session.studentSnapshot.length }
+  }
+
   async addStudent(student: AddStudentPayload): Promise<AppResult<Student>> {
     if (!/^\d{9}$/.test(student.idNumber)) {
       return { error: { message: 'מספר זהות חייב להיות 9 ספרות' } }
