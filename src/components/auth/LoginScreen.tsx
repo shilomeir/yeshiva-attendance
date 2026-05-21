@@ -1060,6 +1060,10 @@ const loginScreenCSS = `
     0%   { opacity: 0; transform: translate(-50%, 6px); }
     100% { opacity: 1; transform: translate(-50%, 0); }
   }
+  @keyframes ls-zmanim-in-mob {
+    0%   { opacity: 0; transform: translateY(6px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
 
   /* ── Responsive — desktop tall ───────────────────────────────────── */
   @media (max-height: 820px) {
@@ -1099,7 +1103,11 @@ const loginScreenCSS = `
     .ls-page { --ls-seam-top: 40%; --ls-seam-bottom: 55%; --ls-banner-w: min(420px, 88vw); }
     .ls-ext-caption { display: none; }
     .ls-banner-wrap { left: 50%; }
-    .ls-zmanim { display: none; }
+    .ls-zmanim {
+      width: 100%; left: 0; transform: none; white-space: normal;
+      animation: ls-zmanim-in-mob 1.0s cubic-bezier(.2,.7,.2,1) 0.5s both;
+    }
+    .ls-zmanim-cell { flex: 1; min-width: 0; }
   }
 
   /* ── Responsive — mobile (640px) ─────────────────────────────────── */
@@ -1130,8 +1138,8 @@ const loginScreenCSS = `
     .ls-banner-wrap {
       left: 50%;
       top: 50%;
-      /* shift up slightly so the clock doesn't overlap */
-      transform: translate(-50%, calc(-50% - 8px));
+      /* shift up to make room for the zmanim strip below */
+      transform: translate(-50%, calc(-50% - 24px));
     }
     .ls-banner-halo { display: none; }
     .ls-banner {
@@ -1158,8 +1166,17 @@ const loginScreenCSS = `
     .ls-helper { margin-top: 8px; margin-bottom: 14px; }
     .ls-banner-foot { margin-top: 14px; padding-top: 14px; }
 
-    /* Zmanim — hidden on mobile (no space) */
-    .ls-zmanim { display: none; }
+    /* Zmanim — compact strip below the banner on mobile */
+    .ls-zmanim {
+      padding: 8px 2px; top: calc(100% + 10px); border-radius: 12px;
+      animation: ls-zmanim-in-mob 1.0s cubic-bezier(.2,.7,.2,1) 0.5s both;
+    }
+    .ls-zmanim-date { padding: 0 10px; }
+    .ls-zmanim-date-heb { font-size: 13px; }
+    .ls-zmanim-date-loc { font-size: 8.5px; letter-spacing: 0.12em; }
+    .ls-zmanim-cell { padding: 0 6px; }
+    .ls-zmanim-cell-label { font-size: 8.5px; letter-spacing: 0.08em; }
+    .ls-zmanim-cell-value { font-size: 12px; }
   }
 
   /* ── Responsive — very small phones (360px) ──────────────────────── */
@@ -1171,6 +1188,11 @@ const loginScreenCSS = `
     .ls-id-box { height: 38px; font-size: 16px; border-radius: 7px; }
     .ls-id-box[data-sep="true"] { margin-inline-start: 4px; }
     .ls-banner-title { font-size: 19px; }
+  }
+
+  /* Hide zmanim when screen height is too short (landscape / old phones) */
+  @media (max-width: 820px) and (max-height: 680px) {
+    .ls-zmanim { display: none; }
   }
 
   /* ── Safe area insets (iPhone notch / Dynamic Island) ────────────── */
