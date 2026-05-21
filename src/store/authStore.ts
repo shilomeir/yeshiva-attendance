@@ -4,6 +4,7 @@ import { getDeviceToken } from '@/lib/auth/deviceToken'
 import type { ClassSupervisorInfo } from '@/lib/auth/supervisorAuth'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
+import { unsubscribeFromPush } from '@/lib/pwa/webPush'
 import { getErrorMessage } from '@/lib/errors'
 import type { Student } from '@/types'
 
@@ -109,6 +110,11 @@ export const useAuthStore = create<AuthState>()(
 
       logout: () => {
         const { currentUser, isAdmin } = get()
+        if (currentUser?.id) {
+          // Clear push registration so this device is treated as new on next login
+          supabase.from('students').update({ push_token: null }).eq('id', currentUser.id).then(() => {})
+          unsubscribeFromPush().catch(() => {})
+        }
         if (isAdmin) {
           // Sign out from Supabase Auth (admin was signed in as admin@yeshiva.local)
           supabase.auth.signOut().catch(() => {})
