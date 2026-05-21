@@ -26,8 +26,7 @@ export function StudentLayout() {
     const flag = sessionStorage.getItem('show_remember_me')
     if (flag) {
       sessionStorage.removeItem('show_remember_me')
-      // Don't re-prompt if push is already registered for this device
-      return !currentUser?.push_token
+      return true
     }
     return false
   })
