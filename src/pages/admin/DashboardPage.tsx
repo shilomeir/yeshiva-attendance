@@ -730,7 +730,6 @@ export function DashboardPage() {
 
   const loadData = async (isBackground = false) => {
     if (!isBackground) setIsLoading(true)
-    api.tickDepartures().catch(() => {})
     try {
       const [statsRes, absentRes, clsStatsRes, allStudentsRes, pendingDepsRes, activeDepsRes] =
         await Promise.allSettled([
@@ -760,14 +759,28 @@ export function DashboardPage() {
     }
   }
 
+  // Coalesce bursts of realtime events so loadData (6 parallel queries) runs at most once per 1.5s.
+  const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduleReload = () => {
+    if (reloadTimerRef.current) return
+    reloadTimerRef.current = setTimeout(() => {
+      reloadTimerRef.current = null
+      loadData(true)
+    }, 1500)
+  }
+
   useEffect(() => {
     loadData()
-    const studentsChannel = supabase.channel('dashboard-students-realtime').on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData(true)).subscribe()
+    const studentsChannel = supabase.channel('dashboard-students-realtime').on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, scheduleReload).subscribe()
     const tickInterval = setInterval(() => setTick((t) => t + 1), 60000)
-    return () => { supabase.removeChannel(studentsChannel); clearInterval(tickInterval) }
+    return () => {
+      supabase.removeChannel(studentsChannel)
+      clearInterval(tickInterval)
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
+    }
   }, [])
 
-  useDeparturesRealtime({ onAnyChange: () => loadData(true) })
+  useDeparturesRealtime({ onAnyChange: scheduleReload })
 
   const handleUrgent = async (id: string, action: 'APPROVED' | 'REJECTED') => {
     if (action === 'APPROVED') await api.approveDeparture(id, 'admin', 'ADMIN')
