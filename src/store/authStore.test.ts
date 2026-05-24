@@ -184,3 +184,114 @@ describe('authStore restoreSession ("Remember me")', () => {
     expect(useAuthStore.getState().isAdmin).toBe(false)
   })
 })
+
+// Full "behaves exactly like a student" lifecycle for admin & supervisor:
+// log in → opt in to Remember me → reopen the app → land straight in → log out → cleared.
+describe('Remember me — full lifecycle parity with students', () => {
+  function reopenApp() {
+    // Simulate a fresh page load: in-memory state is gone, localStorage survives.
+    useAuthStore.setState({
+      currentUser: null, isAdmin: false, classSupervisor: null,
+      _adminPinSession: null, _supervisorPinSession: null,
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installLocalStorage()
+    reopenApp()
+  })
+
+  it('ADMIN: login → Remember me persists the PIN → reopen logs straight in → logout clears', async () => {
+    supabaseMock.rpc.mockImplementation((name: string) =>
+      name === 'verify_admin_pin' ? Promise.resolve({ data: true }) : Promise.resolve({ data: null }),
+    )
+    supabaseMock.auth.signInWithPassword.mockResolvedValue({ error: null })
+    supabaseMock.auth.signOut.mockResolvedValue({ error: null })
+
+    // 1. Manual login
+    expect(await useAuthStore.getState().loginAdmin('1234')).toBe(true)
+    expect(useAuthStore.getState().isAdmin).toBe(true)
+
+    // 2. User taps "כן, זכור אותי" → the banner calls rememberSession()
+    useAuthStore.getState().rememberSession()
+    expect(localStorage.getItem('yeshiva_remembered_admin_pin')).toBe('1234')
+
+    // 3. App is closed and reopened — App.tsx calls restoreSession() on boot
+    reopenApp()
+    expect(useAuthStore.getState().isAdmin).toBe(false) // before restore
+    await useAuthStore.getState().restoreSession()
+    expect(useAuthStore.getState().isAdmin).toBe(true)  // straight in, re-verified vs server
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('verify_admin_pin', { p_pin: '1234' })
+
+    // 4. Logout clears the remembered credential; a later reopen does NOT log in
+    useAuthStore.getState().logout()
+    expect(localStorage.getItem('yeshiva_remembered_admin_pin')).toBeNull()
+    reopenApp()
+    await useAuthStore.getState().restoreSession()
+    expect(useAuthStore.getState().isAdmin).toBe(false)
+  })
+
+  it('SUPERVISOR: login → Remember me persists the PIN → reopen logs straight in → logout clears', async () => {
+    const classInfo = { classId: 'כיתה הרב אבישי', gradeName: 'שיעור א' }
+    supabaseMock.rpc.mockImplementation((name: string) =>
+      name === 'verify_supervisor_pin' ? Promise.resolve({ data: classInfo }) : Promise.resolve({ data: null }),
+    )
+
+    // 1. Manual login
+    expect(await useAuthStore.getState().loginClassSupervisor('1234001')).toBe(true)
+    expect(useAuthStore.getState().classSupervisor).toEqual(classInfo)
+
+    // 2. Opt in to Remember me
+    useAuthStore.getState().rememberSession()
+    expect(localStorage.getItem('yeshiva_remembered_supervisor_pin')).toBe('1234001')
+
+    // 3. Reopen → restore straight in (re-verified vs server)
+    reopenApp()
+    await useAuthStore.getState().restoreSession()
+    expect(useAuthStore.getState().classSupervisor).toEqual(classInfo)
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('verify_supervisor_pin', { p_pin: '1234001' })
+
+    // 4. Logout clears it
+    useAuthStore.getState().logout()
+    expect(localStorage.getItem('yeshiva_remembered_supervisor_pin')).toBeNull()
+    reopenApp()
+    await useAuthStore.getState().restoreSession()
+    expect(useAuthStore.getState().classSupervisor).toBeNull()
+  })
+
+  it('does NOT persist anything when the user declines the banner (no rememberSession call)', async () => {
+    supabaseMock.rpc.mockImplementation((name: string) =>
+      name === 'verify_admin_pin' ? Promise.resolve({ data: true }) : Promise.resolve({ data: null }),
+    )
+    supabaseMock.auth.signInWithPassword.mockResolvedValue({ error: null })
+
+    await useAuthStore.getState().loginAdmin('1234')
+    // user taps "לא תודה" → rememberSession is never called
+    expect(localStorage.getItem('yeshiva_remembered_admin_pin')).toBeNull()
+    reopenApp()
+    await useAuthStore.getState().restoreSession()
+    expect(useAuthStore.getState().isAdmin).toBe(false)
+  })
+
+  it('remembers only the current role — switching identities never stacks credentials', async () => {
+    supabaseMock.rpc.mockImplementation((name: string) =>
+      name === 'verify_admin_pin' ? Promise.resolve({ data: true })
+      : name === 'verify_supervisor_pin' ? Promise.resolve({ data: { classId: 'כיתה הרב אבישי', gradeName: 'שיעור א' } })
+      : Promise.resolve({ data: null }),
+    )
+    supabaseMock.auth.signInWithPassword.mockResolvedValue({ error: null })
+    supabaseMock.auth.signOut.mockResolvedValue({ error: null })
+
+    await useAuthStore.getState().loginAdmin('1234')
+    useAuthStore.getState().rememberSession()
+    expect(localStorage.getItem('yeshiva_remembered_admin_pin')).toBe('1234')
+
+    useAuthStore.getState().logout()
+    await useAuthStore.getState().loginClassSupervisor('1234001')
+    useAuthStore.getState().rememberSession()
+    // Supervisor key set, admin key gone — exactly one identity remembered.
+    expect(localStorage.getItem('yeshiva_remembered_supervisor_pin')).toBe('1234001')
+    expect(localStorage.getItem('yeshiva_remembered_admin_pin')).toBeNull()
+  })
+})
