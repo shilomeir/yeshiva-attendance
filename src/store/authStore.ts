@@ -119,6 +119,7 @@ export const useAuthStore = create<AuthState>()(
           supabase.auth.signOut().catch(() => {})
         }
         localStorage.removeItem('yeshiva_remembered_id')
+        localStorage.removeItem('yeshiva_last_id')
         set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null })
       },
 

@@ -242,11 +242,13 @@ function QuickStats({
   urgentRequests: CalendarDeparture[]; longAbsentStudents: Student[]
   allStudents: Student[]; todayDepartures: CalendarDeparture[]
 }) {
+  const registeredDevices = allStudents.filter(s => Boolean(s.push_token)).length
+  const devicePct = allStudents.length > 0 ? Math.round((registeredDevices / allStudents.length) * 100) : 0
   const stats = [
     { label: 'יציאות היום', val: todayDepartures.length, trend: 'פעיל', tone: 'accent', Icon: ClipboardList },
     { label: 'ממתינים לאישור', val: urgentRequests.length, trend: `${urgentRequests.length} חריגים`, tone: 'warn', Icon: Bell },
-    { label: 'נעדרים 7+ ימים', val: longAbsentStudents.length, trend: '−1', tone: 'bad', Icon: AlertOctagon },
-    { label: 'מכשירים רשומים', val: allStudents.filter(s => Boolean(s.push_token)).length, trend: '94%', tone: 'good', Icon: Users },
+    { label: 'נעדרים 7+ ימים', val: longAbsentStudents.length, trend: '', tone: 'bad', Icon: AlertOctagon },
+    { label: 'מכשירים רשומים', val: registeredDevices, trend: `${devicePct}%`, tone: 'good', Icon: Users },
   ]
   const colorMap: Record<string, string> = { accent: 'var(--accent)', warn: 'var(--warn)', bad: 'var(--bad)', good: 'var(--good)' }
   const softMap: Record<string, string> = { accent: 'var(--accent-soft)', warn: 'var(--warn-soft)', bad: 'var(--bad-soft)', good: 'var(--good-soft)' }

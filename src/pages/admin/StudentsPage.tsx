@@ -15,8 +15,9 @@ function exportToXlsx(students: Student[]) {
   const wb = XLSX.utils.book_new()
 
   for (const level of GRADE_LEVELS) {
+    const normalLevel = normalizeHebrew(level.name)
     const gradeStudents = students
-      .filter((s) => s.grade === level.name)
+      .filter((s) => s.grade && normalizeHebrew(s.grade) === normalLevel)
       .sort((a, b) => {
         if (a.classId !== b.classId) return a.classId.localeCompare(b.classId, 'he')
         return a.fullName.localeCompare(b.fullName, 'he')
@@ -131,7 +132,7 @@ export function StudentsPage() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="outline" size="sm" onClick={() => exportToXlsx(students)} className="flex items-center gap-1.5 text-xs">
+          <Button variant="outline" size="sm" onClick={() => exportToXlsx(filteredStudents)} className="flex items-center gap-1.5 text-xs">
             <Download className="h-3.5 w-3.5" />
             ייצוא Excel
           </Button>

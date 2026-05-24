@@ -139,6 +139,7 @@ export function HomePage() {
   }, [currentUser?.id])
 
   useDeparturesRealtime({
+    studentId: currentUser?.id,
     onAnyChange: () => {
       refreshStudent()
       refreshDeparture()
