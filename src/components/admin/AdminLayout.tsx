@@ -6,6 +6,7 @@ import {
   Search, Bell, Sparkles, RefreshCw,
 } from 'lucide-react'
 import { SyncStatusBar } from '@/components/shared/SyncStatusBar'
+import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { useAuthStore } from '@/store/authStore'
 import { useUiStore } from '@/store/uiStore'
 import { cn } from '@/lib/utils/cn'
@@ -22,10 +23,17 @@ const NAV_ITEMS = [
 ]
 
 export function AdminLayout() {
-  const { logout } = useAuthStore()
+  const { logout, rememberSession } = useAuthStore()
   const { sidebarOpen, setSidebarOpen } = useUiStore()
   const navigate = useNavigate()
   const [time, setTime] = useState(new Date())
+  const [bannerVisible, setBannerVisible] = useState(() => {
+    if (sessionStorage.getItem('show_remember_me')) {
+      sessionStorage.removeItem('show_remember_me')
+      return true
+    }
+    return false
+  })
 
   useEffect(() => {
     const id = setInterval(() => setTime(new Date()), 30_000)
@@ -300,6 +308,14 @@ export function AdminLayout() {
           <Outlet />
         </main>
       </div>
+
+      {bannerVisible && (
+        <RememberMeBanner
+          description="כדי שלא תצטרך להזין את קוד הגישה בכל כניסה למערכת הניהול"
+          onYes={async () => { rememberSession(); setBannerVisible(false) }}
+          onNo={() => setBannerVisible(false)}
+        />
+      )}
     </div>
   )
 }

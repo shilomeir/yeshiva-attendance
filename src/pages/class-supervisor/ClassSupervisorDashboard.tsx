@@ -14,6 +14,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet'
 import { StatusBadge } from '@/components/shared/StatusBadge'
+import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
@@ -386,7 +387,14 @@ function getAvatarHue(id: string): string {
 
 // ── Main dashboard ────────────────────────────────────────────────────────────
 export function ClassSupervisorDashboard() {
-  const { classSupervisor, logout } = useAuthStore()
+  const { classSupervisor, logout, rememberSession } = useAuthStore()
+  const [bannerVisible, setBannerVisible] = useState(() => {
+    if (sessionStorage.getItem('show_remember_me')) {
+      sessionStorage.removeItem('show_remember_me')
+      return true
+    }
+    return false
+  })
   const [students, setStudents] = useState<Student[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -841,6 +849,14 @@ export function ClassSupervisorDashboard() {
         onClose={() => setEditStudent(null)}
         onSuccess={loadData}
       />
+
+      {bannerVisible && (
+        <RememberMeBanner
+          description="כדי שלא תצטרך להזין את קוד הגישה בכל כניסה כאחראי כיתה"
+          onYes={async () => { rememberSession(); setBannerVisible(false) }}
+          onNo={() => setBannerVisible(false)}
+        />
+      )}
     </div>
   )
 }

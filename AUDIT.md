@@ -89,6 +89,13 @@ All **fixes** in §1 are verified by `tsc -b` + ESLint + Vitest + `vite build`, 
 - **Fix:** regex is now `/['‘’׳`]/g` (adds U+2018/U+2019).
 - **Tests added:** `src/store/__tests__/normalizeHebrew.test.ts`.
 
+### F11 — Admin & supervisor "Remember me" + session survives refresh (resolves O2)
+- **Locations:** new `src/lib/auth/rememberMe.ts`; `src/store/authStore.ts` (`restoreSession`, `rememberSession`, `_supervisorPinSession`, logout clears all keys); `src/App.tsx` (gates routing on `restoreSession()` so there is no logged-out flash); `src/components/auth/LoginScreen.tsx` (removed the duplicate student auto-login; sets the remember banner flag after admin/supervisor login); `src/components/admin/AdminLayout.tsx` + `src/pages/class-supervisor/ClassSupervisorDashboard.tsx` (render the `RememberMeBanner`); `src/components/auth/RememberMeBanner.tsx` (optional `description` prop); `src/components/student/StudentLayout.tsx` (uses the shared helper).
+- **Behavior now:** admins and class supervisors get the same "Remember me" banner students get. If they opt in, their session is restored across refresh / reopen / mobile reload — consistent for all three roles — and routing is gated until restore finishes, so they are never flashed to `/login`.
+- **Security preserved:** only the credential (ID or PIN) is stored, opt-in only; on boot it is **always re-verified** against the server (`verify_admin_pin` / `verify_supervisor_pin` / student fetch) — stale local data alone never grants access, and a failed check clears the key; logout clears every remembered key (incl. the legacy `yeshiva_last_id`); one identity remembered per device. Student login/Remember-me behavior is unchanged.
+- **Tests added:** `src/lib/auth/__tests__/rememberMe.test.ts`; `restoreSession`/logout cases in `src/store/authStore.test.ts`.
+- **Still needs a manual browser pass:** opt-in then refresh for admin & supervisor; failed re-verify falls back to login; logout fully clears.
+
 ### Tests added
 - `src/domain/__tests__/quota.test.ts` — full `calcQuota` breakpoint table + a 0–120 cross-check against the formula. **Note:** this surfaced that CLAUDE.md §5's table is slightly wrong at `n=22` (it lists 22→3, but `FLOOR(22*0.135)=2`). The **formula** is authoritative (it's shared verbatim with the `submit_departure` RPC), so client and server agree on `2`; only the doc table is off. See O21.
 - `src/lib/constants/__tests__/grades.test.ts` — `classLabel`, `getClasses`.
@@ -120,7 +127,9 @@ All **fixes** in §1 are verified by `tsc -b` + ESLint + Vitest + `vite build`, 
 - **Acceptance:** no student CRUD affordance in the admin UI; `grep -rn "addStudent" src` returns only test/no references; sync remains the only write path.
 - **Risk:** `StudentTable`, `StudentRow`, `StudentsPage` all reference these; removing requires careful prop cleanup. Re-run `tsc -b`.
 
-### O2 — [HIGH] Admin & supervisor are logged out on every page refresh
+### O2 — [HIGH] Admin & supervisor are logged out on every page refresh — ✅ RESOLVED (see F11)
+> Implemented the uniform, secure "Remember me" + boot-time re-verification described below. Original analysis kept for reference.
+
 - **Location:** `src/store/authStore.ts:129-135` (`partialize` persists only `deviceToken`); guards in `src/App.tsx:40-50`; student-only auto-login in `src/components/auth/LoginScreen.tsx:533-545`.
 - **Current behavior:** `isAdmin`/`classSupervisor`/`currentUser` are in-memory. On reload, admins & supervisors fail their guard → redirected to `/login`. Students are rescued by `yeshiva_remembered_id` auto-login; admins/supervisors have **no** such path. iOS PWAs reload aggressively on backgrounding, so this happens often.
 - **Expected:** a valid admin/supervisor session survives refresh (at least for a bounded time).

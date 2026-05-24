@@ -4,9 +4,11 @@ import { Bell, X } from 'lucide-react'
 interface RememberMeBannerProps {
   onYes: () => Promise<void>
   onNo: () => void
+  /** Optional override of the explanatory copy (defaults to the student message). */
+  description?: string
 }
 
-export function RememberMeBanner({ onYes, onNo }: RememberMeBannerProps) {
+export function RememberMeBanner({ onYes, onNo, description }: RememberMeBannerProps) {
   const [loading, setLoading] = useState(false)
 
   const handleYes = async () => {
@@ -49,7 +51,7 @@ export function RememberMeBanner({ onYes, onNo }: RememberMeBannerProps) {
         <div className="mb-6 text-center">
           <h2 className="text-xl font-bold text-white drop-shadow">זכור אותי</h2>
           <p className="mt-1.5 text-sm text-white/80 leading-relaxed">
-            כדי שלא תצטרך להקליד את המספר שלך בכל כניסה, ולקבל התראה כשהבקשה שלך מאושרת
+            {description ?? 'כדי שלא תצטרך להקליד את המספר שלך בכל כניסה, ולקבל התראה כשהבקשה שלך מאושרת'}
           </p>
         </div>
 

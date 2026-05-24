@@ -529,20 +529,8 @@ export function LoginScreen() {
   const { login, loginAdmin, loginClassSupervisor, currentUser, isAdmin, classSupervisor } =
     useAuthStore()
 
-  // Auto-login with remembered ID
-  useEffect(() => {
-    const rememberedId = localStorage.getItem('yeshiva_remembered_id')
-    if (rememberedId) {
-      login(rememberedId).then((success) => {
-        if (success) {
-          navigate('/student', { replace: true })
-        } else {
-          localStorage.removeItem('yeshiva_remembered_id')
-        }
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Note: auto-login from a remembered session is handled centrally in App.tsx
+  // (restoreSession) before any route renders, so there is no logged-out flash.
 
   if (currentUser) return <Navigate to="/student" replace />
   if (isAdmin) return <Navigate to="/admin" replace />
@@ -561,11 +549,13 @@ export function LoginScreen() {
   const handleAdminLogin = async (pin: string) => {
     const adminOk = await loginAdmin(pin)
     if (adminOk) {
+      sessionStorage.setItem('show_remember_me', '1')
       navigate('/admin', { replace: true })
       return { ok: true }
     }
     const supervisorOk = await loginClassSupervisor(pin)
     if (supervisorOk) {
+      sessionStorage.setItem('show_remember_me', '1')
       navigate('/class-supervisor', { replace: true })
       return { ok: true }
     }
