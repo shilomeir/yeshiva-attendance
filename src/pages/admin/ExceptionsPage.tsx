@@ -284,7 +284,7 @@ function CategorySection({ title, tone, students }: { title: string; tone: strin
               <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>{s.fullName}</div>
               <div style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>{s.classId} · ת.ז. {s.idNumber}</div>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--ink-faint)', textAlign: 'left', flexShrink: 0 }}>
+            <div className="hidden sm:block" style={{ fontSize: 12, color: 'var(--ink-faint)', textAlign: 'left', flexShrink: 0 }}>
               <div>נראה לאחרונה</div>
               <div style={{ color: 'var(--ink-muted)', fontWeight: 500 }}>{timeAgo(s.lastSeen)}</div>
             </div>
@@ -293,9 +293,9 @@ function CategorySection({ title, tone, students }: { title: string; tone: strin
                 padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.6)',
                 border: '1px solid var(--hairline)', color: 'var(--accent-deep)',
                 display: 'inline-flex', alignItems: 'center', gap: 6,
-                fontSize: 12, fontWeight: 500, textDecoration: 'none',
+                fontSize: 12, fontWeight: 500, textDecoration: 'none', flexShrink: 0,
               }}>
-                <Phone size={13} /> {s.phone}
+                <Phone size={13} /> <span className="admin-phone-num">{s.phone}</span>
               </a>
             )}
           </div>
@@ -536,7 +536,7 @@ export function ExceptionsPage() {
       {/* ── Category cards ────────────────────────────────────────────── */}
       {totalOutside > 0 && (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--gap-sm)' }}>
+          <div className="admin-thirds-grid">
             <CategoryCard icon={<AlertTriangle size={20} />} label="ללא אישור" tone="bad" count={filteredCategorised.noApproval.length} desc="לא נוכחים בישיבה ואין להם אישור פעיל" />
             <CategoryCard icon={<ShieldCheck size={20} />} label="באישור חריג" tone="plum" count={filteredCategorised.withUrgent.length} desc='אושר ע"י הר"מ או ראש הישיבה' />
             <CategoryCard icon={<CheckCircle size={20} />} label="באישור רגיל" tone="info" count={filteredCategorised.withApproval.length} desc="יציאה מתוכננת ומאושרת מראש" />

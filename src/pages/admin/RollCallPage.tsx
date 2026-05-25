@@ -399,7 +399,7 @@ export function RollCallPage() {
           )}
 
           {/* Summary stat cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gap-sm)' }}>
+          <div className="admin-quad-grid">
             {([
               { label: 'בישיבה', cls: 'בישיבה' as LocationClass, icon: <CheckCircle2 size={20} />, tone: 'var(--good)' },
               { label: 'קרוב לישיבה', cls: 'קרוב' as LocationClass, icon: <Navigation size={20} />, tone: 'var(--warn)' },
