@@ -120,7 +120,7 @@ export function AuditLogPanel() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap)' }}>
 
       {/* ── Stat strip ────────────────────────────────────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gap-sm)' }}>
+      <div className="admin-quad-grid">
         {statItems.map((s, i) => (
           <div key={i} className="glass" style={{ padding: 'var(--card-pad)', borderInlineStart: `3px solid ${s.color}` }}>
             <div style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>{s.label}</div>

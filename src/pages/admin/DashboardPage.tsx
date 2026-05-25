@@ -118,9 +118,9 @@ function HeroPresence({
         </span>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
-        <div style={{ position: 'relative', width: 200, height: 200, flexShrink: 0 }}>
-          <svg width="200" height="200" style={{ transform: 'rotate(-90deg)' }}>
+      <div className="admin-hero-presence-body">
+        <div className="admin-hero-ring">
+          <svg viewBox="0 0 200 200" style={{ transform: 'rotate(-90deg)' }}>
             <defs>
               <linearGradient id="ring-grad" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0%" stopColor={color}/>
@@ -136,9 +136,9 @@ function HeroPresence({
           </svg>
           <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
             <div style={{
-              fontFamily: 'Fraunces, serif', fontSize: 64, fontWeight: 500, color, lineHeight: 1, letterSpacing: '-0.04em',
+              fontFamily: 'Fraunces, serif', fontSize: 'clamp(38px, 9vw, 64px)', fontWeight: 500, color, lineHeight: 1, letterSpacing: '-0.04em',
               transition: 'color 0.4s ease',
-            }}>{displayPct}<span style={{ fontSize: 28, color: 'var(--ink-faint)', marginInlineStart: 2 }}>%</span></div>
+            }}>{displayPct}<span style={{ fontSize: 'clamp(18px, 4vw, 28px)', color: 'var(--ink-faint)', marginInlineStart: 2 }}>%</span></div>
             <div style={{ fontSize: 12, color: 'var(--ink-muted)', marginTop: 4 }}>בישיבה</div>
           </div>
         </div>
@@ -199,8 +199,8 @@ function LocationDial({ stats }: { stats: DashboardStats | null }) {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 18, flex: 1 }}>
-        <div style={{ position: 'relative', width: 160, height: 160, flexShrink: 0 }}>
-          <svg width="160" height="160" style={{ transform: 'rotate(-90deg)' }}>
+        <div className="admin-location-ring">
+          <svg viewBox="0 0 160 160" style={{ transform: 'rotate(-90deg)' }}>
             {arcs.map((a) => (
               <circle key={a.key} cx="80" cy="80" r={R}
                 stroke={a.color} strokeWidth="14" fill="none"
@@ -493,7 +493,7 @@ function ClassStatsTable({ classStats }: { classStats: ClassStat[] }) {
         </div>
       </div>
 
-      <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+      <div className="admin-table-scroll"><table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse', minWidth: 560 }}>
         <thead>
           <tr style={{ background: 'rgba(20,18,25,0.02)' }}>
             <th style={th}>שכבה / כיתה</th>
@@ -550,7 +550,7 @@ function ClassStatsTable({ classStats }: { classStats: ClassStat[] }) {
             )
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   )
 }
@@ -585,8 +585,8 @@ function LongAbsentCard({ students }: { students: Student[] }) {
               <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: 'var(--ink-faint)' }}>ת.ז. {s.idNumber}</div>
             </div>
             {s.phone && (
-              <a href={`tel:${s.phone}`} style={{ padding: '6px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.7)', border: '1px solid var(--hairline)', color: 'var(--accent-deep)', fontSize: 12.5, fontWeight: 500, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <Phone size={13}/> {s.phone}
+              <a href={`tel:${s.phone}`} style={{ padding: '6px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.7)', border: '1px solid var(--hairline)', color: 'var(--accent-deep)', fontSize: 12.5, fontWeight: 500, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <Phone size={13}/> <span className="admin-phone-num">{s.phone}</span>
               </a>
             )}
           </div>
@@ -636,7 +636,7 @@ function BroadcastCard({
         </span>
       </div>
 
-      <form onSubmit={handleBroadcast} style={{ padding: 24, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+      <form onSubmit={handleBroadcast} className="admin-broadcast-form">
         <div>
           <div style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 10 }}>1. בחר יעד</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
@@ -846,14 +846,14 @@ export function DashboardPage() {
       </div>
 
       {/* Hero Bento Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr)', gap: 'var(--gap-sm)' }}>
+      <div className="admin-hero-grid">
         <HeroPresence displayPct={displayPct} onCampusPct={onCampusPct} stats={stats} classStats={classStats}/>
         <LocationDial stats={stats}/>
         <QuickStats urgentRequests={urgentRequests} longAbsentStudents={longAbsentStudents} allStudents={allStudents} todayDepartures={todayDepartures}/>
       </div>
 
       {/* Presence Timeline + Urgent Alerts */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 'var(--gap-sm)' }}>
+      <div className="admin-split-grid">
         {/* Presence Timeline */}
         <div style={{ background: 'var(--glass-2)', backdropFilter: 'blur(20px) saturate(140%)', WebkitBackdropFilter: 'blur(20px) saturate(140%)', borderRadius: 'var(--radius)', border: '1px solid var(--hairline)', boxShadow: 'var(--shadow-card)', padding: 'var(--card-pad)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
@@ -869,7 +869,7 @@ export function DashboardPage() {
 
       {/* Grade Breakdown + Today Departures */}
       {classStats.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 'var(--gap-sm)' }}>
+        <div className="admin-split-grid">
           <GradeBreakdownCard classStats={classStats}/>
           <TodayDeparturesCard todayDepartures={todayDepartures}/>
         </div>

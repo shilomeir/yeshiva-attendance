@@ -304,7 +304,7 @@ export function PendingRequestsPage() {
               בקשות חריגות ({urgentRequests.length})
             </h3>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 'var(--gap-sm)' }}>
+          <div className="admin-request-grid">
             {urgentRequests.map((dep) => <RequestCard key={dep.id} dep={dep} />)}
           </div>
         </div>
@@ -321,7 +321,7 @@ export function PendingRequestsPage() {
               </h3>
             </div>
           )}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 'var(--gap-sm)' }}>
+          <div className="admin-request-grid">
             {regularRequests.map((dep) => <RequestCard key={dep.id} dep={dep} />)}
           </div>
         </div>

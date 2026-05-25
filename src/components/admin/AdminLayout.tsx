@@ -194,6 +194,7 @@ export function AdminLayout() {
 
       {/* ── Main content ─────────────────────────────────────────────────── */}
       <div
+        className="admin-main-wrapper"
         style={{
           flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
           margin: '14px 0 14px 14px', borderRadius: 22,
@@ -235,8 +236,8 @@ export function AdminLayout() {
               >
                 {timeStr}
               </span>
-              <span style={{ width: 1, height: 12, background: 'var(--hairline-2)' }} />
-              <span>{dateStr}</span>
+              <span className="hidden sm:inline" style={{ width: 1, height: 12, background: 'var(--hairline-2)', display: 'inline-block' }} />
+              <span className="hidden sm:inline">{dateStr}</span>
             </span>
           </div>
 
@@ -249,8 +250,9 @@ export function AdminLayout() {
 
           {/* AI insights badge */}
           <button
+            className="hidden sm:inline-flex items-center"
             style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7,
+              gap: 7,
               padding: '8px 16px', borderRadius: 999,
               background: 'rgba(255,255,255,0.7)', color: 'var(--ink)',
               border: '1px solid var(--hairline)', cursor: 'pointer',
@@ -296,7 +298,7 @@ export function AdminLayout() {
         </div>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto" style={{ padding: 'var(--pad)' }}>
+        <main className="flex-1 overflow-y-auto admin-content-pad">
           <Outlet />
         </main>
       </div>
