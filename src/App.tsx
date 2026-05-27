@@ -22,7 +22,10 @@ const StudentsPage       = lazy(() => import('@/pages/admin/StudentsPage').then(
 const CalendarPage       = lazy(() => import('@/pages/admin/CalendarPage').then(m => ({ default: m.CalendarPage })))
 const AuditLogPage       = lazy(() => import('@/pages/admin/AuditLogPage').then(m => ({ default: m.AuditLogPage })))
 const SettingsPage       = lazy(() => import('@/pages/admin/SettingsPage').then(m => ({ default: m.SettingsPage })))
-const RollCallPage       = lazy(() => import('@/pages/admin/RollCallPage').then(m => ({ default: m.RollCallPage })))
+const InternalAuditPage   = lazy(() => import('@/features/internal-audit/pages/InternalAuditPage').then(m => ({ default: m.InternalAuditPage })))
+const AuditHistoryPage    = lazy(() => import('@/features/internal-audit/pages/AuditHistoryPage').then(m => ({ default: m.AuditHistoryPage })))
+const AuditDetailPage     = lazy(() => import('@/features/internal-audit/pages/AuditDetailPage').then(m => ({ default: m.AuditDetailPage })))
+const AuditProjectionPage = lazy(() => import('@/features/internal-audit/pages/AuditProjectionPage').then(m => ({ default: m.AuditProjectionPage })))
 const PendingRequestsPage = lazy(() => import('@/pages/admin/PendingRequestsPage').then(m => ({ default: m.PendingRequestsPage })))
 const ExceptionsPage     = lazy(() => import('@/pages/admin/ExceptionsPage').then(m => ({ default: m.ExceptionsPage })))
 
@@ -137,10 +140,22 @@ export default function App() {
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="settings" element={<SettingsPage />} />
-            <Route path="rollcall" element={<RollCallPage />} />
+            <Route path="rollcall" element={<InternalAuditPage />} />
+            <Route path="rollcall/history" element={<AuditHistoryPage />} />
+            <Route path="rollcall/history/:sessionId" element={<AuditDetailPage />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
           </Route>
+
+          {/* Internal-audit projection — full-screen, lives outside the admin shell */}
+          <Route
+            path="/admin/rollcall/:sessionId/projection"
+            element={
+              <AdminGuard>
+                <AuditProjectionPage />
+              </AdminGuard>
+            }
+          />
 
           {/* Class supervisor route */}
           <Route
