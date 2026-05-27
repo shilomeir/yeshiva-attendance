@@ -1104,6 +1104,7 @@ const loginScreenCSS = `
     .ls-ext-caption { display: none; }
     .ls-banner-wrap { left: 50%; }
     .ls-zmanim {
+      display: inline-flex;
       width: 100%; left: 0; transform: none; white-space: normal;
       animation: ls-zmanim-in-mob 1.0s cubic-bezier(.2,.7,.2,1) 0.5s both;
     }
@@ -1168,6 +1169,7 @@ const loginScreenCSS = `
 
     /* Zmanim — compact strip below the banner on mobile */
     .ls-zmanim {
+      display: inline-flex;
       padding: 8px 2px; top: calc(100% + 10px); border-radius: 12px;
       animation: ls-zmanim-in-mob 1.0s cubic-bezier(.2,.7,.2,1) 0.5s both;
     }
@@ -1190,8 +1192,8 @@ const loginScreenCSS = `
     .ls-banner-title { font-size: 19px; }
   }
 
-  /* Hide zmanim when screen height is too short (landscape / old phones) */
-  @media (max-width: 820px) and (max-height: 680px) {
+  /* Hide zmanim only when phone is in landscape (no vertical room) */
+  @media (max-width: 820px) and (orientation: landscape) {
     .ls-zmanim { display: none; }
   }
 
