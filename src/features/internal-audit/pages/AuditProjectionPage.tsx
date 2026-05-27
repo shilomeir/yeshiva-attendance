@@ -9,9 +9,9 @@ import type { AuditSession } from '../api/auditTypes'
 
 const ROTATION_SECONDS = 15
 
-type View = 'overview' | 'classes' | 'live' | 'alerts'
+type View = 'overview' | 'classes' | 'live' | 'alerts' | 'supervisorQueue'
 
-const VIEWS: View[] = ['overview', 'classes', 'live', 'alerts']
+const VIEWS: View[] = ['overview', 'classes', 'live', 'alerts', 'supervisorQueue']
 
 /**
  * Big-screen projection view. Full-screen, no chrome, auto-rotates between
@@ -89,10 +89,11 @@ export function AuditProjectionPage() {
 
       {/* View */}
       <div style={{ flex: 1, overflow: 'hidden', padding: '24px 36px' }}>
-        {view === 'overview' && <OverviewView metrics={metrics} />}
-        {view === 'classes'  && <ClassesView classRows={classRows} />}
-        {view === 'live'     && <LiveFeedView rows={rows} />}
-        {view === 'alerts'   && <AlertsView rows={rows} alerts={alerts} />}
+        {view === 'overview'         && <OverviewView metrics={metrics} />}
+        {view === 'classes'          && <ClassesView classRows={classRows} />}
+        {view === 'live'             && <LiveFeedView rows={rows} />}
+        {view === 'alerts'           && <AlertsView rows={rows} alerts={alerts} />}
+        {view === 'supervisorQueue'  && <SupervisorQueueView rows={rows} />}
       </div>
 
       {/* Bottom bar */}
@@ -109,10 +110,11 @@ export function AuditProjectionPage() {
 }
 
 const VIEW_LABEL: Record<View, string> = {
-  overview: 'סקירה כללית',
-  classes:  'מצב לפי כיתות',
-  live:     'תגובות אחרונות',
-  alerts:   'חריגים',
+  overview:        'סקירה כללית',
+  classes:         'מצב לפי כיתות',
+  live:            'תגובות אחרונות',
+  alerts:          'חריגים',
+  supervisorQueue: 'ממתין לרכז',
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
@@ -242,6 +244,63 @@ function LiveFeedView({ rows }: { rows: ReturnType<typeof useAuditDashboardData>
           </div>
         )
       })}
+    </div>
+  )
+}
+
+function SupervisorQueueView({ rows }: { rows: ReturnType<typeof useAuditDashboardData>['rows'] }) {
+  // Students waiting on supervisor action: no manual mark, no approved departure,
+  // and either no location response yet or a failed/denied one.
+  const queue = rows.filter((r) => {
+    if (r.manual_status) return false
+    if (r.expected_state === 'APPROVED_OUTSIDE') return false
+    const s = r.location_status
+    return !s || s === 'PENDING' || s === 'REQUEST_SENT' || s === 'APP_OPENED'
+        || s === 'DENIED_BY_USER' || s === 'UNAVAILABLE' || s === 'TIMEOUT' || s === 'FAILED'
+  })
+
+  // Group by class
+  const byClass = new Map<string, typeof queue>()
+  for (const r of queue) {
+    const arr = byClass.get(r.class_id) ?? []
+    arr.push(r)
+    byClass.set(r.class_id, arr)
+  }
+
+  if (queue.length === 0) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 28, color: '#10b981', opacity: 0.85 }}>
+        אין תלמידים שממתינים לרכז
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+      gap: 16, overflowY: 'auto', height: '100%', alignContent: 'start',
+    }}>
+      {[...byClass.entries()].map(([classId, students]) => (
+        <div key={classId} style={{
+          padding: 18, borderRadius: 14,
+          background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+            <span style={{ fontSize: 18, fontWeight: 700 }}>{classId.replace(/^כיתה\s+/, '')}</span>
+            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 16, color: '#f59e0b', fontWeight: 700 }}>
+              {students.length}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14, opacity: 0.85 }}>
+            {students.slice(0, 8).map((s) => (
+              <div key={s.student_id}>· {s.student_name}</div>
+            ))}
+            {students.length > 8 && (
+              <div style={{ opacity: 0.6, marginTop: 4 }}>+ {students.length - 8} נוספים</div>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

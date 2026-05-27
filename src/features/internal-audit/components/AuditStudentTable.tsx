@@ -1,7 +1,42 @@
 import { useMemo, useState } from 'react'
-import { Search } from 'lucide-react'
+import { Search, MapPin, ShieldCheck, User, Activity } from 'lucide-react'
 import type { AuditLiveBoardRow } from '../api/auditTypes'
 import { deriveFromRow, getAuditStatusDisplay } from '../domain/auditStatus'
+
+type Source = 'gps' | 'supervisor' | 'approved' | 'admin' | 'none'
+
+function getSource(row: AuditLiveBoardRow): Source {
+  if (row.approved_departure_id) return 'approved'
+  if (row.manual_marked_by_role === 'ADMIN') return 'admin'
+  if (row.manual_status) return 'supervisor'
+  if (row.location_status === 'GRANTED' || row.location_status === 'LOW_ACCURACY') return 'gps'
+  return 'none'
+}
+
+const SOURCE_LABEL: Record<Source, string> = {
+  gps:        'GPS',
+  supervisor: 'רכז',
+  approved:   'יציאה מאושרת',
+  admin:      'מנהל',
+  none:       '—',
+}
+
+function SourceTag({ source }: { source: Source }) {
+  const Icon = source === 'gps' ? MapPin
+             : source === 'supervisor' ? User
+             : source === 'admin' ? Activity
+             : source === 'approved' ? ShieldCheck
+             : null
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      fontSize: 11, color: 'var(--ink-muted)',
+    }}>
+      {Icon && <Icon size={11} />}
+      {SOURCE_LABEL[source]}
+    </span>
+  )
+}
 
 interface AuditStudentTableProps {
   rows: AuditLiveBoardRow[]
@@ -96,7 +131,7 @@ export function AuditStudentTable({ rows, showLocation, classFilter, onMarkClick
                 style={{
                   display: 'grid',
                   gridTemplateColumns: showLocation
-                    ? 'minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto'
+                    ? 'minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(0, 0.7fr) auto'
                     : 'minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1fr) auto',
                   gap: 10, alignItems: 'center',
                   padding: '10px 16px',
@@ -122,13 +157,21 @@ export function AuditStudentTable({ rows, showLocation, classFilter, onMarkClick
                     {display.label}
                   </span>
                 </div>
-                {showLocation ? (
+                <SourceTag source={getSource(row)} />
+                {showLocation && (
                   <div style={{ fontSize: 11.5, color: 'var(--ink-muted)' }}>
                     {row.distance_from_campus_meters !== null
                       ? <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>{row.distance_from_campus_meters} מ׳</span>
                       : '—'}
                   </div>
-                ) : null}
+                )}
+                {showLocation && (
+                  <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
+                    {row.accuracy_meters !== null
+                      ? <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>±{Math.round(row.accuracy_meters)} מ׳</span>
+                      : '—'}
+                  </div>
+                )}
                 <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
                   {formatTime(row.captured_at ?? row.manual_updated_at)}
                 </div>

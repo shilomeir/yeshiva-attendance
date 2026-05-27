@@ -80,6 +80,43 @@ class AuditApi {
     if (result?.error) throw new Error(result.error)
   }
 
+  async resolveAlert(alertId: string, actorId = 'admin'): Promise<void> {
+    const { error } = await supabase.rpc('resolve_audit_alert', {
+      p_alert_id: alertId,
+      p_actor_id: actorId,
+    })
+    if (error) throw error
+  }
+
+  // ── History detail (drill-down report) ────────────────────────────────────
+
+  async getParticipants(sessionId: string) {
+    const { data, error } = await supabase
+      .from('audit_participants')
+      .select('*')
+      .eq('session_id', sessionId)
+    if (error) throw error
+    return (data ?? []) as Array<import('./auditTypes').AuditParticipant>
+  }
+
+  async getLocationResponses(sessionId: string) {
+    const { data, error } = await supabase
+      .from('audit_location_responses')
+      .select('*')
+      .eq('session_id', sessionId)
+    if (error) throw error
+    return (data ?? []) as Array<import('./auditTypes').AuditLocationResponse>
+  }
+
+  async getManualMarks(sessionId: string) {
+    const { data, error } = await supabase
+      .from('audit_manual_marks')
+      .select('*')
+      .eq('session_id', sessionId)
+    if (error) throw error
+    return (data ?? []) as Array<import('./auditTypes').AuditManualMark>
+  }
+
   // ── Live board reads ──────────────────────────────────────────────────────
 
   async getLiveBoard(sessionId: string): Promise<AuditLiveBoardRow[]> {

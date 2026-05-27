@@ -1,4 +1,8 @@
-import { AlertTriangle, AlertOctagon, Info } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, AlertOctagon, Info, CheckSquare } from 'lucide-react'
+import { auditApi } from '../api/auditApi'
+import { toast } from '@/hooks/use-toast'
+import { getErrorMessage } from '@/lib/errors'
 import type { AuditAlert, AuditLiveBoardRow } from '../api/auditTypes'
 
 interface AuditAlertStackProps {
@@ -16,10 +20,26 @@ const TYPE_LABEL: Record<string, string> = {
 }
 
 export function AuditAlertStack({ alerts, rows }: AuditAlertStackProps) {
+  const [resolvingId, setResolvingId] = useState<string | null>(null)
   const open = alerts.filter((a) => !a.resolved_at)
   if (open.length === 0) return null
 
   const studentNameById = new Map(rows.map((r) => [r.student_id, { name: r.student_name, classId: r.class_id }]))
+
+  const handleResolve = async (alertId: string) => {
+    setResolvingId(alertId)
+    try {
+      await auditApi.resolveAlert(alertId)
+    } catch (err) {
+      toast({
+        title: 'שגיאה',
+        description: getErrorMessage(err, 'לא ניתן לסמן חריגה כטופלה'),
+        variant: 'destructive',
+      })
+    } finally {
+      setResolvingId(null)
+    }
+  }
 
   // Critical first
   const sorted = [...open].sort((a, b) => {
@@ -52,7 +72,7 @@ export function AuditAlertStack({ alerts, rows }: AuditAlertStackProps) {
               key={alert.id}
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'auto 1fr auto',
+                gridTemplateColumns: 'auto 1fr auto auto',
                 gap: 10, alignItems: 'center',
                 padding: '8px 12px', borderRadius: 10,
                 background: 'rgba(255,255,255,0.6)',
@@ -74,6 +94,21 @@ export function AuditAlertStack({ alerts, rows }: AuditAlertStackProps) {
               <div style={{ fontSize: 11, color: 'var(--ink-faint)', fontFamily: 'JetBrains Mono, monospace' }}>
                 {new Date(alert.created_at).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}
               </div>
+              <button
+                onClick={() => handleResolve(alert.id)}
+                disabled={resolvingId === alert.id}
+                title="סמן כטופל"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 8px', borderRadius: 8,
+                  background: 'rgba(255,255,255,0.8)', border: `1px solid ${tone}`,
+                  fontFamily: 'inherit', fontSize: 11, fontWeight: 600,
+                  color: tone, cursor: resolvingId === alert.id ? 'wait' : 'pointer',
+                }}
+              >
+                <CheckSquare size={11} />
+                טיפלתי
+              </button>
             </div>
           )
         })}

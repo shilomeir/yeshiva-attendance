@@ -797,6 +797,33 @@ GRANT EXECUTE ON FUNCTION cancel_audit_session(UUID, TEXT) TO authenticated, ano
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 10b. RPC: resolve_audit_alert
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Admin marks an alert as handled (e.g. after personally verifying the student).
+-- Idempotent: re-resolving an already-resolved alert is a no-op.
+CREATE OR REPLACE FUNCTION resolve_audit_alert(
+  p_alert_id  UUID,
+  p_actor_id  TEXT DEFAULT 'admin'
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE audit_alerts
+     SET resolved_at = NOW(), resolved_by = p_actor_id
+   WHERE id = p_alert_id
+     AND resolved_at IS NULL;
+  RETURN jsonb_build_object('ok', TRUE);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION resolve_audit_alert(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION resolve_audit_alert(UUID, TEXT) TO authenticated, anon;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 11. RPC: get_active_audit_session
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION get_active_audit_session()

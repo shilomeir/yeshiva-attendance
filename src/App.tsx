@@ -24,6 +24,7 @@ const AuditLogPage       = lazy(() => import('@/pages/admin/AuditLogPage').then(
 const SettingsPage       = lazy(() => import('@/pages/admin/SettingsPage').then(m => ({ default: m.SettingsPage })))
 const InternalAuditPage   = lazy(() => import('@/features/internal-audit/pages/InternalAuditPage').then(m => ({ default: m.InternalAuditPage })))
 const AuditHistoryPage    = lazy(() => import('@/features/internal-audit/pages/AuditHistoryPage').then(m => ({ default: m.AuditHistoryPage })))
+const AuditDetailPage     = lazy(() => import('@/features/internal-audit/pages/AuditDetailPage').then(m => ({ default: m.AuditDetailPage })))
 const AuditProjectionPage = lazy(() => import('@/features/internal-audit/pages/AuditProjectionPage').then(m => ({ default: m.AuditProjectionPage })))
 const PendingRequestsPage = lazy(() => import('@/pages/admin/PendingRequestsPage').then(m => ({ default: m.PendingRequestsPage })))
 const ExceptionsPage     = lazy(() => import('@/pages/admin/ExceptionsPage').then(m => ({ default: m.ExceptionsPage })))
@@ -141,6 +142,7 @@ export default function App() {
             <Route path="settings" element={<SettingsPage />} />
             <Route path="rollcall" element={<InternalAuditPage />} />
             <Route path="rollcall/history" element={<AuditHistoryPage />} />
+            <Route path="rollcall/history/:sessionId" element={<AuditDetailPage />} />
             <Route path="requests" element={<PendingRequestsPage />} />
             <Route path="exceptions" element={<ExceptionsPage />} />
           </Route>

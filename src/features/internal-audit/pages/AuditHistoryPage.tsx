@@ -110,13 +110,21 @@ export function AuditHistoryPage() {
       ) : (
         <div className="glass" style={{ padding: 0, borderRadius: 14, overflow: 'hidden' }}>
           {rows.map((r) => (
-            <div key={r.id} style={{
-              display: 'grid', gap: 12, alignItems: 'center',
-              gridTemplateColumns: 'minmax(0, 2fr) repeat(5, minmax(0, 1fr)) auto',
-              padding: '12px 16px',
-              borderBottom: '1px solid var(--hairline)',
-              borderInlineStart: `3px solid ${r.critical_count > 0 ? 'var(--bad)' : 'var(--good)'}`,
-            }}>
+            <Link
+              key={r.id}
+              to={`/admin/rollcall/history/${r.id}`}
+              style={{
+                display: 'grid', gap: 12, alignItems: 'center',
+                gridTemplateColumns: 'minmax(0, 2fr) repeat(5, minmax(0, 1fr)) auto',
+                padding: '12px 16px',
+                borderBottom: '1px solid var(--hairline)',
+                borderInlineStart: `3px solid ${r.critical_count > 0 ? 'var(--bad)' : 'var(--good)'}`,
+                textDecoration: 'none', color: 'inherit',
+                transition: 'background 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.7)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = '' }}
+            >
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>{r.title}</div>
                 <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
@@ -128,8 +136,8 @@ export function AuditHistoryPage() {
               <Field label="משך"      value={formatDuration(r.duration_seconds)} />
               <Field label="תלמידים"  value={String(r.participants_count)} />
               <Field label="חריגים"   value={String(r.critical_count)} tone={r.critical_count > 0 ? 'var(--bad)' : undefined} />
-              <div />
-            </div>
+              <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>פתח →</span>
+            </Link>
           ))}
         </div>
       )}
