@@ -9,6 +9,7 @@ import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage } from '@/lib/errors'
+import { StudentAuditCollector } from '@/features/internal-audit/components/StudentAuditCollector'
 import type { Student, CalendarDeparture } from '@/types'
 
 function getTimeStr(isoStr: string): string {
@@ -165,6 +166,11 @@ export function HomePage() {
 
   return (
     <div className="animate-fade-in" dir="rtl">
+
+      {/* ── Internal-audit collector banner (only renders when a session is active) ── */}
+      <div className="mx-4 mt-4">
+        <StudentAuditCollector studentId={student.id} />
+      </div>
 
       {/* ── Undo checkout banner ── */}
       {undoCheckout && Date.now() < undoCheckout.expiresAt && (

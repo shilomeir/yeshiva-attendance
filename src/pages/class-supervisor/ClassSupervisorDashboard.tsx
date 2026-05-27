@@ -8,9 +8,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
-} from '@/components/ui/dialog'
-import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet'
 import { StatusBadge } from '@/components/shared/StatusBadge'
@@ -22,6 +19,8 @@ import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { getErrorMessage, getResultErrorMessage } from '@/lib/errors'
+import { useActiveAuditSession } from '@/features/internal-audit/hooks/useActiveAuditSession'
+import { SupervisorAuditPanel } from '@/features/internal-audit/components/SupervisorAuditPanel'
 import type { Student, ClassStat, CalendarDeparture } from '@/types'
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -387,12 +386,13 @@ export function ClassSupervisorDashboard() {
   const [editStudent, setEditStudent] = useState<Student | null>(null)
   const [todayDepartures, setTodayDepartures] = useState<CalendarDeparture[]>([])
   const [, setTick] = useState(0)
-  const [manualAuditActive, setManualAuditActive] = useState(false)
-  const [auditPresence, setAuditPresence] = useState<Map<string, boolean>>(new Map())
-  const [showAuditWarning, setShowAuditWarning] = useState(false)
 
   const classId = classSupervisor?.classId ?? ''
   const gradeName = classSupervisor?.gradeName ?? ''
+
+  // Internal-audit (ביקורת פנימית) — DB-backed session, survives refresh
+  const { session: auditSession } = useActiveAuditSession()
+  const auditAppliesToThisClass = !!auditSession  // server-side scoping; supervisor only sees own class anyway
 
   const loadData = async () => {
     if (!classId) return
@@ -426,17 +426,6 @@ export function ClassSupervisorDashboard() {
 
   useDeparturesRealtime({ onAnyChange: loadData })
 
-  useEffect(() => {
-    if (!classId) return
-    const ch = supabase.channel('audit-control')
-      .on('broadcast', { event: 'manual_audit_start' }, ({ payload }) => {
-        const { classIds } = payload as { classIds: string[] }
-        if (classIds.includes(classId)) { setManualAuditActive(true); setAuditPresence(new Map()) }
-      })
-      .subscribe()
-    return () => { supabase.removeChannel(ch) }
-  }, [classId])
-
   if (!classSupervisor) return null
 
   const quota = calcQuota(students.length)
@@ -453,12 +442,6 @@ export function ClassSupervisorDashboard() {
   }, {} as Record<LocationCategory, number>)
   const gradeLevelClasses = classStats.filter(cs => cs.grade === gradeName).sort((a, b) => a.classId.localeCompare(b.classId, 'he'))
   const spotsColor = yeshivaSpots === 0 ? 'var(--bad)' : yeshivaSpots <= 3 ? 'var(--warn)' : 'var(--good)'
-  const unmarkedCount = students.length - auditPresence.size
-
-  const handleFinishAudit = () => {
-    if (unmarkedCount > 0) { setShowAuditWarning(true) }
-    else { setManualAuditActive(false); setAuditPresence(new Map()) }
-  }
 
   return (
     <div dir="rtl" style={{ minHeight: '100vh', background: 'var(--parchment)', position: 'relative' }}>
@@ -508,67 +491,13 @@ export function ClassSupervisorDashboard() {
 
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '16px 16px 100px' }}>
 
-        {/* Manual audit banner */}
-        {manualAuditActive && (
-          <div style={{
-            borderRadius: 16, padding: 16,
-            border: '1px solid var(--warn)',
-            background: 'var(--warn-soft)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-              <ShieldAlert size={18} style={{ color: 'var(--warn)', flexShrink: 0 }} />
-              <p style={{ fontWeight: 600, color: 'var(--warn)', fontSize: 14 }}>ביקורת פנימית פעילה — סמן נוכחות</p>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
-              {students.map((s) => {
-                const present = auditPresence.get(s.id)
-                return (
-                  <div key={s.id} style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    borderRadius: 10, background: 'rgba(255,255,255,0.7)',
-                    padding: '8px 12px',
-                  }}>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{s.fullName}</span>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button
-                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, true))}
-                        style={{
-                          borderRadius: 7, padding: '3px 10px', fontSize: 11.5, fontWeight: 700,
-                          cursor: 'pointer', border: 'none', fontFamily: 'inherit',
-                          background: present === true ? 'var(--good)' : 'rgba(34,197,94,0.12)',
-                          color: present === true ? '#fff' : 'var(--good)',
-                        }}
-                      >נוכח</button>
-                      <button
-                        onClick={() => setAuditPresence((prev) => new Map(prev).set(s.id, false))}
-                        style={{
-                          borderRadius: 7, padding: '3px 10px', fontSize: 11.5, fontWeight: 700,
-                          cursor: 'pointer', border: 'none', fontFamily: 'inherit',
-                          background: present === false ? 'var(--bad)' : 'rgba(239,68,68,0.12)',
-                          color: present === false ? '#fff' : 'var(--bad)',
-                        }}
-                      >נעדר</button>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-            <button
-              onClick={handleFinishAudit}
-              style={{
-                width: '100%', borderRadius: 10, padding: '10px',
-                background: 'var(--warn)', border: 'none', color: '#fff',
-                fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-              }}
-            >
-              סיום ביקורת
-              {unmarkedCount > 0 && (
-                <span style={{ marginInlineStart: 8, borderRadius: 999, background: 'rgba(255,255,255,0.3)', padding: '1px 7px', fontSize: 11 }}>
-                  {unmarkedCount} לא מסומנים
-                </span>
-              )}
-            </button>
-          </div>
+        {/* Internal-audit panel — DB-backed, refresh-safe, replaces broadcast version */}
+        {auditAppliesToThisClass && auditSession && classSupervisor && (
+          <SupervisorAuditPanel
+            session={auditSession}
+            classId={classId}
+            supervisorId={classSupervisor.classId}
+          />
         )}
 
         {/* Class stats card */}
@@ -806,28 +735,6 @@ export function ClassSupervisorDashboard() {
           </div>
         )}
       </div>
-
-      {/* Audit warning dialog */}
-      <Dialog open={showAuditWarning} onOpenChange={setShowAuditWarning}>
-        <DialogContent dir="rtl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertOctagon className="h-5 w-5" style={{ color: 'var(--warn)' }} />
-              יש תלמידים לא מסומנים
-            </DialogTitle>
-            <DialogDescription>
-              {unmarkedCount} תלמיד{unmarkedCount !== 1 ? 'ים' : ''} עדיין לא סומנו. לסיים בכל זאת?
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowAuditWarning(false)} className="flex-1">חזור לסימון</Button>
-            <Button className="flex-1" style={{ background: 'var(--warn)', color: '#fff' }}
-              onClick={() => { setShowAuditWarning(false); setManualAuditActive(false); setAuditPresence(new Map()) }}>
-              סיים בכל זאת
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       <EditStudentSheet
         student={editStudent}
