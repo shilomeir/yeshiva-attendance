@@ -40,7 +40,7 @@ Structure:
 - Push: best-effort. Internal notification center is the safety net.
 - Student source: **CSV upload**, manual sync only.
 - System reads from CSV and never writes back.
-- Every registration has a primary question. **Default is a three-option question: yes / no / undecided** (Hebrew: כן / לא / עדיין לא יודע). Admin may pick any question type and any answer values (including binary yes/no). `undecided` is a real answer — a student who picks it counts as **responded**, not "not answered," and is a distinct concept from the `seen` status.
+- Every registration has a primary question. **Default is a three-option question: present / absent / undecided** (Hebrew: נוכח / לא נוכח / מתלבט). Admin may pick any question type and any answer values (including binary yes/no). `undecided` is a real answer — a student who picks it counts as **responded**, not "not answered," and is a distinct concept from the `seen` status.
 - Conditional follow-up questions: supported.
 - Students see only their own registrations and responses; no aggregate results.
 - Admin can edit a student's response on the student's behalf; the previous response value is retained as one historical version.
@@ -607,7 +607,7 @@ An array of question definitions, ordered. Each item:
 ```jsonc
 {
   "id": "q_primary",                // stable id within this registration; client-generated nanoid.
-  "type": "yes_no_undecided" | "yes_no" | "single_choice" | "multi_choice" | "text",
+  "type": "presence" | "yes_no" | "single_choice" | "multi_choice" | "text",
   "label": "האם תישאר לשבת?",
   "help_text": "אפשר לערוך עד יום חמישי" | null,
   "required": true,
@@ -617,25 +617,27 @@ An array of question definitions, ordered. Each item:
     { "value": "south", "label": "דרום" }
   ],
   "allow_other": false,             // single_choice/multi_choice only
-  "labels": {                       // OPTIONAL override of fixed labels for yes_no_undecided / yes_no
-    "yes": "כן",
-    "no": "לא",
-    "undecided": "עדיין לא יודע"
+  "labels": {                       // OPTIONAL override of fixed labels
+    "present": "נוכח",              // presence type only
+    "absent": "לא נוכח",
+    "undecided": "מתלבט",
+    "yes": "כן",                   // yes_no (binary) type only
+    "no": "לא"
   },
   "conditional_on": null | {
     "question_id": "q_primary",
-    "equals": "yes" | <string|number|boolean>   // for yes_no_undecided: "yes" | "no" | "undecided"
+    "equals": "present" | <string|number|boolean>   // for presence: "present" | "absent" | "undecided"
   }
 }
 ```
 
-**v1 question types:** `yes_no_undecided` (**the default primary type — three options**), `yes_no` (binary), `single_choice`, `multi_choice`, `text`.
+**v1 question types:** `presence` (**the default primary type — three options**), `yes_no` (binary), `single_choice`, `multi_choice`, `text`.
 
-- `yes_no_undecided` is the system default for the primary question. It renders three fixed answer values — `yes`, `no`, `undecided` — with Hebrew labels `כן` / `לא` / `עדיין לא יודע` (relabelable via the optional `labels` map). **[ASSUMPTION]** the Hebrew word for "undecided" is `עדיין לא יודע`; confirm with the product owner if a different phrase is preferred (e.g., `אולי`, `טרם החליט`).
-- `yes_no` (binary) remains available for admins who explicitly want only two options.
+- `presence` is the system default for the primary question. It renders three fixed answer values — `present`, `absent`, `undecided` — with Hebrew labels `נוכח` / `לא נוכח` / `מתלבט` (relabelable via the optional `labels` map).
+- `yes_no` (binary, values `yes`/`no`, labels `כן`/`לא`) remains available for admins who explicitly want only two options (e.g., "מאשר את התקנון?").
 
 **[CRITICAL — do not conflate two different three-way concepts]:**
-- `undecided` is an **answer value**. A student who selects it has **responded** (status `responded`). It is *not* the same as the per-student status `seen` ("opened but did not answer at all"). Reports must count `undecided` under "responded" and break it out as its own answer slice.
+- `undecided` is an **answer value** (`מתלבט`). A student who selects it has **responded** (status `responded`). It is *not* the same as the per-student status `seen` ("opened but did not answer at all"). Reports must count `undecided` under "responded" and break it out as its own answer slice.
 
 **[OUT-OF-SCOPE for v1]** `number`, `phone`, `date`, `time`, `note` (longer textarea), confirmation checkbox — listed for future. Do not stub their UI.
 
@@ -649,7 +651,7 @@ An array of question definitions, ordered. Each item:
   "q_notes": "אגיע מאוחר"
 }
 ```
-- `yes_no_undecided` → `"yes" | "no" | "undecided"` (the **default** primary type).
+- `presence` → `"present" | "absent" | "undecided"` (the **default** primary type).
 - `yes_no` → `"yes" | "no"`.
 - `single_choice` → string (option value, or `__other__` with a sibling `*_other` field if `allow_other`).
 - `multi_choice` → array of strings.
@@ -940,7 +942,7 @@ The builder edits `registrations.questions_schema` in-place.
 **Mobile:** tabs replace the three-pane layout: "שאלות" / "תצוגה מקדימה".
 
 ### 20.2 Question type editors
-- `yes_no_undecided` (default): label + required. Three fixed answer values (`yes`/`no`/`undecided`); the admin may optionally relabel them via the `labels` map (defaults `כן` / `לא` / `עדיין לא יודע`).
+- `presence` (default): label + required. Three fixed answer values (`present`/`absent`/`undecided`); the admin may optionally relabel them via the `labels` map (defaults `נוכח` / `לא נוכח` / `מתלבט`).
 - `yes_no`: label + required. Two values (`yes`/`no`); optional relabel.
 - `single_choice`: label + options (rows with `value`, `label`; `value` auto-derived if blank); `allow_other` toggle.
 - `multi_choice`: same as single, plus implicit "select all that apply" helper text.
@@ -952,7 +954,7 @@ On any non-primary question, the admin can add:
 
 UI rules:
 - The dropdown lists only earlier questions (no forward references).
-- The value picker shows the source question's options (for choice questions), a three-way picker (`yes` / `no` / `undecided`) for `yes_no_undecided`, a `yes/no` toggle for `yes_no`, or a free text input for `text`.
+- The value picker shows the source question's options (for choice questions), a three-way picker (`present` / `absent` / `undecided`) for `presence`, a `yes/no` toggle for `yes_no`, or a free text input for `text`.
 - A question may have at most one conditional rule (v1). Nested/compound conditions are **[FUTURE]**.
 
 ### 20.4 Validation in the builder
@@ -1012,7 +1014,7 @@ Whenever the admin is building, editing, or reviewing a registration, they see a
 ### 22.3 What it shows
 The preview is a **rendered student detail page**, not a thumbnail. It includes:
 - The registration title, description, and the "edit until" notice.
-- The primary question rendered exactly as the student will see it (e.g., the default three buttons `כן` / `לא` / `עדיין לא יודע`, choice options, etc.).
+- The primary question rendered exactly as the student will see it (e.g., the default three buttons `נוכח` / `לא נוכח` / `מתלבט`, choice options, etc.).
 - Follow-up questions appearing/disappearing per conditional logic as the previewed answers change.
 - The submit button (disabled in preview — see 22.6).
 - An empty state for "this registration is closed" if the admin previews that state.
@@ -1202,15 +1204,15 @@ This is a large surface area. Build it generously.
 
 **A. Summary view**
 - **Status** three-state breakdown (counts + percentages): `responded` / `seen, no response` / `not yet seen`.
-- **Primary-answer distribution** (bar/pie). For the default `yes_no_undecided` primary, this has **three slices**: `כן` / `לא` / `עדיין לא יודע`. These are independent of the status breakdown: every student counted here is `responded`. Do not merge `undecided` into "not yet answered."
+- **Primary-answer distribution** (bar/pie). For the default `presence` primary, this has **three slices**: `נוכח` / `לא נוכח` / `מתלבט`. These are independent of the status breakdown: every student counted here is `responded`. Do not merge `undecided` into "not yet answered."
 - Per-question distribution for each follow-up (bar/pie).
 - Per-class breakdown (stacked bar) — by primary answer value.
 - Per-group breakdown (if any group is part of the audience).
 - "Last 24h" mini-timeline of incoming responses.
 
 **B. Lists** (all sortable, filterable; each can be copied to WhatsApp and exported)
-- Responded list — filterable **by primary answer value** (e.g., only `כן`, only `עדיין לא יודע`).
-- "Saw, did not respond" list (status `seen`, no answer at all — distinct from `עדיין לא יודע`).
+- Responded list — filterable **by primary answer value** (e.g., only `נוכח`, only `מתלבט`).
+- "Saw, did not respond" list (status `seen`, no answer at all — distinct from `מתלבט`).
 - "Not yet seen" list.
 - Removed-from-audience list.
 
@@ -1254,9 +1256,9 @@ A separate report page: pick a date range and an audience subset, export per-stu
 Buttons available in many places (responded list, "not yet answered" list, monitor sidebar).
 
 **Format A — clean name list (filterable by primary answer value):**
-The admin picks which answer to list (`כן` / `לא` / `עדיין לא יודע`, or any custom value). The heading reflects the chosen filter.
+The admin picks which answer to list (`נוכח` / `לא נוכח` / `מתלבט`, or any custom value). The heading reflects the chosen filter.
 ```
-מגיעים ל"שבת פרשת בא" (כן):
+נוכחים ל"שבת פרשת בא":
 
 שיעור א:
 1. ישראל ישראלי
@@ -1267,7 +1269,7 @@ The admin picks which answer to list (`כן` / `לא` / `עדיין לא יוד�
 1. אברהם אברהמי
 ...
 ```
-A separate copy can list the `עדיין לא יודע` students (useful for follow-up), e.g. heading `עדיין לא החליטו ל"שבת פרשת בא":`.
+A separate copy can list the `מתלבט` students (useful for follow-up), e.g. heading `מתלבטים ל"שבת פרשת בא":`.
 
 **Format B — ready-made reminder message:**
 ```
@@ -1280,7 +1282,7 @@ A separate copy can list the `עדיין לא יודע` students (useful for fol
 
 **Format C — concise count summary:**
 ```
-"שבת פרשת בא" — 71 מגיעים, 12 לא מגיעים, 18 עדיין לא יודעים | 14 ראו ולא ענו, 27 טרם נצפו (מתוך 142).
+"שבת פרשת בא" — 71 נוכחים, 12 לא נוכחים, 18 מתלבטים | 14 ראו ולא ענו, 27 טרם נצפו (מתוך 142).
 ```
 Note the two groups separated by `|`: the first three are **answer values** (all "responded"); the last two are **status** (no answer at all).
 
@@ -1634,7 +1636,7 @@ A living checklist; build with these in mind from day one.
 ### 44.2 E2E critical flows
 1. Student logs in, sees pending registration, opens it (seen recorded), submits, sees confirmation.
 2. Student edits before edit_until.
-3. Admin builds a default three-option (yes/no/undecided) registration with one conditional follow-up, previews it, publishes to a class, sees responses on monitor (verify `undecided` counts as responded and appears as its own answer slice).
+3. Admin builds a default three-option (present/absent/undecided) registration with one conditional follow-up, previews it, publishes to a class, sees responses on monitor (verify `undecided` counts as responded and appears as its own answer slice).
 4. Admin edits a student's response on behalf; the student sees the badge.
 5. CSV import with mixed creates/updates/inactivations, with errors, with confirmation.
 6. Export `xlsx` and verify Hebrew renders, sheets present, hidden-by-condition cells say "לא רלוונטי".
@@ -1764,7 +1766,7 @@ Conventions per phase:
 **Scope:**
 - All registration-related tables verified in use.
 - RPC: `publish_registration`, `close_registration`, `reopen_registration`, `archive_registration`, `update_audience`, `submit_response`, `mark_registration_seen`, `admin_submit_response_on_behalf`.
-- Seed a sample default three-option (yes/no/undecided) registration via SQL and exercise the RPCs from a script/test.
+- Seed a sample default three-option (present/absent/undecided) registration via SQL and exercise the RPCs from a script/test.
 
 **DoD:** the integration test suite can create, publish, get responses, edit, close, reopen, archive a registration.
 
@@ -1775,7 +1777,7 @@ Conventions per phase:
 
 **Scope:**
 - `RegistrationBuilderPage` with three-pane layout.
-- `<QuestionEditor>` for `yes_no_undecided` (default), `yes_no`, `single_choice`, `multi_choice`, `text`.
+- `<QuestionEditor>` for `presence` (default), `yes_no`, `single_choice`, `multi_choice`, `text`.
 - `<ConditionalRuleEditor>`.
 - "Pull from library" and "save to library" hooks.
 - `<AudiencePicker>` (basic version — full polish in later phase if needed).
@@ -2028,20 +2030,20 @@ Each migration is reversible via a matching `down.sql` where feasible.
 | 4 | סטטוס | derived: טרם נצפה / ראה ולא ענה / ענה |
 | 5 | תאריך צפייה | `seen_at` |
 | 6 | תאריך מענה | `responded_at` |
-| 7 | תשובה ראשית | `values[primary_question_id]` (rendered to label; for the default primary one of `כן` / `לא` / `עדיין לא יודע`) |
+| 7 | תשובה ראשית | `values[primary_question_id]` (rendered to label; for the default primary one of `נוכח` / `לא נוכח` / `מתלבט`) |
 | 8..N | <לכל שאלת המשך> | `values[q.id]`; hidden-by-condition → `לא רלוונטי` |
 | N+1 | נערך ע"י המנהל | tick if `submitted_via='admin_on_behalf'` or `last_edited_by_admin_at` not null |
 
 Header row is bold, freeze panes on row 1. Number format for IDs is text (preserve leading zeros). Column widths auto-fit.
 
-**Note:** the `סטטוס` column (#4) is the per-student *status* (`ענה` includes anyone who answered, **even `עדיין לא יודע`**). The `תשובה ראשית` column (#7) is the *answer value*. A row with status `ענה` and primary answer `עדיין לא יודע` is correct and expected — keep the two columns conceptually separate in pivots.
+**Note:** the `סטטוס` column (#4) is the per-student *status* (`ענה` includes anyone who answered, **even `מתלבט`**). The `תשובה ראשית` column (#7) is the *answer value*. A row with status `ענה` and primary answer `מתלבט` is correct and expected — keep the two columns conceptually separate in pivots.
 
 ---
 
 ## Appendix F — Glossary
 
-- **Primary question** — the first question of a registration; cannot be conditional. Default type is `yes_no_undecided`.
-- **`yes_no_undecided`** — the default primary question type. Three fixed answer values: `yes` / `no` / `undecided` (Hebrew `כן` / `לא` / `עדיין לא יודע`). All three are real answers (status `responded`).
+- **Primary question** — the first question of a registration; cannot be conditional. Default type is `presence`.
+- **`presence`** — the default primary question type. Three fixed answer values: `present` / `absent` / `undecided` (Hebrew `נוכח` / `לא נוכח` / `מתלבט`). All three are real answers (status `responded`).
 - **Undecided** — an **answer value** meaning "the student responded but has not decided." NOT a status. A student who answered `undecided` is `responded`, distinct from the `seen` status (opened but gave no answer).
 - **Audience snapshot** — the list of students captured at publish time (or later via `update_audience`). Stored in `registration_targets`.
 - **Three-state status** — per `(registration, student)`: `sent` (no `seen_at`), `seen` (has `seen_at`, no response), `responded` (has any answer, including `undecided`). *Distinct from the three answer values of the default primary question.*
