@@ -373,6 +373,9 @@ export class MockApiClient implements IApiClient {
       note: note ?? null,
     })
 
+    // Simulate push notification (mirrors supabaseClient which calls reject_departure RPC + send-push)
+    console.debug('[mock] Push: departure rejected for student', dep.student_id, 'note:', note)
+
     return { status: 'REJECTED' }
   }
 

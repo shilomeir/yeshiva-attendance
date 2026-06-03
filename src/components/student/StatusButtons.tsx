@@ -47,7 +47,6 @@ export function StatusButtons({ currentStatus, onStatusChange, onCheckoutSuccess
           gpsStatus: 'PENDING',
           distanceFromCampus: null,
         })
-        await api.updateStudentStatus(currentUser.id, 'ON_CAMPUS')
       }
 
       onStatusChange('ON_CAMPUS')

@@ -91,6 +91,14 @@ export function OffCampusSheet({ open, onClose, onSuccess }: OffCampusSheetProps
         return
       }
 
+      // Validate departure duration does not exceed 30 days
+      const daysOfAbsence = Math.ceil((new Date(effectiveEndDate).getTime() - new Date(todayStr).getTime()) / (1000 * 60 * 60 * 24))
+      if (daysOfAbsence > 30) {
+        toast({ title: 'משך ארוך מדי', description: 'בקשת יציאה לא יכולה להיות ליותר מ-30 ימים', variant: 'destructive' })
+        setStage(quotaInfo ? 'full' : 'form')
+        return
+      }
+
       const result = await api.submitDeparture({
         studentId: currentUser.id,
         startAt,
