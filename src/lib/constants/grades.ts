@@ -57,3 +57,12 @@ export const DEFAULT_CLASS = 'כיתה הרב אבישי'
 export function getClasses(gradeName: string): string[] {
   return GRADE_CLASS_MAP[gradeName] ?? []
 }
+
+/**
+ * Strips the leading "כיתה " prefix from a classId for display.
+ * classId values are stored as e.g. "כיתה הרב אבישי" → returns "הרב אבישי".
+ * Single source of truth for class-label trimming (used by admin + supervisor UI).
+ */
+export function classLabel(classId: string | null | undefined): string {
+  return (classId ?? '').replace(/^כיתה\s+/, '')
+}

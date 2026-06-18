@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { format } from 'date-fns'
 import { he } from 'date-fns/locale'
-import { Check, X, Clock, AlertOctagon, Trash2, Users, Phone } from 'lucide-react'
+import { Check, X, Clock, AlertOctagon, Trash2, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
@@ -121,15 +121,6 @@ export function PendingRequestsPage() {
             <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>{dep.student_name}</div>
             <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{dep.grade} · {dep.class_id}</div>
           </div>
-          {dep.student_name && (
-            <a href={`tel:`} style={{
-              padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.6)',
-              border: '1px solid var(--hairline)', color: 'var(--ink-muted)',
-              display: 'inline-flex', alignItems: 'center',
-            }}>
-              <Phone size={14} />
-            </a>
-          )}
         </div>
 
         {/* Details */}

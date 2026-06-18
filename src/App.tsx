@@ -63,8 +63,17 @@ function PageFallback() {
 export default function App() {
   const { initialize } = useSyncStore()
   const { subscribeToRealtime } = useStudentsStore()
-  const { currentUser } = useAuthStore()
+  const { currentUser, restoreSession } = useAuthStore()
   const [showSplash, setShowSplash] = useState(true)
+  // Gate routing until a remembered session (student / admin / supervisor) has been
+  // re-verified, so guards don't briefly redirect a remembered user to /login.
+  const [authReady, setAuthReady] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    restoreSession().finally(() => { if (active) setAuthReady(true) })
+    return () => { active = false }
+  }, [restoreSession])
 
   useEffect(() => {
     const cleanup = initialize()
@@ -107,6 +116,9 @@ export default function App() {
     <>
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
 
+      {!authReady ? (
+        <PageFallback />
+      ) : (
       <Suspense fallback={<PageFallback />}>
         <Routes>
           {/* Auth */}
@@ -171,6 +183,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Suspense>
+      )}
     </>
   )
 }

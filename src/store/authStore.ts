@@ -2,6 +2,14 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getDeviceToken } from '@/lib/auth/deviceToken'
 import type { ClassSupervisorInfo } from '@/lib/auth/supervisorAuth'
+import {
+  clearRememberedSession,
+  getRememberedSession,
+  rememberAdmin,
+  rememberStudent,
+  rememberSupervisor,
+  forgetRole,
+} from '@/lib/auth/rememberMe'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { unsubscribeFromPush } from '@/lib/pwa/webPush'
@@ -23,6 +31,8 @@ interface AuthState {
   error: string | null
   /** Admin PIN held in-memory (session only, never persisted) for ADMIN_OVERRIDE PIN verification */
   _adminPinSession: string | null
+  /** Supervisor PIN held in-memory (session only) so "Remember me" can persist it on opt-in */
+  _supervisorPinSession: string | null
   login: (idNumber: string) => Promise<boolean>
   loginAdmin: (pin: string) => Promise<boolean>
   /** Checks whether the pin is a valid class-supervisor pin. Returns true + sets classSupervisor state on success. */
@@ -31,6 +41,10 @@ interface AuthState {
   logout: () => void
   clearError: () => void
   getAdminPin: () => string | null
+  /** Persist the current session's credential for "Remember me" (opt-in only). */
+  rememberSession: () => void
+  /** Re-verify a remembered credential against the server and restore the session. */
+  restoreSession: () => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -43,6 +57,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       _adminPinSession: null,
+      _supervisorPinSession: null,
 
       login: async (idNumber: string) => {
         set({ isLoading: true, error: null })
@@ -86,6 +101,7 @@ export const useAuthStore = create<AuthState>()(
             classSupervisor: { classId: result.classId, gradeName: result.gradeName },
             isAdmin: false,
             currentUser: null,
+            _supervisorPinSession: pin,
           })
           return true
         }
@@ -118,13 +134,36 @@ export const useAuthStore = create<AuthState>()(
           // Sign out from Supabase Auth (admin was signed in as admin@yeshiva.local)
           supabase.auth.signOut().catch(() => {})
         }
-        localStorage.removeItem('yeshiva_remembered_id')
-        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null })
+        clearRememberedSession()
+        set({ currentUser: null, isAdmin: false, classSupervisor: null, error: null, _adminPinSession: null, _supervisorPinSession: null })
       },
 
       clearError: () => set({ error: null }),
 
       getAdminPin: () => get()._adminPinSession,
+
+      rememberSession: () => {
+        const { isAdmin, classSupervisor, currentUser, _adminPinSession, _supervisorPinSession } = get()
+        if (isAdmin && _adminPinSession) rememberAdmin(_adminPinSession)
+        else if (classSupervisor && _supervisorPinSession) rememberSupervisor(_supervisorPinSession)
+        else if (currentUser) rememberStudent(currentUser.idNumber)
+      },
+
+      restoreSession: async () => {
+        const remembered = getRememberedSession()
+        if (!remembered) return
+        try {
+          // Always re-verify against the server — a remembered credential never
+          // grants access on its own. On failure we drop the stale key.
+          let ok = false
+          if (remembered.role === 'admin') ok = await get().loginAdmin(remembered.value)
+          else if (remembered.role === 'supervisor') ok = await get().loginClassSupervisor(remembered.value)
+          else ok = await get().login(remembered.value)
+          if (!ok) forgetRole(remembered.role)
+        } catch {
+          forgetRole(remembered.role)
+        }
+      },
     }),
     {
       name: 'yeshiva-auth',

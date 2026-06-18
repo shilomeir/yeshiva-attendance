@@ -8,9 +8,8 @@ import { StudentHelpSheet } from '@/components/student/StudentHelpSheet'
 import { useAuthStore } from '@/store/authStore'
 import { api } from '@/lib/api'
 import { subscribeToPush } from '@/lib/pwa/webPush'
+import { rememberStudent } from '@/lib/auth/rememberMe'
 import { cn } from '@/lib/utils/cn'
-
-const SAVED_ID_KEY = 'yeshiva_last_id'
 
 const NAV_ITEMS = [
   { to: '/student', icon: Home, label: 'בית', end: true },
@@ -48,8 +47,7 @@ export function StudentLayout() {
       // Push setup failed — still save the remembered ID below
     }
     const idToSave = sessionStorage.getItem('last_login_id') ?? currentUser.idNumber
-    localStorage.setItem(SAVED_ID_KEY, idToSave)
-    localStorage.setItem('yeshiva_remembered_id', idToSave)
+    rememberStudent(idToSave)
     sessionStorage.removeItem('last_login_id')
     setBannerVisible(false)
   }

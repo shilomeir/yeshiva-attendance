@@ -94,7 +94,7 @@ export function AbsenceRequestPage() {
 
   useEffect(() => { loadRequests() }, [currentUser?.id])
 
-  useDeparturesRealtime({ onAnyChange: loadRequests })
+  useDeparturesRealtime({ studentId: currentUser?.id, onAnyChange: loadRequests })
 
   const resetForm = () => {
     setStartDate('')

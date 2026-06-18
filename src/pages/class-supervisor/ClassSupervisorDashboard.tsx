@@ -11,10 +11,12 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet'
 import { StatusBadge } from '@/components/shared/StatusBadge'
+import { RememberMeBanner } from '@/components/auth/RememberMeBanner'
 import { api } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 import { useDeparturesRealtime } from '@/hooks/useDeparturesRealtime'
 import { calcQuota } from '@/lib/quota'
+import { classLabel as stripClassPrefix } from '@/lib/constants/grades'
 import { CAMPUS_LAT, CAMPUS_LNG, AREA_RADIUS_METERS } from '@/lib/location/gps'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
@@ -128,6 +130,11 @@ function EditStudentSheet({ student, open, onClose, onSuccess }: EditStudentShee
         else endAt.setHours(23, 59, 0, 0)
       } else {
         endAt = new Date(now.getTime() + 4 * 3600_000)
+      }
+      if (endAt <= now) {
+        toast({ title: 'שעת חזרה לא תקינה', description: 'שעת/תאריך החזרה חייבים להיות אחרי עכשיו', variant: 'destructive' })
+        setIsSubmitting(false)
+        return
       }
       const result = await api.submitDeparture({
         studentId: student.id, startAt: now, endAt,
@@ -379,7 +386,14 @@ function getAvatarHue(id: string): string {
 
 // ── Main dashboard ────────────────────────────────────────────────────────────
 export function ClassSupervisorDashboard() {
-  const { classSupervisor, logout } = useAuthStore()
+  const { classSupervisor, logout, rememberSession } = useAuthStore()
+  const [bannerVisible, setBannerVisible] = useState(() => {
+    if (sessionStorage.getItem('show_remember_me')) {
+      sessionStorage.removeItem('show_remember_me')
+      return true
+    }
+    return false
+  })
   const [students, setStudents] = useState<Student[]>([])
   const [classStats, setClassStats] = useState<ClassStat[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -429,7 +443,7 @@ export function ClassSupervisorDashboard() {
   if (!classSupervisor) return null
 
   const quota = calcQuota(students.length)
-  const classLabel = classId.includes(' כיתה ') ? `כיתה ${classId.split(' כיתה ')[1]}` : classId
+  const classLabel = stripClassPrefix(classId)
   const classOnCampus = students.filter(s => s.currentStatus === 'ON_CAMPUS').length
   const classOffCampus = students.filter(s => s.currentStatus === 'OFF_CAMPUS' || s.currentStatus === 'OVERDUE').length
   const classTotal = students.length
@@ -586,7 +600,7 @@ export function ClassSupervisorDashboard() {
                 const spotsUsed = cs.offCampus
                 const spotsLeft = Math.max(0, cQuota - spotsUsed)
                 const isFull = spotsLeft === 0
-                const cLabel = cs.classId.includes(' כיתה ') ? `כיתה ${cs.classId.split(' כיתה ')[1]}` : cs.classId
+                const cLabel = stripClassPrefix(cs.classId)
                 const cPct = cs.total > 0 ? Math.round((cs.onCampus / cs.total) * 100) : 0
                 const c = isFull ? 'var(--bad)' : spotsLeft <= 1 ? 'var(--warn)' : 'var(--good)'
                 return (
@@ -742,6 +756,14 @@ export function ClassSupervisorDashboard() {
         onClose={() => setEditStudent(null)}
         onSuccess={loadData}
       />
+
+      {bannerVisible && (
+        <RememberMeBanner
+          description="כדי שלא תצטרך להזין את קוד הגישה בכל כניסה כאחראי כיתה"
+          onYes={async () => { rememberSession(); setBannerVisible(false) }}
+          onNo={() => setBannerVisible(false)}
+        />
+      )}
     </div>
   )
 }

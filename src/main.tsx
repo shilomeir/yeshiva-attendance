@@ -17,7 +17,9 @@ if (savedState) {
     if (parsed?.state?.theme === 'dark') {
       document.documentElement.classList.add('dark')
     }
-  } catch {}
+  } catch {
+    // Ignore malformed persisted theme — fall back to light (default)
+  }
 }
 
 // Initialize sync engine
