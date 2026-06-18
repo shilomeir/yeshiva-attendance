@@ -111,6 +111,7 @@ export const useAuthStore = create<AuthState>()(
       logout: () => {
         const { currentUser, isAdmin } = get()
         if (currentUser?.id) {
+          // Clear push registration so this device is treated as new on next login
           supabase.from('students').update({ push_token: null }).eq('id', currentUser.id).then(() => {})
           unsubscribeFromPush().catch(() => {})
         }

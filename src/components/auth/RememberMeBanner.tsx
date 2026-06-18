@@ -26,7 +26,7 @@ export function RememberMeBanner({ onYes, onNo }: RememberMeBannerProps) {
 
       {/* Glassmorphism card sliding up from bottom */}
       <div
-        className="relative z-10 w-full max-w-sm mx-4 mb-8 rounded-3xl border border-white/30 bg-white/20 p-6 shadow-2xl backdrop-blur-xl dark:border-white/10 dark:bg-black/30"
+        className="relative z-10 w-full max-w-sm mx-4 mb-28 rounded-3xl border border-white/30 bg-white/20 p-6 shadow-2xl backdrop-blur-xl dark:border-white/10 dark:bg-black/30"
         style={{ animation: 'slideUp 0.35s cubic-bezier(0.34,1.56,0.64,1) both' }}
       >
         {/* Dismiss X */}

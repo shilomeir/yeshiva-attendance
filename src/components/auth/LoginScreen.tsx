@@ -549,11 +549,15 @@ export function LoginScreen() {
   if (classSupervisor) return <Navigate to="/class-supervisor" replace />
 
   const handleStudentLogin = async (idNumber: string) => {
+    // Set the flag BEFORE login() — Zustand's set() triggers a synchronous
+    // React re-render that mounts StudentLayout via <Navigate> before this
+    // function resumes, so the flag must already be in sessionStorage by then.
+    sessionStorage.setItem('show_remember_me', '1')
+    sessionStorage.setItem('last_login_id', idNumber)
     const ok = await login(idNumber)
-    if (ok) {
-      sessionStorage.setItem('show_remember_me', '1')
-      sessionStorage.setItem('last_login_id', idNumber)
-      navigate('/student', { replace: true })
+    if (!ok) {
+      sessionStorage.removeItem('show_remember_me')
+      sessionStorage.removeItem('last_login_id')
     }
     return { ok, msg: ok ? undefined : 'תעודת זהות לא נמצאה במערכת' }
   }
