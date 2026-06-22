@@ -63,7 +63,7 @@ function PageFallback() {
 export default function App() {
   const { initialize } = useSyncStore()
   const { subscribeToRealtime } = useStudentsStore()
-  const { currentUser } = useAuthStore()
+  const { currentUser, isAdmin, classSupervisor } = useAuthStore()
   const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
@@ -71,10 +71,14 @@ export default function App() {
     return cleanup
   }, [initialize])
 
+  // Global students realtime is only needed for admin / class-supervisor dashboards.
+  // Subscribing for every logged-in student floods the websocket with updates for
+  // 380+ other students and re-renders the Zustand store on each one.
   useEffect(() => {
+    if (!isAdmin && !classSupervisor) return
     const cleanup = subscribeToRealtime()
     return cleanup
-  }, [subscribeToRealtime])
+  }, [isAdmin, classSupervisor, subscribeToRealtime])
 
   // When the app becomes visible: clear badge + refresh lastSeen for logged-in student
   useEffect(() => {
@@ -89,13 +93,17 @@ export default function App() {
     return () => document.removeEventListener('visibilitychange', onVisible)
   }, [])
 
-  // Stamp lastSeen whenever the app becomes visible and a student is logged in
+  // Stamp lastSeen at most once every 5 minutes per visibility event.
+  // Previously fired a DB UPDATE on every tab switch.
   useEffect(() => {
     if (!currentUser) return
+    let lastStamp = 0
     const stamp = () => {
-      if (!document.hidden) {
-        supabase.from('students').update({ lastSeen: new Date().toISOString() }).eq('id', currentUser.id).then(() => {})
-      }
+      if (document.hidden) return
+      const now = Date.now()
+      if (now - lastStamp < 5 * 60 * 1000) return
+      lastStamp = now
+      supabase.from('students').update({ lastSeen: new Date().toISOString() }).eq('id', currentUser.id).then(() => {})
     }
     stamp()
     document.addEventListener('visibilitychange', stamp)

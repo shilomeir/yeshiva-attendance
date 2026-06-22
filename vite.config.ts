@@ -58,7 +58,9 @@ export default defineConfig({
       output: {
         manualChunks: {
           'react-vendor': ['react', 'react-dom', 'react-router-dom'],
-          'ui-vendor': ['lucide-react', 'recharts'],
+          'ui-vendor': ['lucide-react'],
+          'charts-vendor': ['recharts'],
+          'xlsx-vendor': ['xlsx'],
           'db-vendor': ['dexie', 'zustand'],
         },
       },

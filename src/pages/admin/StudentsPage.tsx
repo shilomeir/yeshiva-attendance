@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import * as XLSX from 'xlsx'
 import { Download, UserPlus } from 'lucide-react'
 import { FilterBar } from '@/components/admin/FilterBar'
 import { StudentTable } from '@/components/admin/StudentTable'
@@ -11,7 +10,9 @@ import type { Student } from '@/types'
 
 // ── Excel export ──────────────────────────────────────────────────────────────
 
-function exportToXlsx(students: Student[]) {
+async function exportToXlsx(students: Student[]) {
+  // Lazy-load xlsx (~600 KB) only when the user clicks export.
+  const XLSX = await import('xlsx')
   const wb = XLSX.utils.book_new()
 
   for (const level of GRADE_LEVELS) {

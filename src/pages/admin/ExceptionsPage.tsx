@@ -380,15 +380,28 @@ export function ExceptionsPage() {
     }
   }, [])
 
+  // Coalesce bursts of realtime events into a single refetch.
+  const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduleReload = useCallback(() => {
+    if (reloadTimerRef.current) return
+    reloadTimerRef.current = setTimeout(() => {
+      reloadTimerRef.current = null
+      loadData()
+    }, 1500)
+  }, [loadData])
+
   useEffect(() => {
     loadData()
     const studentsChannel = supabase.channel('exceptions-students')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, scheduleReload)
       .subscribe()
-    return () => { supabase.removeChannel(studentsChannel) }
-  }, [loadData])
+    return () => {
+      supabase.removeChannel(studentsChannel)
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
+    }
+  }, [loadData, scheduleReload])
 
-  useDeparturesRealtime({ onAnyChange: loadData })
+  useDeparturesRealtime({ onAnyChange: scheduleReload })
 
   // Derived filter options
   const allOutside = useMemo(() => [

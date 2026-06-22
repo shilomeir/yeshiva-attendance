@@ -92,7 +92,7 @@ export function HistoryPage() {
     return () => { supabase.removeChannel(ch) }
   }, [currentUser?.id])
 
-  useDeparturesRealtime({ onAnyChange: loadData })
+  useDeparturesRealtime({ studentId: currentUser?.id, onAnyChange: loadData })
 
   const auditEvents = events.filter((e) => e.type === 'OVERRIDE')
 

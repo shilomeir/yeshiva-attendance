@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Users, LogOut, GraduationCap, MapPin, Clock, CalendarDays,
   CheckCircle2, ArrowRightLeft, Loader2, AlertOctagon, FileText,
@@ -396,7 +396,6 @@ export function ClassSupervisorDashboard() {
 
   const loadData = async () => {
     if (!classId) return
-    api.tickDepartures().catch(() => {})
     try {
       const [sts, cs, activeDeps] = await Promise.all([
         api.getStudents({ classId }),
@@ -414,17 +413,31 @@ export function ClassSupervisorDashboard() {
     } finally { setIsLoading(false) }
   }
 
+  // Coalesce bursts of realtime events into a single refetch.
+  const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduleReload = () => {
+    if (reloadTimerRef.current) return
+    reloadTimerRef.current = setTimeout(() => {
+      reloadTimerRef.current = null
+      loadData()
+    }, 1500)
+  }
+
   useEffect(() => {
     if (!classId) return
     loadData()
-    const ch = supabase.channel('supervisor-students-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, loadData)
+    const ch = supabase.channel(`supervisor-students-${classId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students', filter: `classId=eq.${classId}` }, scheduleReload)
       .subscribe()
     const tick = setInterval(() => setTick((t) => t + 1), 60000)
-    return () => { supabase.removeChannel(ch); clearInterval(tick) }
+    return () => {
+      supabase.removeChannel(ch)
+      clearInterval(tick)
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
+    }
   }, [classId])
 
-  useDeparturesRealtime({ onAnyChange: loadData })
+  useDeparturesRealtime({ classId, onAnyChange: scheduleReload })
 
   if (!classSupervisor) return null
 
