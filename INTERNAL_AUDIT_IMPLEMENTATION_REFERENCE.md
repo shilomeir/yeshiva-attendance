@@ -1,0 +1,10379 @@
+# INTERNAL AUDIT 2.0 — Implementation Reference
+
+> ⚠ **THIS DOCUMENT IS A SUBORDINATE REFERENCE — READ THE MASTER PLAN FIRST.**
+>
+> The authoritative document is `INTERNAL_AUDIT_MASTER_PLAN.md`. When this file disagrees with the master plan, the master plan wins.
+
+---
+
+## 🛑 ERRATA — corrections after the v1.1 feasibility audit
+
+This document was written before the feasibility audit. The audit (see master plan § "Revision History & Errata", R-1 through R-34) discovered that **the production database already contains a working audit subsystem** that this document does not acknowledge. The following code-level corrections apply throughout:
+
+| What this document says | What the corrected v1.1 plan says |
+|---|---|
+| Create new tables `audit_sessions`, `audit_responses`, `audit_response_log`, `audit_alerts`, `audit_push_log` | **Adopt existing** `audit_sessions`, `audit_entries`, `audit_class_states` (already in production). **Add** `audit_alerts`, `audit_push_log`. Rename `audit_response_log` references → handled by triggers on existing tables. |
+| New RPCs `open_audit`, `submit_audit_response`, `close_audit`, `abort_audit`, `get_active_audit`, `get_audit_full` | **Adopt existing** `start_audit_session`, `submit_audit_entry`, `finish_class_audit`, `close_audit_session`, `get_active_audit_session`, `get_audit_session`, `list_audit_sessions`. **Add** `acknowledge_audit_alert`, `compute_audit_kpis`, `submit_audit_entry_with_gps`. |
+| Routes under `/admin/audit/...` | Routes under `/admin/inspection/...` (R-2). `/admin/audit` is already taken by the Audit Log page. |
+| `audit_responses.student_id UUID REFERENCES students(id)` | `audit_entries.student_id TEXT` matching the actual `students.id TEXT` (R-3). |
+| `INTERNAL_AUDIT_*` table names with `inspection_*` rename (introduced in early v1.1 R-23) | **Reverted** — names stay `audit_*` (R-23 in master plan). |
+| Edge Function `send-audit-push` written from scratch | Inlines the VAPID/AES-128-GCM logic from `supabase/functions/send-push/index.ts` rather than refactoring. |
+| `import { toast } from 'sonner'` | `import { toast } from '@/hooks/use-toast'` — the existing Radix-based hook (R-15). `sonner` is not installed. |
+| PDF export with `jspdf` | **Excel-only in v1** (R-8). PDF deferred to v1.1; requires Hebrew font embedding. |
+| `GRANT EXECUTE ... TO anon, authenticated` for every RPC | Per-RPC grants — admin-only RPCs grant only to `authenticated`. Student-callable RPCs grant to `anon` + `authenticated`. RLS enforces row-level access (R-9). |
+| `RollCallPage.tsx` and the two old broadcast subscribers stay until "v1.1 cleanup" | **Removed in the same commit as the new feature** behind a kill-switch flag (R-17). |
+| "Push fan-out to all 381 students" via `push_token` | Push is **advisory, not load-bearing** (R-5). Student adoption is verbal-announcement + app-banner. Only 1/381 has push_token; the model is intentional. |
+| `pushTarget: 'STUDENTS' \| 'SUPERVISORS' \| 'BOTH'` | Only `STUDENTS` in v1 (R-6). The `supervisors` table exists with `pin_hash` but adding `push_token` deferred to v1.1. |
+| `react-leaflet`, `framer-motion`, `howler`, `sonner`, `react-countup`, `jspdf` all installed | Only `react-leaflet`, `react-leaflet-cluster`, `leaflet`, `framer-motion`, `howler`, `react-countup` installed. **`sonner` and `jspdf` NOT installed in v1.** Bundle budget revised to ~600 KB (R-13). |
+| Tests with arbitrary `data-testid` references | New `data-testid` discipline enumerated in R-20. Existing pages have ~zero testids. |
+| Auth state available on refresh "automatically" | Explicit auth-restore bootstrap added in `App.tsx` (R-4): `supabase.auth.getSession()` for admin; `sessionStorage` re-verify for supervisor. |
+| Bundle size budget < 400 KB gzipped | Realistic budget ~600 KB; code-split Leaflet / Excel / projection mode (R-13). |
+| Service worker push handler is generic | Discriminated by `data.kind === 'AUDIT_LOCATION'` in `src/sw.ts` (R-12). `public/push-sw.js` left alone. |
+| Dexie schema unchanged | Bump to v6 for `audit_submit_queue` and `audit_local_cache` (R-19). |
+| Plan does not address mockClient | `mockClient.ts` must implement every new audit RPC (Iron Rule 4) — R-10. |
+| No mention of class-name renames mid-session | Handled by existing `audit_sessions.class_snapshot` JSONB pattern (R-33). |
+| 5-Phase implementation (Weeks 1-6) | **Phase −1 added** (Migration Reconciliation, 3-4 days) — R-25. Total ~4-6 weeks. |
+| `pg_trgm` extension installed | **Removed** — not used anywhere in the plan (R-22). |
+| GPS retention cron mentioned in plan §11.5, missing from migration SQL | **Added** to migration: daily at 03:15 nulls GPS coords on `audit_entries` older than 90 days (R-14). |
+| `v_audit_session_summary` uses SECURITY DEFINER | Fix the existing view — remove `SECURITY DEFINER` clause as part of migration reconciliation (R-29). |
+| `departures_audit_trigger_fn` referenced as part of audit cleanup | **DO NOT TOUCH** — it writes to `admin_overrides`, unrelated to the audit subsystem despite the misleading name (R-28). |
+
+**When implementing, refer to the master plan for the rationale and to this document for the code shape — but apply the corrections above first.**
+
+### Additional v1.2 runtime corrections (from code-trace findings)
+
+The code-trace review found 32 runtime bugs (B-1 through B-32 in the master plan). The most impactful at the code level:
+
+| What this document shows | Replace with |
+|---|---|
+| RPC calls assume `actor: string` argument | RPC calls take `p_admin_pin` or `p_supervisor_pin` (raw PIN). Frontend reads PIN from `useAuthStore()._adminPinSession` (admin) or `sessionStorage.getItem('supervisor_pin')` (supervisor, must be added in Phase −1). |
+| `close_audit` error code `SESSION_CLOSED` on retry | Actual code is `NOT_ACTIVE`. Frontend close-handler must treat both `NOT_ACTIVE` and `SESSION_CLOSED` as success. |
+| Routes under `/admin/audit/...` | Routes under `/admin/inspection/...`. Add a redirect from `/admin/rollcall` → `/admin/inspection`. |
+| `submit_audit_response` RPC | Use existing `submit_audit_entry` for MANUAL mode. For LOCATION mode, new Edge Function `send-audit-gps` (B-26) is the entry point — students POST to it, it uses service_role to upsert `audit_entries`. There is no `submit_audit_entry_with_gps` RPC in the design. |
+| `audit_entries.source` accepts `'AUTO_GPS'` out-of-the-box | The current CHECK rejects `'AUTO_GPS'`. Phase 0 migration must `ALTER ... DROP CONSTRAINT ... ADD CONSTRAINT ... CHECK (source IN ('SUPERVISOR','AUTO_DEFAULT','AUTO_GPS'))`. |
+| `audit_sessions.status` accepts `'TIMED_OUT'` and `'ABORTED'` | Same — current CHECK is `IN ('ACTIVE','CLOSED')` only. Must ALTER. |
+| `audit_sessions.mode` column exists | Does not exist. Phase 0 migration adds `mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK IN ('MANUAL','LOCATION')`. |
+| `audit_entries` has GPS columns | Does not. Phase 0 ADD COLUMN: `gps_lat`, `gps_lng`, `gps_accuracy_m`, `distance_from_campus_m`, `distance_bucket`, `gps_status`. |
+| `audit_alerts` trigger fires on UPDATE | Must be `AFTER INSERT OR UPDATE` — students without active departures have no entry until first GPS, which is an INSERT. Trigger predicate: `(TG_OP='INSERT' AND NEW.distance_bucket IN ('ORANGE','RED')) OR (TG_OP='UPDATE' AND OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket AND NEW.distance_bucket IN ('ORANGE','RED'))`. |
+| Migration adds `audit_alerts` to realtime | Must explicitly `ALTER PUBLICATION supabase_realtime ADD TABLE audit_alerts;` — easy to forget; without it, alerts insert silently and admin's modal never fires. |
+| Admin can call audit RPCs after refresh | The `_adminPinSession` is not persisted. After refresh, every audit RPC returns `{error:'AUTH'}`. Either persist PIN to sessionStorage OR force re-prompt before each mutation. |
+| Supervisor PIN is available to call `submit_audit_entry` | The raw PIN is discarded after login. Must be stored in sessionStorage on login and re-verified on bootstrap. |
+| `tick_audit_timeout` cron is auto-scheduled by some existing migration | Production has only `tick-departures` and `purge-admin-overrides-retention`. New cron must be added: `SELECT cron.schedule('tick_audit_timeout', '*/5 * * * *', $$ UPDATE audit_sessions SET status='TIMED_OUT' ... $$)`. Without it, one forgotten session blocks all future audits forever. |
+| `AdminGuard` preserves the original URL on redirect to login | It does not. After re-login the user lands on `/admin` default, not the audit URL they bookmarked. Must pass `state={{from: location.pathname}}` in the Navigate. |
+| `students.lastSeen` UPDATEs by anon are enabled by some hardened RLS | They are enabled by a wide-open `anon_update_students` policy with `qual=true`. Pre-existing security gap; not the audit project's responsibility but acknowledged. |
+| `getCurrentPosition` called inside any callback works on iOS | iOS Safari requires user-gesture origin. The call must be **synchronous inside the click handler** of the consent button — not after `await`, not inside `postMessage`, not inside any callback. |
+
+For details and additional findings (B-1 through B-32), see the "Code-Trace Findings — v1.2" section in the master plan.
+
+---
+
+## Original document (pre-feasibility-audit content follows)
+
+> **מסמך זה הוא תוכנית בלבד.** אין כאן שינוי קוד. כל הקוד הקיים של RollCall/ביקורת פנימית נזרק; אנחנו בונים מחדש מאפס על בסיס הכללים בלבד (בישיבה / בחוץ עם אישור / בחוץ בלי אישור / מצב לא ידוע).
+>
+> **שני מצבי ביקורת:**
+> 1. **מצב מהיר (ידני / ללא מיקום)** — רכז סוגר מהר על כיתה. UX חדש לגמרי.
+> 2. **מצב מיקום חי (Location Audit)** — מנהל פותח דשבורד; הנתונים "קופצים" אליו ב־real-time.
+>
+> **שמירה על Refresh** — חובה לשני המצבים. סשן ביקורת חי ב־DB, לא בזיכרון של ה־browser.
+
+---
+
+## תוכן עניינים
+
+**חלק א׳ — סקירה ועקרונות**
+1. תקציר מנהלים
+2. מטרות עסקיות
+3. נקודות הכאב במצב הנוכחי
+4. עקרונות מנחים (Iron Rules)
+
+**חלק ב׳ — מודל הנתונים**
+5. ארכיטקטורה ברמה גבוהה
+6. סכמת DB חדשה (Audit Sessions)
+7. מצבי תלמיד בזמן ביקורת
+8. מצבי סשן ביקורת
+9. מכונת מצבים (State Machine)
+10. כללי שימור היסטוריה
+
+**חלק ג׳ — שני מצבי ביקורת**
+11. השוואת המצבים בטבלה
+12. מתי להשתמש בכל מצב
+
+**חלק ד׳ — מצב 1: ביקורת מהירה (ידני)**
+13. תרחיש שימוש
+14. תהליך ההפעלה
+15. דשבורד מנהל
+16. דשבורד רכז כיתה
+17. סיום ושימור
+18. תקלות ופתרונן
+
+**חלק ה׳ — מצב 2: ביקורת מיקום חי**
+19. תרחיש שימוש
+20. תהליך ההפעלה
+21. צד התלמיד — איסוף מיקום
+22. הזרמת נתונים בזמן אמת
+23. דשבורד מנהל — Live Map / Heatmap / Grid / Table
+24. דשבורד רכז כיתה — תצוגה ייעודית
+25. הקרנה (Projection Mode) ורוטציה אוטומטית
+26. טיפול בקצוות (Edge Cases)
+
+**חלק ו׳ — Backend Architecture**
+27. Supabase Tables — DDL מלא
+28. RPC Functions — חתימות מלאות
+29. Edge Functions
+30. Realtime Channels
+31. cron jobs ו־cleanup
+
+**חלק ז׳ — Frontend Architecture**
+32. מבנה תיקיות
+33. Zustand Stores חדשים
+34. React Hooks
+35. עץ רכיבים (Component Tree)
+36. שימור State מול Refresh — Source of Truth ב־DB
+37. ספריות חיצוניות שיתווספו
+
+**חלק ח׳ — Design System**
+38. עקרונות עיצוב
+39. פלטת צבעים מורחבת
+40. טיפוגרפיה ומצב הקרנה
+41. אנימציות — "Data Jumping"
+42. צלילים / Haptic / התראות
+43. מצב חושך/אור
+44. RTL ושפה
+
+**חלק ט׳ — Post-Audit**
+45. מסך סיכום מיידי
+46. דף "ביקורות קודמות"
+47. השוואה בין ביקורות
+48. ייצוא PDF / Excel
+
+**חלק י׳ — הרשאות וביטחון**
+49. תפקידים והרשאות
+50. RLS Policies
+51. PII והגנת פרטיות
+
+**חלק י"א — GPS Engineering**
+52. בקשת הרשאת geolocation
+53. בקרת איכות (accuracy filter)
+54. חישוב Haversine
+55. קטגוריזציה לפי מרחק
+56. ניהול שגיאות
+
+**חלק י"ב — Push & Realtime**
+57. Web Push מורחב
+58. Channels — תכנון מלא
+59. Reconnection / Heartbeat
+
+**חלק י"ג — Testing**
+60. תרחישי QA
+61. Edge cases ידועים
+62. Load testing
+
+**חלק י"ד — Step-by-Step Roadmap**
+63. רשימה מסודרת של כל הצעדים, לפי תלות וסדר ביצוע (8 שלבים, 70+ צעדים)
+
+**נספחים**
+- A. דוגמת JSON של סשן חי
+- B. דוגמת SQL ל־DDL חדש
+- C. דוגמת חתימות TypeScript של RPCs
+- D. דוגמת UI Components
+
+---
+
+# חלק א׳ — סקירה ועקרונות
+
+## 1. תקציר מנהלים
+
+מערכת "ביקורת פנימית" היא הכלי של מנהל הישיבה לוודא ברגע נתון מי באמת נמצא בישיבה. היום הפיצ׳ר קיים אבל **לא עובד טוב**: ה־UX שבור, הנתונים נעלמים בריענון, אין שמירה היסטורית, אין מסך חי שמעניק תחושת שליטה.
+
+התוכנית הזו בונה את הפיצ׳ר **מחדש מאפס** עם שני מצבי הפעלה:
+
+### מצב 1 — "ביקורת מהירה" (ללא מיקום)
+- המנהל לוחץ "פתח ביקורת מהירה".
+- בוחר אילו כיתות כלולות.
+- כל רכז כיתה רלוונטי מקבל push + רואה מסך מיוחד בדשבורד שלו.
+- הרכז מסמן כל תלמיד ב־3 לחיצות: **בישיבה / בחוץ עם אישור / בחוץ בלי אישור**.
+- תלמידים שכרגע ב־OFF_CAMPUS עם יציאה מאושרת — **מסומנים מראש אוטומטית**.
+- המנהל רואה real-time דשבורד מסכם של כל הכיתות.
+- ניתן לרענן את הדף — הסשן ממשיך לחיות ב־DB.
+
+### מצב 2 — "ביקורת מיקום חי"
+- המנהל לוחץ "פתח ביקורת מיקום".
+- Push נשלח לכל הסלולרים שמחוברים.
+- אפליקציה נפתחת אוטומטית → דורשת מיקום → שולחת ל־DB.
+- המנהל רואה דשבורד חי עם:
+  - **Heatmap של כיתות** — אילו הגיבו (אחוזי מענה), אילו לא.
+  - **Grid של כרטיסי כיתות** — כל כיתה עם כרטיסי תלמידים שזזים פנימה בזמן אמת.
+  - **טבלה מסוננת** — סטטיסטיקה בולטת, פילטרים מהירים.
+  - **מפת Leaflet** — נקודות צבעוניות בחברון.
+- צבעי מרחק: **ירוק** ≤ 300m, **כחול** 300m–1km, **כתום** 1–5km, **אדום** > 5km.
+- תלמיד "מחוץ לטווח" מקבל **קוביה אדומה מהבהבת + צלצול** וגם נשמר ב־alert log.
+- מצב הקרנה — full-screen, טיפוגרפיה ענקית, רוטציה אוטומטית בין תצוגות.
+
+### מאחורי הקלעים
+- **טבלת `audit_sessions`** + **`audit_responses`** = source of truth. הכל ב־DB.
+- **Supabase Realtime** מזרים שינויים לדשבורד המנהל.
+- **שמירה מלאה לכל ביקורת** — דף "ביקורות קודמות" מאפשר השוואות.
+
+---
+
+## 2. מטרות עסקיות
+
+| # | מטרה | מדד הצלחה |
+|---|------|------------|
+| M1 | המנהל יודע תוך 60 שניות מי בישיבה ומי לא | זמן עד שהדשבורד מוצג מלא (TTI Live Data) |
+| M2 | רכז מוסיף ערך ולא תקלה | זמן ממוצע לרכז לסיים ביקורת ידנית לכיתה של 25 < 90 שניות |
+| M3 | אין אובדן נתונים בריענון | 100% מ־refreshes שומרים מצב מלא |
+| M4 | נתונים זמינים להשוואה | כל ביקורת נשמרת, ניתנת לפתיחה ולהשוואה אחורה ב־30 ימים |
+| M5 | הנתונים "קופצים" — תחושת שליטה | latency עדכון real-time < 800ms מרגע איסוף בצד התלמיד עד הצגה אצל המנהל |
+| M6 | רכז כיתה רואה רק את הכיתה שלו | אכיפת RLS + UI |
+| M7 | מסך מתאים גם לצג גדול | מצב הקרנה עם פונט > 28pt וקונטרסט גבוה |
+
+---
+
+## 3. נקודות הכאב במצב הנוכחי
+
+מהסקירה של הקוד הקיים, אלה כל הבעיות שמצדיקות שכתוב מלא:
+
+### בעיות מבניות
+1. **אין טבלת DB** לסשני ביקורת — כל המידע נשמר ב־React state, חוזר לאפס בריענון.
+2. **`students.lastLocation`** משמש כ־source — נדרס כל ביקורת חדשה, אין היסטוריה.
+3. **רק 15 שניות timeout** לאיסוף מיקום — לא מספיק לסלולרי GPS איטי.
+4. **לא מנצלים את `push_token`** — Push לא יוצא, רק Realtime broadcast (שעובד רק על אפליקציות פתוחות).
+
+### בעיות UX
+5. **המנהל מסתכל על טבלה אפורה** ללא תחושת live action.
+6. **אין חלוקה ויזואלית לפי כיתות** — קשה לתפוס מי לא הגיב.
+7. **אין מפה** — קשה לראות איפה התלמידים מפוזרים.
+8. **רכז במצב manual** מסמן בלי שום הקשר — אין preselection של תלמידים שכבר ב־OFF_CAMPUS.
+9. **אין מסך סיכום אחרי "סיים"** — המנהל סגר, נעלם הכל.
+10. **אין מצב הקרנה** — בלתי קריא על צג חדר ישיבות.
+
+### בעיות טכניות
+11. **Broadcast רק על ערוץ אחד `location-requests`** — אם המכשיר ישן/נחנק, מפסיד.
+12. **אין re-try / heartbeat** — אם תלמיד היה offline 30 שניות באמצע ביקורת, הוא מפסיד.
+13. **אין ולידציה של accuracy** — מקבל מיקום עם רדיוס שגיאה של 1km כאילו הוא 5m.
+14. **אין log לפעולת המנהל** — מי פתח, מתי, איזה תאריך, אילו כיתות.
+
+---
+
+## 4. עקרונות מנחים (Iron Rules)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ עקרון 1: ה־DB הוא ה־Source of Truth                          │
+│ - סשן חי = שורה ב־audit_sessions עם status='ACTIVE'           │
+│ - כל refresh של מנהל/רכז שואל מהדb, לא מהזיכרון              │
+│                                                              │
+│ עקרון 2: כל לחיצה = audit_event ב־DB                          │
+│ - הרכז מסמן "בישיבה" → INSERT/UPDATE ב־audit_responses        │
+│ - השינוי משודר ב־Realtime לדשבורד המנהל                       │
+│                                                              │
+│ עקרון 3: שני מצבי הפעלה — אבל סכמת DB אחת                    │
+│ - mode='MANUAL' או mode='LOCATION'                            │
+│ - audit_responses תקף לשני המצבים, עם עמודות אופציונליות     │
+│                                                              │
+│ עקרון 4: רכז = view-only על ביקורת מיקום                     │
+│ - רכז אינו פותח ביקורת מיקום                                  │
+│ - רכז רואה only את הכיתה שלו                                  │
+│ - רכז יוזם רק ביקורת ידנית לכיתה שלו (אם בכלל)                │
+│                                                              │
+│ עקרון 5: Push + Realtime ביחד, לא במקום זה את זה              │
+│ - Push מעיר את האפליקציה (גם אם סגורה)                        │
+│ - Realtime מתחבר ברגע שהיא נפתחת                              │
+│                                                              │
+│ עקרון 6: שום נתון לא נדרס                                     │
+│ - audit_responses היא append-only מבחינה לוגית                │
+│ - שינוי דרגה (בישיבה→בחוץ) = שורה חדשה ב־audit_response_log  │
+│                                                              │
+│ עקרון 7: עיצוב — calm but alert                               │
+│ - 90% מהזמן: ירוק, רגוע, שקט                                 │
+│ - חריגות: אדום בולט, אנימציה, סאונד                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+# חלק ב׳ — מודל הנתונים
+
+## 5. ארכיטקטורה ברמה גבוהה
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│   ┌─────────┐                ┌─────────────┐                    │
+│   │ Manager │  לחיצה         │ admin/audit │                    │
+│   │ (Web)   │ ────────────►  │   /new      │                    │
+│   └─────────┘                └──────┬──────┘                    │
+│                                     │                            │
+│                                     ▼                            │
+│                          ┌─────────────────────┐                │
+│                          │ RPC: open_audit     │                │
+│                          │ (mode, classIds)    │                │
+│                          └──────────┬──────────┘                │
+│                                     │                            │
+│                                     ▼                            │
+│                          ┌─────────────────────┐                │
+│                          │ INSERT audit_sessions│                │
+│                          │ status='ACTIVE'      │                │
+│                          └──────────┬──────────┘                │
+│                                     │                            │
+│              ┌──────────────────────┼──────────────────────┐    │
+│              ▼                      ▼                      ▼    │
+│       ┌────────────┐         ┌────────────┐        ┌────────────┐
+│       │  Realtime  │         │ Edge Func: │        │ Realtime   │
+│       │  broadcast │         │ send-audit-│        │  broadcast │
+│       │  → manager │         │   push     │        │  → students│
+│       └──────┬─────┘         └──────┬─────┘        └──────┬─────┘
+│              │                      │                      │    │
+│              ▼                      ▼                      ▼    │
+│   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐ │
+│   │ Manager dashboard│  │ Push to all push │  │ Students     │ │
+│   │ subscribes to    │  │ subscriptions    │  │ phones get   │ │
+│   │ audit_responses  │  │ + supervisors    │  │ push +       │ │
+│   │ for session_id   │  │                  │  │ auto-open    │ │
+│   └──────────────────┘  └──────────────────┘  └──────┬───────┘ │
+│                                                       │         │
+│                                                       ▼         │
+│                                          ┌──────────────────┐   │
+│                                          │ Student app      │   │
+│                                          │ collects GPS     │   │
+│                                          │ → RPC submit_    │   │
+│                                          │   audit_response │   │
+│                                          └──────┬───────────┘   │
+│                                                 │               │
+│                                                 ▼               │
+│                                  ┌────────────────────────┐    │
+│                                  │ INSERT audit_responses │    │
+│                                  │ + UPDATE session stats │    │
+│                                  └────────┬───────────────┘    │
+│                                           │                     │
+│                                           ▼                     │
+│                                  ┌────────────────────┐         │
+│                                  │ Realtime: pg_changes│         │
+│                                  │ → Manager dashboard │         │
+│                                  │   (data "jumps in") │         │
+│                                  └────────────────────┘         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. סכמת DB חדשה — Audit Sessions
+
+טבלאות חדשות (כל אחת תיווצר במיגרציה נפרדת):
+
+### `audit_sessions`
+שורה אחת לכל סשן ביקורת. נשמר לתמיד.
+
+| עמודה | טיפוס | תיאור |
+|-------|-------|-------|
+| `id` | UUID PK | מזהה סשן |
+| `mode` | TEXT NOT NULL | `'MANUAL'` או `'LOCATION'` |
+| `status` | TEXT NOT NULL | `'ACTIVE'` / `'CLOSED'` / `'ABORTED'` |
+| `class_ids` | TEXT[] | רשימת `classId` שכלולות בביקורת |
+| `total_students` | INT | מספר תלמידים כולל בכיתות הנבחרות |
+| `started_by` | TEXT | actor (admin / supervisor PIN) |
+| `started_at` | TIMESTAMPTZ DEFAULT NOW() | זמן פתיחה |
+| `closed_at` | TIMESTAMPTZ | זמן סגירה (NULL כל עוד ACTIVE) |
+| `notes` | TEXT | הערה חופשית של המנהל |
+| `created_at / updated_at` | TIMESTAMPTZ | אודיט |
+
+**Indices:**
+- `(status, started_at DESC)` — לחיפוש סשן ACTIVE.
+- `(started_at DESC)` — לדף "ביקורות קודמות".
+
+**Constraint:** רק סשן אחד `ACTIVE` בכל רגע (שאילתת `WHERE status='ACTIVE'` תמיד מחזירה ≤ 1).
+
+### `audit_responses`
+שורה לכל תלמיד שנכלל בביקורת. נוצרת אוטומטית בעת פתיחת סשן (לכל תלמיד בכיתה הנבחרת), ומתעדכנת כשמגיע נתון.
+
+| עמודה | טיפוס | תיאור |
+|-------|-------|-------|
+| `id` | UUID PK | |
+| `session_id` | UUID FK → audit_sessions (CASCADE) | |
+| `student_id` | UUID FK → students (CASCADE) | |
+| `class_id` | TEXT NOT NULL | denormalized |
+| `category` | TEXT NOT NULL DEFAULT 'PENDING' | ראה למטה |
+| `marked_by` | TEXT | `'AUTO_GPS'` / `'AUTO_DEPARTURE'` / `'SUPERVISOR:{pin}'` / `'ADMIN'` |
+| `marked_at` | TIMESTAMPTZ | זמן עדכון אחרון |
+| `gps_lat` | FLOAT8 | מילוי רק במצב LOCATION |
+| `gps_lng` | FLOAT8 | |
+| `gps_accuracy_m` | FLOAT8 | רדיוס שגיאה ב־meters |
+| `distance_from_campus_m` | FLOAT8 | מחושב |
+| `distance_bucket` | TEXT | `'GREEN'` / `'BLUE'` / `'ORANGE'` / `'RED'` / `null` |
+| `gps_status` | TEXT | `'OK'` / `'DENIED'` / `'TIMEOUT'` / `'OFFLINE'` / `'UNAVAILABLE'` |
+| `departure_id` | UUID FK → departures | אם קטגוריה=BHUTZ_PERMIT |
+| `note` | TEXT | אם הרכז סימן "במחלה" וכו׳ |
+| `created_at / updated_at` | TIMESTAMPTZ | |
+
+**ערכי `category` (החלטה סופית: 3 קטגוריות סימון + 2 system states):**
+- `PENDING` — *system state* — עוד לא ידוע (כברירת מחדל; הרכז לא מסמן את זה ידנית)
+- `IN_YESHIVA` — בישיבה (= "נוכח")
+- `OUT_PERMIT` — בחוץ עם אישור
+- `OUT_NO_PERMIT` — בחוץ בלי אישור
+- `UNKNOWN` — *system state* — GPS דחה / Offline (רק במצב LOCATION; הרכז לא מסמן את זה ידנית)
+
+> הערה: במצב **MANUAL** הרכז רואה 3 כפתורים בלבד — נוכח / בחוץ עם אישור / בחוץ בלי אישור.
+> במצב **LOCATION** המערכת מסמנת אוטומטית מ־GPS, ורכז מתקן רק את ה־UNKNOWN-ים (תלמידים שלא הגיבו).
+> אם יש צורך לסמן תלמיד חולה/בהלוויה/מצב מיוחד — הרכז ישתמש בשדה `note` החופשי על הקטגוריה שבחר. אין קטגוריה נפרדת לזה.
+
+**Indices:**
+- `(session_id, category)` — תצוגת kpi בדשבורד.
+- `(session_id, class_id, category)` — Heatmap לפי כיתה.
+- `(student_id, marked_at DESC)` — היסטוריית התלמיד.
+
+**Constraint:** `UNIQUE(session_id, student_id)` — תלמיד אחד פעם אחת בסשן.
+
+### `audit_response_log`
+טבלת trail. כל שינוי קטגוריה ב־audit_responses → INSERT כאן (DB trigger).
+
+| עמודה | טיפוס |
+|-------|-------|
+| `id` | UUID PK |
+| `response_id` | UUID FK |
+| `session_id` | UUID FK |
+| `student_id` | UUID FK |
+| `from_category` | TEXT |
+| `to_category` | TEXT |
+| `actor` | TEXT |
+| `changed_at` | TIMESTAMPTZ |
+
+מטרת הטבלה: ביקור חוזר ב־post-mortem (למשל לראות שהרכז סימן בישיבה, אבל אחר כך מישהו תיקן לבחוץ).
+
+### `audit_alerts`
+שורה לכל "אזעקה" — תלמיד שנמצא מחוץ לטווח 5km.
+
+| עמודה | טיפוס |
+|-------|-------|
+| `id` | UUID PK |
+| `session_id` | UUID FK |
+| `student_id` | UUID FK |
+| `triggered_at` | TIMESTAMPTZ |
+| `distance_m` | FLOAT8 |
+| `gps_lat / gps_lng` | FLOAT8 |
+| `acknowledged_by` | TEXT (nullable) |
+| `acknowledged_at` | TIMESTAMPTZ (nullable) |
+| `note` | TEXT |
+
+---
+
+## 7. מצבי תלמיד בזמן ביקורת
+
+```
+                        ┌────────────────────┐
+                        │     PENDING        │ ← מצב התחלתי
+                        │  (טרם זוהה)        │
+                        └─────────┬──────────┘
+                                  │
+                ┌─────────────────┼─────────────────┐
+                ▼                 ▼                 ▼
+   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+   │   IN_YESHIVA     │ │   OUT_PERMIT     │ │  OUT_NO_PERMIT   │
+   │  (≤300m / רכז)   │ │ (departure ACTIVE│ │  (300m+ / רכז)   │
+   │     ירוק         │ │  או רכז סימן)    │ │      אדום        │
+   └──────────────────┘ │      כחול        │ └──────────────────┘
+                        └──────────────────┘
+                                  │
+                                  ▼
+                        ┌──────────────────┐
+                        │     UNKNOWN      │ ← GPS denied / timeout / offline
+                        │  (לא ידוע — אפור)│   רכז יחליט
+                        └──────────────────┘
+                                  │
+                                  ▼
+                        ┌──────────────────┐
+                        │  EXCUSED_SICK    │ ← רק רכז יכול לסמן
+                        │   (סגול)         │
+                        └──────────────────┘
+```
+
+**מעברי מצב מותרים:**
+- `PENDING` → כל המצבים האחרים (autonomously by GPS, or by Supervisor click)
+- `UNKNOWN` → `IN_YESHIVA` / `OUT_PERMIT` / `OUT_NO_PERMIT` / `EXCUSED_SICK` (רק הרכז)
+- כל מצב → כל מצב (רק הרכז / המנהל) — אבל כל שינוי נרשם ב־audit_response_log
+
+---
+
+## 8. מצבי סשן ביקורת
+
+```
+   ┌──────────────────────┐
+   │       (אין סשן)       │
+   └───────────┬──────────┘
+               │ admin presses "פתח ביקורת"
+               ▼
+   ┌──────────────────────┐
+   │       ACTIVE         │ ← קולט מענים בזמן אמת
+   └──────────┬───────────┘
+              │
+       ┌──────┼──────────┐
+       │      │          │
+       ▼      ▼          ▼
+   ┌────────────┐  ┌────────────┐  ┌────────────┐
+   │   CLOSED   │  │  ABORTED   │  │  TIMED_OUT │
+   │ (סיים ידני)│  │  (admin    │  │ (24h עברו  │
+   │            │  │   ביטל)    │  │  בלי close)│
+   └────────────┘  └────────────┘  └────────────┘
+```
+
+**TIMED_OUT** — סשן שנשכח. cron מקצר אוטומטית אחרי 24h של ACTIVE, כדי לא להחזיק "סשן רפאים".
+
+---
+
+## 9. מכונת המצבים — כללי מעבר
+
+| מצב נוכחי | פעולה | מצב חדש | actor | תוצאת לוואי |
+|-----------|--------|----------|-------|--------------|
+| `PENDING` | GPS מגיע, מרחק ≤ 300m | `IN_YESHIVA` | `AUTO_GPS` | distance_bucket=GREEN |
+| `PENDING` | GPS מגיע, 300m–1km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=BLUE; alert? לא — קרוב לישיבה |
+| `PENDING` | GPS מגיע, 1km–5km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=ORANGE; trigger alert |
+| `PENDING` | GPS מגיע, > 5km | `OUT_NO_PERMIT` | `AUTO_GPS` | distance_bucket=RED; trigger alert |
+| `PENDING` | departure.status=ACTIVE | `OUT_PERMIT` | `AUTO_DEPARTURE` | departure_id מולא |
+| `PENDING` | GPS denied / timeout | `UNKNOWN` | `AUTO_GPS` | gps_status מולא |
+| כל מצב | רכז סימן ידני | היעד | `SUPERVISOR:{pin}` | log אירוע |
+| כל מצב | מנהל override | היעד | `ADMIN` | log אירוע |
+
+---
+
+## 10. כללי שימור היסטוריה
+
+- **כל ביקורת** נשמרת לתמיד (אלא אם המנהל ימחק ידנית; אין מחיקה אוטומטית).
+- **audit_response_log** — מחיקה אוטומטית אחרי 90 ימים (cron). זה זנב אבחוני, לא חיוני אחרי תקופה.
+- **audit_alerts** — שמירה לתמיד. שווה זהב לדוחות הנהלה.
+- **`students.lastLocation`** — נמשיך לעדכן אותו לתאימות לאחור, אבל לא יותר source for audit.
+
+---
+
+# חלק ג׳ — שני מצבי ביקורת
+
+## 11. השוואת המצבים בטבלה
+
+| היבט | מצב מהיר (MANUAL) | מצב מיקום (LOCATION) |
+|------|---------------------|-----------------------|
+| מי יוזם | **רק מנהל** (לכל הכיתות או מבחר) | **רק מנהל** |
+| שולח push? | כן — רק לרכזים | כן — לכל התלמידים והרכזים |
+| דורש GPS? | לא | כן |
+| מי מסמן? | רכז ידנית | אוטומטי לפי GPS + רכז מתקן ל־UNKNOWN |
+| זמן ממוצע לסיום | ~90 שניות לכיתה | ~3 דקות (חיכוי ל־GPS) |
+| תלות באינטרנט סלולרי | לא | כן |
+| מציג מפה? | לא | כן |
+| מציג Heatmap? | כן (פשוט יותר) | כן (מלא) |
+| נתונים שמורים ב־DB? | כן — אותה סכמה | כן — אותה סכמה |
+| מתי להשתמש? | בדיקה מהירה / יומיומית | בדיקה מעמיקה / אירוע חריג |
+
+---
+
+## 12. מתי להשתמש בכל מצב — הנחיות למנהל
+
+**מצב מהיר** (ברירת מחדל היומיומית):
+- כל שיעור בוקר, רוצה לוודא 9:00 שכולם.
+- אחרי ארוחת צהריים — מי חזר.
+- לפני שיחה מיוחדת — מי באולם.
+
+**מצב מיקום**:
+- חשד שתלמיד נעדר מעבר לישיבה.
+- אירוע ביטחוני באזור.
+- בקרת רבעון — אחת לשבועיים, מעמיק.
+- כאשר הרכז לא בנמצא והמנהל רוצה אובייקטיביות.
+
+המסך של "פתיחת ביקורת" מציג בבירור את שני האפשרויות כשני כפתורים גדולים, עם הסבר 1 שורה לכל אחד.
+
+---
+
+# חלק ד׳ — מצב 1: ביקורת מהירה (MANUAL)
+
+## 13. תרחיש שימוש
+
+> **שעה 8:50.** המנהל הגיע לישיבה. רוצה לדעת מהר מי באולם. נכנס לאדמין → "ביקורת מהירה". בוחר את כל הכיתות. לוחץ "התחל".
+>
+> כל 16 הרכזים מקבלים push: "ביקורת מהירה — סמן את כיתתך עכשיו". פותחים את האפליקציה (אם סגורה — אוטומטית). רואים מסך שמציג:
+> - כותרת: "ביקורת פעילה — סמן כל תלמיד"
+> - רשימה של 25 תלמידים — לכל אחד 3 כפתורים: ✅ בישיבה / 🔵 בחוץ עם אישור / 🔴 בחוץ בלי אישור
+> - 4 תלמידים שכרגע ב־OFF_CAMPUS עם יציאה מאושרת — **מסומנים כבר אוטומטית בכחול**, עם פתיח: "ביציאה מאושרת עד 11:00".
+> - 1 תלמיד שיש לו "בקשת אישור pending" — מסומן בצהוב: "בקשה ממתינה — האם נמצא?"
+>
+> הרכז עובר תלמיד אחר תלמיד: ✅ ✅ ✅ ✅ ✅ ❌ ✅ ✅ — כל לחיצה מעדכנת את ה־DB. סטטוס "סומן: 16 / 25" מתעדכן.
+>
+> בו זמנית המנהל רואה דשבורד בזמן אמת:
+> - **גריד של 16 כיתות**, כל כיתה היא כרטיס.
+> - בכרטיס: שם הכיתה, פס התקדמות `■■■■■■■░░ 16/25`, וכמה צבעים: ✅ 14 🔵 2 🔴 0 ⚪ 9.
+> - כיתה שסיימה — הכרטיס מתמלא בצבע ירוק רך + ✓ קטן.
+> - כיתה שעוד לא התחילה — צבע אפור.
+> - כיתה עם 🔴 (בחוץ בלי אישור) > 0 — מסומנת באדום מהבהב.
+>
+> תוך 4 דקות כל 16 הכיתות סיימו. המנהל לוחץ "סיים ביקורת". נפתח Modal: "✅ הביקורת הסתיימה. 372/381 בישיבה. 6 בחוץ עם אישור. 3 בחוץ בלי אישור. [פתח דוח מלא]". לחיצה על הדוח → דף נחיתה עם פירוט מלא.
+
+---
+
+## 14. תהליך ההפעלה — מצב 1
+
+### 14.1 ממשק המנהל
+
+מסך פתיחת ביקורת (`/admin/audit/new`):
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ←  פתח ביקורת חדשה                                          │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   בחר מצב ביקורת:                                            │
+│                                                              │
+│   ┌─────────────────────┐    ┌─────────────────────┐         │
+│   │  ⚡ ביקורת מהירה    │    │  📍 ביקורת מיקום    │         │
+│   │                     │    │                     │         │
+│   │  הרכזים מסמנים      │    │  הסלולרים שולחים   │         │
+│   │  ידנית את כיתתם     │    │  GPS אוטומטית      │         │
+│   │                     │    │                     │         │
+│   │  זמן: ~3 דק         │    │  זמן: ~5 דק        │         │
+│   │  [בחר →]            │    │  [בחר →]           │         │
+│   └─────────────────────┘    └─────────────────────┘         │
+│                                                              │
+│                                                              │
+│   ⚠ סשן פעיל כעת? לא  ✓                                      │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 14.2 צעד 2 — בחירת כיתות
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ←  ביקורת מהירה — בחר כיתות                                 │
+├──────────────────────────────────────────────────────────────┤
+│  ☑ בחר את כל הכיתות (16 / 381 תלמידים)                       │
+│  ─────────────────────────                                   │
+│  שיעור א:                                                    │
+│   ☑ הרב אבישי (26)    ☑ הרב בועז (24)    ☑ הרב הלל (16)     │
+│   ☑ הרב יעקב (25)    ☑ הרב משה (20)     ☑ הרב תמיר (28)    │
+│  ─────────────────────────                                   │
+│  שיעור ב:                                                    │
+│   ☑ הרב אהרלה (23)   ☑ הרב דוד לנדאו (9)  ☑ הרב דודו (27)  │
+│   ☑ הרב מוטי (24)                                            │
+│  ─────────────────────────                                   │
+│  ... (וכן הלאה)                                              │
+│                                                              │
+│  הערה (אופציונלי): ┌────────────────────────────┐           │
+│                    │ ביקורת בוקר רגילה          │           │
+│                    └────────────────────────────┘           │
+│                                                              │
+│                              [ביטול]   [פתח ביקורת ➜]       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 14.3 צעד 3 — סשן ACTIVE
+
+ברגע לחיצה על "פתח ביקורת":
+1. **Frontend** קורא ל־RPC `open_audit('MANUAL', class_ids, note)`.
+2. ה־RPC:
+   - מבטל כל סשן ACTIVE קיים (UPDATE לסטטוס ABORTED).
+   - INSERT שורה חדשה ל־`audit_sessions` עם status=ACTIVE.
+   - INSERT 381 שורות (או כמספר התלמידים בכיתות הנבחרות) ל־`audit_responses` עם category=PENDING.
+   - **עבור תלמידים שיש להם departure ACTIVE כרגע** — מציב category=OUT_PERMIT, marked_by=AUTO_DEPARTURE, ממלא departure_id.
+   - מחזיר את ה־session_id.
+3. **Frontend** מעבר ל־`/admin/audit/{sessionId}/live`.
+4. **Edge function** `send-audit-push` נקרא ברקע — שולח push לכל הרכזים של הכיתות הרלוונטיות.
+5. **Realtime**: המנהל מנוי על אירועי `audit_responses` עם `session_id=X`.
+
+---
+
+## 15. דשבורד מנהל — מצב 1 (Live View)
+
+### 15.1 Layout כללי
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  ← ביקורת פעילה — מצב מהיר                       [⏸ הקרנה]   │
+│  פתיחה: 08:50  |  משך: 02:34  |  16 כיתות  |  381 תלמידים    │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│   ┌───────── KPI Row ─────────┐                               │
+│   │ ✅ 358    🔵 8     🔴 2    ⚪ 13    ⏳ 0   │                │
+│   │ בישיבה   ביציאה   בחוץ   לא ידוע  ממתין │                │
+│   └────────────────────────────┘                               │
+│                                                                │
+│   ┌─────────────── Heatmap of Classes ────────────────────┐   │
+│   │  כל ריבוע = כיתה. צבע = אחוז סימון.                   │   │
+│   │  ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐                    │   │
+│   │  │██││██││██││▓▓││██││██││██││██│  שיעור א           │   │
+│   │  └──┘└──┘└──┘└──┘└──┘└──┘└──┘└──┘                    │   │
+│   │  ┌──┐┌──┐┌──┐┌──┐                                    │   │
+│   │  │██││▓▓││██││██│                  שיעור ב            │   │
+│   │  └──┘└──┘└──┘└──┘                                    │   │
+│   │   ... ושאר השיעורים                                   │   │
+│   │  מקרא: ⬛ הסתיים (100%)  ▓ בעבודה  ⬜ לא התחיל      │   │
+│   └───────────────────────────────────────────────────────┘   │
+│                                                                │
+│   ┌─────────────── Class Grid ──────────────────────────────┐ │
+│   │  ┌────────────────────────────────────────────────┐    │ │
+│   │  │ 🔴 כיתה הרב יעקב            ■■■■■■■■░░ 21/25  │    │ │
+│   │  │ ✅ 19  🔵 1  🔴 1  ⚪ 0                        │    │ │
+│   │  │ ⚠ אזעקה: יוסי כהן — בחוץ בלי אישור            │    │ │
+│   │  └────────────────────────────────────────────────┘    │ │
+│   │  ┌────────────────────────────────────────────────┐    │ │
+│   │  │ ✓ כיתה הרב הלל              ■■■■■■■■■■ 16/16  │    │ │
+│   │  │ ✅ 16  🔵 0  🔴 0  ⚪ 0    [פתח →]             │    │ │
+│   │  └────────────────────────────────────────────────┘    │ │
+│   │  ┌────────────────────────────────────────────────┐    │ │
+│   │  │ ⏳ כיתה הרב משה             ░░░░░░░░░░ 0/20   │    │ │
+│   │  │ הרכז עוד לא נכנס. שולח push חוזר? [שלח]      │    │ │
+│   │  └────────────────────────────────────────────────┘    │ │
+│   │  ... (16 כיתות)                                          │ │
+│   └─────────────────────────────────────────────────────────┘ │
+│                                                                │
+│                                                                │
+│                                          [סיים ביקורת ➜]      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### 15.2 התנהגויות
+
+- **Heatmap** מתעדכן בכל שינוי. כל ריבוע = כיתה אחת. צבע: גרדיאנט מאפור (0%) → ירוק (100%).
+- **Class Grid** ממוין כך:
+  1. כיתות עם 🔴 (אזעקות) — למעלה.
+  2. כיתות שעוד לא התחילו (PENDING > 50%) — אחר כך.
+  3. כיתות בעבודה.
+  4. כיתות שסיימו — בסוף.
+  כל שינוי במיון מלווה באנימציית layout עדינה (FLIP, framer-motion).
+- **התראת אזעקה** — כשנוצר OUT_NO_PERMIT, האזור של אותה כיתה מהבהב 3 פעמים באדום, ונשמע "ding" קל.
+- **כפתור "שלח push חוזר"** — שולח push יחודי לרכז הזה ("הזכרה: ביקורת ממתינה").
+- **כפתור "סיים ביקורת"** — Modal אישור: "האם לסיים? כל מי שעוד PENDING יסומן כ־UNKNOWN. [ביטול] [סיים]".
+
+### 15.3 לחיצה על כרטיס כיתה → פירוט
+
+מודאל drawer צד שמראה את 25 התלמידים. המנהל יכול:
+- לראות מי בחר מה.
+- לראות מי הרכז שסימן (audit_response_log).
+- לסמן ידנית (override) — מקטגוריה אחת לאחרת.
+- לראות הערות.
+
+### 15.4 Activity Feed במצב MANUAL — granularity ברמת התלמיד
+
+**החלטה חשובה:** במצב MANUAL, המנהל לא רואה רק "16 כיתות + פס התקדמות". הוא רואה **כל פעולה של רכז ברגע שהיא קורית**, כדי שיהיה לו תחושת שליטה מלאה ("מעליה הרכז סימן את דוד את התקדמות").
+
+Activity Feed קבוע למטה במסך, מציג stream של 20 הסימונים האחרונים:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Activity Feed — מי סימן את מי                              │
+├─────────────────────────────────────────────────────────────┤
+│  ✅ 09:17:42  הרב יעקב (רכז) → אברהם כהן: נוכח              │
+│  ✅ 09:17:40  הרב יעקב (רכז) → דוד לוי: נוכח                │
+│  🔴 09:17:38  הרב יעקב (רכז) → יוסי כהן: בחוץ בלי אישור     │
+│  🔵 09:17:35  אוטומטי → נחמן ברגר: בחוץ עם אישור (departure)│
+│  ✅ 09:17:34  הרב הלל (רכז) → משה רוזנברג: נוכח             │
+│  ...                                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- כל שורה נכנסת מלמעלה באנימציה (slide-in 200ms).
+- צבע אייקון לפי קטגוריה: ירוק=נוכח, כחול=עם אישור, אדום=בלי אישור.
+- לחיצה על שורה → פותחת drawer של אותו תלמיד.
+- כפתור "📜 פתח לוג מלא" → מסך שמראה את כל ה־audit_response_log לסשן.
+
+### 15.5 מסך פירוט מלא של תלמידים — Tab נוסף "טבלה"
+
+במצב MANUAL נוסיף Tab שמראה את **כל 381 התלמידים בטבלה אחת**, ממוינת:
+- עמודות: שם, כיתה, סטטוס נוכחי, סומן ע"י, זמן סימון, הערה.
+- פילטרים: כיתה, סטטוס, "רק שעדיין לא סומנו".
+- חיפוש מהיר בשם.
+- לחיצה על תלמיד → drawer עם היסטוריה + override option.
+
+כך המנהל יכול גם לעקוב per-class (Grid) וגם per-student (Table) — לפי הצורך.
+
+---
+
+## 16. דשבורד רכז כיתה — מצב 1
+
+ברגע שהרכז פותח את האפליקציה (או אחרי push):
+
+### 16.1 Header
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  🔔 ביקורת מהירה פעילה — כיתה הרב יעקב                    │
+│  סמן כל תלמיד. נשארו: 9 מתוך 25                            │
+├────────────────────────────────────────────────────────────┤
+```
+
+### 16.2 רשימת תלמידים
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 🟢 אברהם כהן                       ✅ נוכח  ← נסמן       │
+├──────────────────────────────────────────────────────────┤
+│ 🟢 דוד לוי                          ✅ נוכח              │
+├──────────────────────────────────────────────────────────┤
+│ 🔵 יוסי גולדמן                      🔵 בחוץ עם אישור     │
+│    יציאה: בית — עד 11:00 ✓ אוטומטי                       │
+├──────────────────────────────────────────────────────────┤
+│ ⚪ נחמן ברגר                                              │
+│    [✅ נוכח]  [🔵 בחוץ עם אישור]  [🔴 בחוץ בלי אישור]    │
+├──────────────────────────────────────────────────────────┤
+│ ⚪ אלון פדידה                                             │
+│    [✅ נוכח]  [🔵 בחוץ עם אישור]  [🔴 בחוץ בלי אישור]    │
+├──────────────────────────────────────────────────────────┤
+```
+
+**3 קטגוריות בלבד.** הרכז רואה 3 כפתורים גדולים. אם צריך להוסיף הקשר (חולה, בהלוויה) — נוסף "✏️ הוסף הערה" מתחת לכל תלמיד שכבר סומן.
+
+### 16.3 התנהגויות
+
+- **לחיצה אחת = שמירה**. אין "save" — RPC `submit_audit_response(session_id, student_id, category)` נשלח מיד.
+- **בלוקים אופטימיים** — UI מתעדכן מיד, ה־RPC רץ ברקע. אם RPC נכשל — toast אדום + rollback.
+- **התקדמות** — מד מתעדכן: "9 מתוך 25".
+- **כפתור "סיים סימון"** מופיע למטה רק כשכולם סומנו. לוחץ → toast "✓ נשלח למנהל" + חוזר לדשבורד הרגיל.
+
+### 16.4 בריא להוסיף
+
+- **Bulk action** — "סמן את כל מי שלא סומן כ־בישיבה" — כפתור מהיר. רק אחרי אישור (Modal).
+- **חיפוש** — שדה חיפוש לכיתה עם 25+ תלמידים.
+- **Sticky header** — תמיד רואים כמה נשאר.
+
+---
+
+## 17. סיום ושימור
+
+לחיצה של המנהל על "סיים ביקורת":
+1. RPC `close_audit(session_id, note)` נקרא.
+2. כל ה־PENDING הופך ל־UNKNOWN.
+3. status מתעדכן ל־CLOSED.
+4. closed_at נכתב.
+5. ה־UI עובר ל־`/admin/audit/{id}/summary`.
+
+מסך הסיכום מתואר ב־**חלק ט׳**.
+
+---
+
+## 18. תקלות במצב 1 ופתרונן
+
+| בעיה | פתרון |
+|------|--------|
+| רכז לא קיבל push | המנהל רואה זאת (PENDING > 50% אחרי 2 דק). יש כפתור "שלח שוב". |
+| רכז במצב offline | האפליקציה תסנכרן ברגע שמתחבר; sync engine. UI מסמן "נשמר offline — ימתין לסנכרון". |
+| ריענון דף — רכז | RPC `get_active_audit_for_class(class_id)` — מחזיר session_id + responses. UI נטען מחדש. |
+| ריענון דף — מנהל | אותה RPC הפוכה: `get_active_audit()`. UI נטען מחדש עם כל הנתונים. |
+| שני מנהלים פותחים בו זמנית | RPC `open_audit` בודק שאין ACTIVE אחר — מחזיר שגיאה אם יש; UI מציע "כבר יש ביקורת פעילה — האם להמשיך?" |
+| רכז שכח לסמן | Cron אחרי 24h סוגר אוטומטית (TIMED_OUT). מנהל מקבל הודעה. |
+
+---
+
+# חלק ה׳ — מצב 2: ביקורת מיקום חי (LOCATION)
+
+## 19. תרחיש שימוש
+
+> **שעה 9:15.** ראש הישיבה רוצה לוודא שיהושע — תלמיד מסוים — נמצא בכיתה ולא חזר הביתה. במקום לקרוא לו, פותח "ביקורת מיקום" על כיתתו. תוך 20 שניות:
+>
+> Push נשלח ל־381 הסלולרים שמחוברים לאפליקציה. אפליקציות נפתחות אוטומטית. מבקשות הרשאת מיקום. שולחות ל־DB.
+>
+> המנהל רואה Heatmap של ישראל (בעצם של אזור חברון) — נקודות מתחילות לקפוץ. ירוקות, ירוקות, ירוקות. אחת כחולה (תלמיד יושב בכניסה). אחת כתומה — תלמיד באזור חברון אבל לא בישיבה. אחת **אדומה מהבהבת בבית שמש**.
+>
+> Modal צץ אוטומטית: "⚠ יהושע ברק — נמצא מחוץ לטווח. מרחק: 38 ק"מ. [פתח כיתה] [שלח SMS להורים] [סמן 'אישור חרום']".
+>
+> תוך 90 שניות 92% מהתלמידים שלחו מיקום. נשארים 8% — תלמידים שהדפדפן שלהם דחה GPS / Offline. הרכזים מקבלים רשימה: "6 תלמידים ללא מיקום בכיתה שלך — האם הם בישיבה?". הרכז עונה ידנית.
+>
+> המנהל סוגר את הביקורת. מקבל סיכום + יהושע ברק עולה לרשימת אזעקות לטיפול.
+
+---
+
+## 20. תהליך ההפעלה — מצב 2
+
+### 20.1 ממשק המנהל
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ←  ביקורת מיקום — בחר כיתות + הגדרות                       │
+├──────────────────────────────────────────────────────────────┤
+│  ☑ בחר את כל הכיתות (16 / 381)                                │
+│  ... (זהה למצב 1)                                            │
+│                                                              │
+│  ⏱ כמה זמן להמתין לתגובות מסלולרים?                          │
+│   ○ 60 שניות     ●  120 שניות     ○ 5 דקות                  │
+│                                                              │
+│  🔔 שלח push לתלמידים?                                       │
+│   ● כן, לכל הסלולרים     ○ רק לרכזים                       │
+│                                                              │
+│  📊 הצג מפה כשמתחיל?                                         │
+│   ● כן     ○ לא — רק Heatmap                                 │
+│                                                              │
+│  🚨 רגישות לאזעקות:                                          │
+│   ○ נמוכה (רק > 5 ק"מ)                                      │
+│   ● בינונית (גם > 1 ק"מ)                                    │
+│   ○ גבוהה (כל מי שלא ≤ 300m)                                │
+│                                                              │
+│                       [ביטול]   [פתח ביקורת מיקום ➜]        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 20.2 השרשרת מאחורי הקלעים
+
+1. **RPC `open_audit('LOCATION', class_ids, settings)`** — יוצר session + responses (כמו במצב 1, אבל category=PENDING לכולם, כולל מי שיש לו departure ACTIVE — אלה יוזנו עם OUT_PERMIT).
+2. **Edge Function `send-audit-location-push`**:
+   - שולח Web Push לכל push_token של תלמידים בכיתות הנבחרות.
+   - Payload: `{ kind: 'AUDIT_LOCATION', session_id, deadline_ts }`.
+   - מטרת ה־payload: לגרום לאפליקציה (אם רצה ב־background) לפתוח את עצמה ולשלוח מיקום.
+3. **Realtime Broadcast** — ערוץ `audit:{session_id}` משדר `start` אירוע לכל לקוח שמחובר עכשיו (לאפליקציות פתוחות).
+4. **המנהל** מועבר אוטומטית ל־`/admin/audit/{id}/live`.
+
+---
+
+## 21. צד התלמיד — איסוף מיקום
+
+### 21.1 Service Worker — האזנה ל־Push
+
+`public/sw.js` (קיים, נצטרך לעדכן):
+- מאזין ל־`push` event.
+- אם kind=AUDIT_LOCATION:
+  - מציג notification: "📍 בקשת מיקום — בדיקה פנימית. הקש לפתיחה."
+  - שומר session_id ב־IndexedDB.
+  - **אינו** קורא ל־GPS כאן (Service Worker לא יכול לקרוא ל־geolocation API).
+
+### 21.2 הלקוח (React App)
+
+ברגע שהאפליקציה נפתחת (push tap או כבר פתוחה ב־background):
+1. **Hook `useAuditListener`** מאזין ל־:
+   - Broadcast `audit:{session_id}` (כשהאפליקציה הייתה פתוחה כבר).
+   - localStorage / IndexedDB אירוע מ־SW (כשהאפליקציה נפתחה מ־push).
+2. **אם התלמיד ב־OFF_CAMPUS עם departure ACTIVE** — לא דורש GPS, רק שולח `submit_audit_response` עם category=OUT_PERMIT ו־marked_by=AUTO_DEPARTURE.
+3. **אחרת:**
+   - מציג Sheet עוטף: "📍 בקרת מיקום — נא לאשר".
+   - לוחץ "אשר" → קורא ל־`navigator.geolocation.getCurrentPosition` עם:
+     - `enableHighAccuracy: true`
+     - `timeout: 15000`
+     - `maximumAge: 0` — תמיד טריים, לא cache
+   - מציג ספינר: "מתבצע איסוף מיקום..."
+   - מצליח → `submit_audit_response(session_id, lat, lng, accuracy)`.
+   - נכשל → `submit_audit_response(session_id, gps_status='DENIED'|'TIMEOUT'|'UNAVAILABLE')`.
+
+### 21.3 UI התלמיד
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│                       📍                                  │
+│                                                          │
+│            בדיקת נוכחות מהירה                            │
+│                                                          │
+│       ההנהלה מבקשת לוודא שאתה בישיבה.                   │
+│       האפליקציה תשלח את מיקומך הנוכחי.                  │
+│                                                          │
+│            [ אשר ושלח ] (ירוק גדול)                      │
+│                                                          │
+│            [ אני לא בישיבה ]                             │
+│                                                          │
+│       הקליק "אני לא בישיבה" שולח הודעה לרכז              │
+│       לבדוק את מצבך — לא נדרש מיקום.                    │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+**אם דחה את ההרשאה:**
+- toast: "✗ לא סופק מיקום. הרכז יבדוק."
+- שולח `submit_audit_response(..., gps_status='DENIED')`.
+- האפליקציה חוזרת למסך הביתי.
+
+---
+
+## 22. הזרמת נתונים בזמן אמת
+
+### 22.1 Realtime Channel Architecture
+
+```
+   ┌────────────────────────────────────────────────────────┐
+   │  Channel: 'audit:{session_id}'                         │
+   │                                                        │
+   │  Events:                                               │
+   │   - 'start' (broadcast)  — סשן התחיל                  │
+   │   - 'response' (postgres_changes on audit_responses)   │
+   │   - 'alert' (broadcast)  — אזעקה חדשה                 │
+   │   - 'close' (broadcast)  — סשן הסתיים                 │
+   │                                                        │
+   │  Subscribers:                                          │
+   │   - Manager dashboard (all events)                     │
+   │   - Class supervisors (filtered to their class)        │
+   │   - Students (only 'start' event)                      │
+   └────────────────────────────────────────────────────────┘
+```
+
+### 22.2 קצב עדכון
+
+- כשמגיע מיקום: לקוח שולח RPC. RPC מבצע UPDATE על השורה ב־audit_responses. **Postgres trigger** משדר ל־Realtime. **המנהל רואה בתוך < 800ms**.
+- אנימציה: הכרטיס המתאים בכיתה ב־Grid **קופץ** מ־PENDING (אפור) לצבע המתאים (ירוק/כחול/כתום/אדום) באנימציה של 300ms.
+- אם זה אזעקה (אדום) — קוביית הכיתה מהבהבת 3 פעמים, נשמע "ding".
+
+### 22.3 batching / dedup
+
+- אם שני אירועים מגיעים תוך 100ms (תלמיד שלח מיקום פעמיים, חיבור איטי) — UI מסנן duplicates לפי `id`.
+- אנימציות מוגבלות ל־30fps — אם 50 אירועים בבת אחת, queue פנימי.
+
+---
+
+## 23. דשבורד מנהל — מצב 2 (Live)
+
+### 23.1 Layout
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  ← ביקורת מיקום פעילה          ⏱ 01:23 / 02:00  [📺 הקרנה]   │
+├───────────────────────────────────────────────────────────────┤
+│  ┌─── KPI ───────────────────────────────────────────────┐   │
+│  │ 🟢 312     🔵 18     🟠 11    🔴 3     ⚪ 37          │   │
+│  │ בישיבה    בחוץ       בחוץ    מחוץ     לא ידוע        │   │
+│  │ (≤300m)   (≤1km)    (1-5km) לטווח     (GPS off)      │   │
+│  │                                                       │   │
+│  │ ⚠ אזעקות פתוחות: 3   [פתח רשימה]                     │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                               │
+│  ┌─── Tabs ──────────────────────────────────────────────┐   │
+│  │  [🗺 מפה]  [🔥 Heatmap]  [📊 Grid]  [📋 טבלה]         │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                               │
+│  ┌─── Main Content (לפי Tab) ────────────────────────────┐   │
+│  │                                                       │   │
+│  │  [תוכן דינמי — ראה למטה]                              │   │
+│  │                                                       │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                               │
+│  ┌─── Activity Feed ─────────────────────────────────────┐   │
+│  │  🟢 09:15:23 אברהם כהן (הרב יעקב) — בישיבה (218m)    │   │
+│  │  🟢 09:15:24 דוד לוי (הרב הלל) — בישיבה (45m)        │   │
+│  │  🔴 09:15:25 ⚠ יהושע ברק (הרב משה) — 38 ק"מ          │   │
+│  │  🟢 09:15:26 משה רוזנברג (הרב אבישי) — בישיבה        │   │
+│  │  ...                                                  │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                               │
+│                                       [סיים ביקורת ➜]        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### 23.2 Tab "מפה"
+
+- Leaflet + OpenStreetMap tiles (חינמי).
+- Center: campus (31.5253, 35.1056), zoom 14.
+- **שכבת מעגלים**: 300m ירוק, 1km כחול, 5km כתום, מעבר אדום.
+- **Markers**: כל תלמיד נקודה צבעונית. Pulse animation על Markers חדשים.
+- **Tooltip** בצבע: "אברהם כהן, הרב יעקב, 218m".
+- **Marker אדום** עם פולסציה אדומה גדולה (אזעקה).
+- **Cluster** — אם > 50 נקודות באותו אזור, מציג Cluster (CountBubble).
+- **Filter** — שכבת kpi מאפשרת לסנן: "הצג רק אדומים", "הצג רק שיעור א".
+- **Recenter** — לחיצה על אזעקה ב־Feed → מפה מתמקדת.
+
+### 23.3 Tab "Heatmap"
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Heatmap לפי כיתה                                        │
+│                                                          │
+│  שיעור א:                                                │
+│  ┌────┐┌────┐┌────┐┌────┐┌────┐┌────┐                  │
+│  │ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 ││ 🟢 │  ← הכל הגיב     │
+│  │100%││ 96%││100%││ 88%││100%││100%│                   │
+│  │אבישי│בועז│הלל │יעקב│משה │תמיר│                       │
+│  └────┘└────┘└────┘└────┘└────┘└────┘                  │
+│                                                          │
+│  שיעור ב:                                                │
+│  ┌────┐┌────┐┌────┐┌────┐                              │
+│  │ 🟠 ││ 🟢 ││ 🔴 ││ 🟢 │                              │
+│  │ 65%││ 95%││ 30%││ 90%│                              │
+│  │אהרלה│ד.לנדאו│דודו│מוטי│                              │
+│  └────┘└────┘└────┘└────┘                              │
+│                                                          │
+│  ... (כל הכיתות)                                         │
+│                                                          │
+│  מקרא:                                                   │
+│  🟢 > 80% הגיבו  🟠 50-80%  🔴 < 50%                    │
+│  (אחוז ההגבה כולל בישיבה+בחוץ+UNKNOWN)                  │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 23.4 Tab "Grid"
+
+(זהה ל־Class Grid במצב 1, אבל בכל כרטיס:
+- מציג גם distance distribution: "≤300m: 22, 300m-1km: 1, 1-5km: 1"
+- לחיצה על כרטיס → drawer של תלמידי הכיתה עם מיקומיהם.)
+
+### 23.5 Tab "טבלה"
+
+- כל התלמידים בטבלה ממוינת.
+- עמודות: שם, כיתה, סטטוס, מרחק, זמן עדכון, marked_by.
+- פילטרים מעל הטבלה: כיתה, סטטוס, מרחק, search.
+- סטטיסטיקה בולטת: avg distance, median, max.
+
+### 23.6 Activity Feed (קבוע למטה)
+
+- streaming של 20 האירועים האחרונים.
+- כל אירוע: שעה, אייקון צבעוני, שם, כיתה, מרחק.
+- אזעקות מודגשות (background אדום עדין).
+- לחיצה על אירוע → drawer פרטים.
+
+---
+
+## 24. דשבורד רכז כיתה — מצב 2
+
+### 24.1 View Only על הכיתה שלו
+
+הרכז רואה גרסה מצומצמת של Tab "Grid" אבל רק לכיתה שלו:
+
+```
+┌───────────────────────────────────────────────────────────┐
+│  📍 ביקורת מיקום פעילה — כיתה הרב יעקב                   │
+│  הגיבו: 23/25                                             │
+├───────────────────────────────────────────────────────────┤
+│  🟢 21 בישיבה  🔵 1 ביציאה  🟠 1 קרוב  🔴 0 רחוק  ⚪ 2  │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  תלמידים ללא תגובה — נא לבדוק ידנית:                     │
+│                                                           │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ ⚪ נחמן ברגר — דחה הרשאת מיקום                     │  │
+│  │ [✅ בישיבה]  [🔵 עם אישור]  [🔴 בלי אישור]         │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ ⚪ אלון פדידה — הסלולרי כבוי / Offline             │  │
+│  │ [✅ בישיבה]  [🔵 עם אישור]  [🔴 בלי אישור]         │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                           │
+│                                                           │
+│  תלמידים שנמצאו מחוץ לטווח (לבדיקת המנהל):              │
+│                                                           │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ 🟠 שלמה לוי — 1.2 ק"מ מהישיבה                     │  │
+│  │ זמן: 09:16  קונטקסט: ל־45min                       │  │
+│  │ [סמן 'בחוץ עם אישור']  [הוסף הערה]                  │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 24.2 פעולות לרכז
+
+- **לסמן ידנית** את UNKNOWN-im.
+- **להוסיף הערה** לכל תלמיד (סיכון בטחוני, מצב מיוחד).
+- **לראות מיקום ספציפי** של תלמיד בכיתה (לחיצה → mini-map).
+- **לא יכול** לסיים את הביקורת. רק המנהל סוגר.
+
+---
+
+## 25. הקרנה (Projection Mode) ורוטציה אוטומטית
+
+### 25.1 הפעלה
+
+- כפתור "📺 הקרנה" בפינה הימנית של דשבורד המנהל.
+- לחיצה → full-screen mode (`element.requestFullscreen()`).
+
+### 25.2 Layout שונה
+
+- טיפוגרפיה: 32-48pt למספרים, 24pt לטקסט.
+- צבעים: רקע שחור (יותר טוב לצג גדול), טקסט לבן/צהוב/אדום.
+- 6 שניות לכל view, ואז rotation אוטומטי:
+  1. **KPI Grid** (12 שניות) — מספרים גדולים, מרשימים.
+  2. **Heatmap** (8 שניות) — overview כיתות.
+  3. **מפה** (10 שניות) — נקודות נעות.
+  4. **Alerts** (אם יש) — מסך אדום, פרטי האזעקות.
+  5. **Grid כיתות** (10 שניות).
+
+### 25.3 בקרה
+
+- ESC או לחיצה על "✕" — יציאה ממצב הקרנה.
+- לחיצה על KPI מסוים — עצירת הרוטציה על אותו tab.
+
+---
+
+## 26. טיפול בקצוות (Edge Cases)
+
+| תרחיש | פתרון |
+|--------|--------|
+| תלמיד פתח אפליקציה אחרי שהביקורת התחילה | Hook `useAuditListener` שואל DB `SELECT * FROM audit_sessions WHERE status='ACTIVE'`. אם יש — מציג sheet GPS. |
+| תלמיד שלח 2 מיקומים בטעות | RPC עם UPSERT — האחרון מנצח. log רושם את שניהם. |
+| GPS מחזיר מיקום עם accuracy > 200m | נשמר כ־OK אבל מסומן בדגל `low_accuracy=true`. מנהל רואה ייצוג קטן. |
+| אינטרנט נופל באמצע | sync engine שומר ב־IndexedDB. ברגע שחוזר — שולח. |
+| תלמיד עם 2 מכשירים | האחרון שעודכן מנצח (UPSERT לפי student_id+session_id). |
+| מנהל סוגר את הביקורת — תלמיד שלח אחרי | RPC `submit_audit_response` בודק `session.status='ACTIVE'`. אם לא — מחזיר שגיאה, ה־UI מציג "הסשן הסתיים, ההודעה לא נשמרה". |
+| 2 רכזים מסמנים את אותו תלמיד | האחרון מנצח. log שומר שניהם. |
+| מנהל פותח 2 ביקורות במקביל | RPC לא מאפשר. |
+| Network slow → GPS מחזיר 30 שניות מאוחר | מתקבל ושוב מעדכן UI. |
+
+---
+
+# חלק ו׳ — Backend Architecture
+
+## 27. Supabase Tables — DDL מלא
+
+המיגרציה (כשתיכתב בעתיד): `supabase/migrations/20260516_internal_audit_v2.sql`
+
+```sql
+-- audit_sessions
+CREATE TABLE IF NOT EXISTS audit_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mode TEXT NOT NULL CHECK (mode IN ('MANUAL', 'LOCATION')),
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CLOSED','ABORTED','TIMED_OUT')),
+  class_ids TEXT[] NOT NULL,
+  total_students INT NOT NULL,
+  started_by TEXT NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  closed_at TIMESTAMPTZ,
+  notes TEXT,
+  settings JSONB DEFAULT '{}'::jsonb, -- timeout_sec, sensitivity, etc.
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX uq_audit_sessions_one_active
+  ON audit_sessions ((1)) WHERE status='ACTIVE';
+
+CREATE INDEX ix_audit_sessions_started_at ON audit_sessions (started_at DESC);
+
+-- audit_responses
+CREATE TABLE IF NOT EXISTS audit_responses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
+  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  class_id TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'PENDING'
+    CHECK (category IN ('PENDING','IN_YESHIVA','OUT_PERMIT','OUT_NO_PERMIT','UNKNOWN','EXCUSED_SICK')),
+  marked_by TEXT,
+  marked_at TIMESTAMPTZ,
+  gps_lat FLOAT8,
+  gps_lng FLOAT8,
+  gps_accuracy_m FLOAT8,
+  distance_from_campus_m FLOAT8,
+  distance_bucket TEXT CHECK (distance_bucket IN ('GREEN','BLUE','ORANGE','RED')),
+  gps_status TEXT CHECK (gps_status IN ('OK','DENIED','TIMEOUT','OFFLINE','UNAVAILABLE')),
+  departure_id UUID REFERENCES departures(id),
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(session_id, student_id)
+);
+
+CREATE INDEX ix_audit_responses_session_category ON audit_responses (session_id, category);
+CREATE INDEX ix_audit_responses_session_class ON audit_responses (session_id, class_id, category);
+CREATE INDEX ix_audit_responses_student ON audit_responses (student_id, marked_at DESC);
+
+-- audit_response_log
+CREATE TABLE IF NOT EXISTS audit_response_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  response_id UUID NOT NULL REFERENCES audit_responses(id) ON DELETE CASCADE,
+  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
+  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  from_category TEXT,
+  to_category TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX ix_audit_response_log_session ON audit_response_log (session_id, changed_at DESC);
+
+-- audit_alerts
+CREATE TABLE IF NOT EXISTS audit_alerts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
+  student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  distance_m FLOAT8 NOT NULL,
+  gps_lat FLOAT8,
+  gps_lng FLOAT8,
+  acknowledged_by TEXT,
+  acknowledged_at TIMESTAMPTZ,
+  note TEXT
+);
+
+CREATE INDEX ix_audit_alerts_session ON audit_alerts (session_id, triggered_at DESC);
+
+-- Trigger: על UPDATE category, INSERT log
+CREATE OR REPLACE FUNCTION log_audit_response_change() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.category IS DISTINCT FROM OLD.category THEN
+    INSERT INTO audit_response_log (response_id, session_id, student_id, from_category, to_category, actor)
+    VALUES (NEW.id, NEW.session_id, NEW.student_id, OLD.category, NEW.category, COALESCE(NEW.marked_by, 'SYSTEM'));
+  END IF;
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER tr_audit_response_log
+BEFORE UPDATE ON audit_responses
+FOR EACH ROW EXECUTE FUNCTION log_audit_response_change();
+
+-- Trigger: על distance_bucket=RED או ORANGE, INSERT alert
+CREATE OR REPLACE FUNCTION trigger_audit_alert() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.distance_bucket IN ('ORANGE','RED') AND OLD.distance_bucket IS DISTINCT FROM NEW.distance_bucket THEN
+    INSERT INTO audit_alerts (session_id, student_id, distance_m, gps_lat, gps_lng)
+    VALUES (NEW.session_id, NEW.student_id, NEW.distance_from_campus_m, NEW.gps_lat, NEW.gps_lng);
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER tr_audit_alert
+AFTER UPDATE ON audit_responses
+FOR EACH ROW EXECUTE FUNCTION trigger_audit_alert();
+
+-- Publication ל־Realtime
+ALTER PUBLICATION supabase_realtime ADD TABLE audit_sessions;
+ALTER PUBLICATION supabase_realtime ADD TABLE audit_responses;
+ALTER PUBLICATION supabase_realtime ADD TABLE audit_alerts;
+```
+
+---
+
+## 28. RPC Functions — חתימות מלאות
+
+### 28.1 `open_audit`
+
+```sql
+CREATE OR REPLACE FUNCTION open_audit(
+  p_mode TEXT,
+  p_class_ids TEXT[],
+  p_started_by TEXT,
+  p_settings JSONB DEFAULT '{}'::jsonb,
+  p_notes TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_session_id UUID;
+  v_existing UUID;
+  v_total INT;
+BEGIN
+  -- 1. בדוק אם יש סשן ACTIVE קיים
+  SELECT id INTO v_existing FROM audit_sessions WHERE status='ACTIVE';
+  IF v_existing IS NOT NULL THEN
+    RETURN jsonb_build_object('error', 'AUDIT_ACTIVE', 'session_id', v_existing);
+  END IF;
+
+  -- 2. INSERT סשן חדש
+  INSERT INTO audit_sessions (mode, class_ids, total_students, started_by, settings, notes)
+  SELECT
+    p_mode,
+    p_class_ids,
+    (SELECT COUNT(*) FROM students WHERE "classId" = ANY(p_class_ids)),
+    p_started_by,
+    p_settings,
+    p_notes
+  RETURNING id, total_students INTO v_session_id, v_total;
+
+  -- 3. INSERT responses לכל תלמיד
+  INSERT INTO audit_responses (session_id, student_id, class_id, category, marked_by, marked_at, departure_id)
+  SELECT
+    v_session_id,
+    s.id,
+    s."classId",
+    CASE
+      WHEN d.id IS NOT NULL THEN 'OUT_PERMIT'
+      ELSE 'PENDING'
+    END,
+    CASE WHEN d.id IS NOT NULL THEN 'AUTO_DEPARTURE' ELSE NULL END,
+    CASE WHEN d.id IS NOT NULL THEN NOW() ELSE NULL END,
+    d.id
+  FROM students s
+  LEFT JOIN departures d ON d.student_id = s.id AND d.status='ACTIVE'
+  WHERE s."classId" = ANY(p_class_ids);
+
+  -- 4. החזר תוצאה
+  RETURN jsonb_build_object(
+    'session_id', v_session_id,
+    'total_students', v_total,
+    'mode', p_mode
+  );
+END $$;
+```
+
+### 28.2 `submit_audit_response`
+
+```sql
+CREATE OR REPLACE FUNCTION submit_audit_response(
+  p_session_id UUID,
+  p_student_id UUID,
+  p_category TEXT DEFAULT NULL,        -- אם NULL, מחושב מ־GPS
+  p_gps_lat FLOAT8 DEFAULT NULL,
+  p_gps_lng FLOAT8 DEFAULT NULL,
+  p_gps_accuracy_m FLOAT8 DEFAULT NULL,
+  p_gps_status TEXT DEFAULT NULL,
+  p_marked_by TEXT DEFAULT NULL,
+  p_note TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_distance FLOAT8;
+  v_bucket TEXT;
+  v_final_category TEXT;
+  v_response_id UUID;
+BEGIN
+  -- 1. ודא שהסשן ACTIVE
+  IF NOT EXISTS (SELECT 1 FROM audit_sessions WHERE id=p_session_id AND status='ACTIVE') THEN
+    RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE');
+  END IF;
+
+  -- 2. חישוב מרחק (Haversine)
+  IF p_gps_lat IS NOT NULL AND p_gps_lng IS NOT NULL THEN
+    v_distance := 6371000 * 2 * asin(sqrt(
+      sin(radians((p_gps_lat - 31.5253)/2))^2 +
+      cos(radians(31.5253)) * cos(radians(p_gps_lat)) *
+      sin(radians((p_gps_lng - 35.1056)/2))^2
+    ));
+
+    v_bucket := CASE
+      WHEN v_distance <= 300 THEN 'GREEN'
+      WHEN v_distance <= 1000 THEN 'BLUE'
+      WHEN v_distance <= 5000 THEN 'ORANGE'
+      ELSE 'RED'
+    END;
+  END IF;
+
+  -- 3. קביעת קטגוריה סופית
+  v_final_category := COALESCE(p_category,
+    CASE
+      WHEN p_gps_status IN ('DENIED','TIMEOUT','OFFLINE','UNAVAILABLE') THEN 'UNKNOWN'
+      WHEN v_bucket = 'GREEN' THEN 'IN_YESHIVA'
+      WHEN v_bucket IN ('BLUE','ORANGE','RED') THEN 'OUT_NO_PERMIT'
+      ELSE 'PENDING'
+    END);
+
+  -- 4. UPDATE השורה
+  UPDATE audit_responses SET
+    category = v_final_category,
+    marked_by = COALESCE(p_marked_by, marked_by, 'AUTO_GPS'),
+    marked_at = NOW(),
+    gps_lat = COALESCE(p_gps_lat, gps_lat),
+    gps_lng = COALESCE(p_gps_lng, gps_lng),
+    gps_accuracy_m = COALESCE(p_gps_accuracy_m, gps_accuracy_m),
+    distance_from_campus_m = COALESCE(v_distance, distance_from_campus_m),
+    distance_bucket = COALESCE(v_bucket, distance_bucket),
+    gps_status = COALESCE(p_gps_status, gps_status),
+    note = COALESCE(p_note, note)
+  WHERE session_id = p_session_id AND student_id = p_student_id
+  RETURNING id INTO v_response_id;
+
+  RETURN jsonb_build_object(
+    'response_id', v_response_id,
+    'category', v_final_category,
+    'distance_m', v_distance,
+    'distance_bucket', v_bucket
+  );
+END $$;
+```
+
+### 28.3 `close_audit`
+
+```sql
+CREATE OR REPLACE FUNCTION close_audit(
+  p_session_id UUID,
+  p_closed_by TEXT,
+  p_notes TEXT DEFAULT NULL
+) RETURNS JSONB ...
+-- מבצע:
+-- 1. UPDATE כל PENDING ל־UNKNOWN.
+-- 2. UPDATE session: status='CLOSED', closed_at=NOW(), notes=note.
+-- 3. מחזיר סטטיסטיקה סופית.
+```
+
+### 28.4 `get_active_audit`
+
+```sql
+CREATE OR REPLACE FUNCTION get_active_audit() RETURNS JSONB
+-- מחזיר את הסשן ACTIVE (אם יש) עם:
+-- - session metadata
+-- - sumstats לפי category
+-- - sumstats לפי class
+-- מטרת השאילתה: רענון UI אחרי refresh
+```
+
+### 28.5 `get_audit_full`
+
+```sql
+CREATE OR REPLACE FUNCTION get_audit_full(p_session_id UUID) RETURNS JSONB
+-- מחזיר את כל ה־responses + alerts לסשן נתון.
+-- שימוש: רענון של דשבורד / טעינת ביקורת מהיסטוריה.
+```
+
+### 28.6 `acknowledge_audit_alert`
+
+```sql
+CREATE OR REPLACE FUNCTION acknowledge_audit_alert(
+  p_alert_id UUID,
+  p_actor TEXT,
+  p_note TEXT DEFAULT NULL
+) RETURNS JSONB
+-- מסמן אזעקה כ"נצפתה" — לא נעלמת, רק מסומנת.
+```
+
+### 28.7 `tick_audit_timeout`
+
+```sql
+CREATE OR REPLACE FUNCTION tick_audit_timeout() RETURNS INT
+-- cron: כל 5 דק'.
+-- בודק audit_sessions עם status='ACTIVE' AND started_at < NOW() - INTERVAL '24 hours'.
+-- מעדכן ל־TIMED_OUT.
+```
+
+---
+
+## 29. Edge Functions
+
+### 29.1 `send-audit-push`
+
+`supabase/functions/send-audit-push/index.ts`:
+- Input: `{ session_id, target: 'STUDENTS' | 'SUPERVISORS' | 'BOTH', class_ids: string[] }`.
+- מבצע:
+  1. שואב את כל ה־`push_token` של הקבוצה הרלוונטית.
+  2. שולח לכל אחד Web Push (VAPID + AES-128-GCM) — קוד דומה ל־`send-push` הקיים.
+  3. Payload: `{ kind: 'AUDIT_LOCATION', session_id, deadline_ts, mode }`.
+  4. אם push נכשל (HTTP 410) — מוחק את ה־push_token.
+- Output: `{ sent: int, failed: int, removed: int }`.
+
+### 29.2 `send-audit-reminder`
+
+לחיצה של המנהל על "שלח push חוזר" לרכז מסוים → קורא ל־`send-audit-reminder` עם class_id.
+
+---
+
+## 30. Realtime Channels — תכנון מלא
+
+| ערוץ | סוג | יוצר/משדר | מאזין | אירועים |
+|-------|-----|------------|--------|----------|
+| `audit:{session_id}` | broadcast + postgres_changes | DB triggers | Manager dashboard | `start`, `response`, `alert`, `close` |
+| `audit:{session_id}:class:{class_id}` | filtered postgres_changes | DB | Supervisor | `response` (filtered) |
+| `audit:notify` | broadcast | Edge function `open_audit` | Students, supervisors | `audit_open` (UI prompt) |
+
+> הערה: Supabase Realtime היום תומך ב־postgres_changes עם filter, ז.א. אנחנו לא בונים ערוץ ייעודי לכל כיתה. אנחנו subscribe-im עם filter `class_id=eq.{X}` על audit_responses.
+
+---
+
+## 31. cron jobs ו־cleanup
+
+### 31.1 `tick_audit_timeout` — כל 5 דק'
+- מסגירת סשנים ישנים (ABANDONED).
+
+### 31.2 `purge_audit_response_log` — יום
+- מחיקת לוגי שינוי ישנים מ־90 ימים.
+
+### 31.3 `purge_old_alerts` — חודש
+- מחיקת אזעקות acknowledged מעל שנה. (אופציונלי, אפשר לשמור.)
+
+---
+
+# חלק ז׳ — Frontend Architecture
+
+## 32. מבנה תיקיות חדש
+
+```
+src/
+├── pages/
+│   ├── admin/
+│   │   ├── AuditLandingPage.tsx        ← רשימת ביקורות (היסטוריה) + כפתור פתיחה
+│   │   ├── AuditNewPage.tsx            ← בחירת מצב + כיתות
+│   │   ├── AuditLivePage.tsx           ← דשבורד חי (מנהל)
+│   │   ├── AuditSummaryPage.tsx        ← סיכום אחרי סיום
+│   │   └── AuditCompareePage.tsx       ← השוואה בין ביקורות
+│   ├── class-supervisor/
+│   │   ├── SupervisorAuditPage.tsx     ← תצוגת רכז (מצב 1 + 2)
+│   │   └── ...
+│   └── student/
+│       └── StudentAuditSheetPage.tsx   ← Sheet שמופיע ברגע ביקורת מיקום
+├── components/
+│   ├── audit/
+│   │   ├── AuditKpiRow.tsx
+│   │   ├── AuditHeatmap.tsx
+│   │   ├── AuditClassGrid.tsx
+│   │   ├── AuditClassCard.tsx
+│   │   ├── AuditMap.tsx                ← Leaflet
+│   │   ├── AuditMapMarker.tsx
+│   │   ├── AuditActivityFeed.tsx
+│   │   ├── AuditAlertList.tsx
+│   │   ├── AuditAlertModal.tsx
+│   │   ├── AuditProjectionMode.tsx
+│   │   ├── AuditStudentRow.tsx
+│   │   ├── AuditCategoryChip.tsx
+│   │   ├── AuditDistanceBadge.tsx
+│   │   ├── AuditModeSelector.tsx
+│   │   ├── AuditClassSelector.tsx
+│   │   ├── AuditCloseConfirmModal.tsx
+│   │   └── AuditSummaryStats.tsx
+│   └── ...
+├── hooks/
+│   ├── useActiveAudit.ts               ← ת"א — שולף סשן ACTIVE, polling fallback
+│   ├── useAuditResponses.ts            ← Realtime subscription לresponses
+│   ├── useAuditAlerts.ts               ← Realtime subscription לalerts
+│   ├── useAuditStats.ts                ← memoized aggregations
+│   ├── useAuditLocationCollector.ts    ← לתלמיד: מאזין + אוסף GPS
+│   ├── useProjectionRotation.ts        ← רוטציה אוטומטית במצב הקרנה
+│   └── ...
+├── store/
+│   ├── auditStore.ts                   ← Zustand: סשן הנוכחי, KPIs
+│   ├── auditUiStore.ts                 ← Zustand: tab נבחר, פילטרים, מצב הקרנה
+│   └── ...
+├── lib/
+│   ├── audit/
+│   │   ├── categories.ts               ← enum + תרגומים
+│   │   ├── distanceBuckets.ts          ← ספים + צבעים
+│   │   ├── haversine.ts                ← פונקציית חישוב מרחק
+│   │   ├── auditApi.ts                 ← רובד IApiClient לביקורת
+│   │   └── gpsCollector.ts             ← navigator.geolocation wrapper משופר
+│   └── ...
+├── types/
+│   └── audit.ts                        ← TypeScript types
+└── ...
+```
+
+---
+
+## 33. Zustand Stores חדשים
+
+### 33.1 `auditStore.ts`
+
+```ts
+type AuditState = {
+  // session
+  session: AuditSession | null
+  responses: Map<string, AuditResponse>  // key: student_id
+  alerts: AuditAlert[]
+  loading: boolean
+  error: string | null
+
+  // actions
+  loadActive: () => Promise<void>
+  open: (mode: 'MANUAL'|'LOCATION', classIds: string[], settings?: any) => Promise<string>
+  close: (note?: string) => Promise<void>
+  submitResponse: (studentId: string, payload: Partial<AuditResponse>) => Promise<void>
+  acknowledgeAlert: (alertId: string, note?: string) => Promise<void>
+
+  // realtime
+  handleResponseUpdate: (response: AuditResponse) => void
+  handleAlertInsert: (alert: AuditAlert) => void
+  handleSessionUpdate: (session: AuditSession) => void
+}
+```
+
+**אל תאחסן ב־localStorage** — ה־source of truth הוא ה־DB. ה־Store מסונכרן ע"י Hook שמושך מ־DB ב־mount.
+
+### 33.2 `auditUiStore.ts`
+
+```ts
+type AuditUiState = {
+  activeTab: 'map' | 'heatmap' | 'grid' | 'table'
+  filters: { class_ids: string[]; categories: AuditCategory[]; min_distance?: number }
+  projectionMode: boolean
+  projectionTabRotation: { paused: boolean; currentIndex: number }
+
+  setTab: (t: AuditUiState['activeTab']) => void
+  setFilters: (f: Partial<AuditUiState['filters']>) => void
+  enterProjection: () => void
+  exitProjection: () => void
+}
+```
+
+**persist:** ה־store הזה מותר ל־persist (מצב tab, פילטרים, projection) — אבל לא ה־data.
+
+---
+
+## 34. Hooks
+
+### 34.1 `useActiveAudit`
+- Mount → קורא ל־RPC `get_active_audit()`.
+- מעדכן `auditStore`.
+- מנוי ל־Realtime channel `audit:{session_id}` ברגע שמצא session.
+- Polling fallback כל 30 שניות (אם Realtime ניתק).
+- Cleanup: unsubscribe.
+
+### 34.2 `useAuditResponses(sessionId)`
+- Realtime subscription על `audit_responses` עם filter session_id.
+- כל UPDATE → `auditStore.handleResponseUpdate(...)`.
+- מחזיר את ה־Map.
+
+### 34.3 `useAuditAlerts(sessionId)`
+- Realtime subscription על `audit_alerts`.
+- כל INSERT → toast + sound + `auditStore.handleAlertInsert(...)`.
+
+### 34.4 `useAuditStats`
+- memoized aggregations:
+  - by class: counts per category.
+  - by category: total counts.
+  - by distance_bucket: counts.
+
+### 34.5 `useAuditLocationCollector(sessionId)`
+- בצד התלמיד.
+- בודק האם זה תלמיד שכבר ב־OUT_PERMIT (אם כן, שולח מיד ולא דורש GPS).
+- אחרת, מציג Sheet עם כפתור "אשר".
+- ברגע אישור — `navigator.geolocation.getCurrentPosition` עם:
+  - `enableHighAccuracy: true`
+  - `timeout: 15000`
+  - `maximumAge: 0`
+- שולח RPC `submit_audit_response`.
+
+### 34.6 `useProjectionRotation`
+- timer של 6-12 שניות לכל tab.
+- מבטל כשהמשתמש לוחץ.
+
+---
+
+## 35. עץ רכיבים (Component Tree)
+
+```
+<AdminLayout>
+  └─ <Routes>
+      ├─ /admin/audit → <AuditLandingPage>
+      │                   ├─ <PastAuditList>
+      │                   └─ <OpenAuditCta>
+      ├─ /admin/audit/new → <AuditNewPage>
+      │                       ├─ <AuditModeSelector>
+      │                       ├─ <AuditClassSelector>
+      │                       └─ <AuditLocationSettings>
+      ├─ /admin/audit/:id/live → <AuditLivePage>
+      │                            ├─ <AuditHeader>
+      │                            ├─ <AuditKpiRow>
+      │                            ├─ <AuditTabs>
+      │                            │    ├─ <AuditMap> (when mode=LOCATION)
+      │                            │    ├─ <AuditHeatmap>
+      │                            │    ├─ <AuditClassGrid>
+      │                            │    │    └─ <AuditClassCard> (× N)
+      │                            │    └─ <AuditTable>
+      │                            ├─ <AuditActivityFeed>
+      │                            ├─ <AuditAlertList>
+      │                            ├─ <AuditCloseButton>
+      │                            └─ <AuditProjectionMode> (overlay)
+      ├─ /admin/audit/:id/summary → <AuditSummaryPage>
+      └─ /admin/audit/compare → <AuditComparePage>
+
+<ClassSupervisorLayout>
+  └─ <Routes>
+      └─ /class-supervisor → <SupervisorDashboard>
+                              └─ <SupervisorAuditPanel> (כשיש audit ACTIVE)
+                                  ├─ <SupervisorAuditHeader>
+                                  ├─ <SupervisorStudentList>
+                                  │   └─ <SupervisorStudentRow> (× N)
+                                  └─ <SupervisorAuditAlerts>
+
+<StudentLayout>
+  └─ <StudentHomePage>
+      └─ <StudentAuditSheet> (Bottom Sheet, opens when audit active + GPS needed)
+```
+
+---
+
+## 36. שימור State מול Refresh — אסטרטגיה
+
+**העיקרון:** ה־DB הוא תמיד source of truth. UI = שיקוף.
+
+**זרימה אחרי refresh:**
+1. ה־App עולה.
+2. `useActiveAudit` mount → קורא `get_active_audit()`.
+3. אם יש session ACTIVE:
+   - `auditStore.session = ...`
+   - `useAuditResponses(sessionId)` mount → subscribe לrealtime, מטעין initial data מ־`get_audit_full(session_id)`.
+   - Routing: אם המנהל היה ב־`/admin/audit/...` → ממשיך באותו דף. אחרת — מציג banner "ביקורת פעילה — [פתח]".
+4. אם אין session — UI רגיל.
+
+**רכז כיתה (אחרי refresh):**
+- אותה זרימה. `get_active_audit()` מחזיר גם את הסשן.
+- אם הסשן ACTIVE וכיתת הרכז כלולה — `SupervisorAuditPanel` נפתח אוטומטית.
+- כל הסימונים שהרכז עשה לפני הריענון — נטענים מ־`audit_responses`.
+
+**תלמיד (אחרי refresh):**
+- אם יש session ACTIVE עם mode=LOCATION ו־response שלו עדיין PENDING — Sheet GPS נפתח אוטומטית.
+- אם כבר שלח — toast קצר "✓ נשלח" ואז סגירה.
+
+---
+
+## 37. ספריות חיצוניות שיתווספו
+
+| ספרייה | ייעוד | מקור | רישיון |
+|---------|-------|-------|---------|
+| `leaflet` | מפה | npm | BSD |
+| `react-leaflet` | wrapper React | npm | Hippocratic |
+| `leaflet.markercluster` | קלסטרים | npm | MIT |
+| `framer-motion` (קיים?) | אנימציות | npm | MIT |
+| `howler` | סאונדים קלים (ding) | npm | MIT |
+| `jspdf` + `jspdf-autotable` | ייצוא PDF | npm | MIT |
+| `xlsx` (קיים?) | ייצוא Excel | npm | Apache-2 |
+| `clsx` (קיים) | utility | — | MIT |
+
+> השאר משתמשים בקיים: Zustand, shadcn/ui, Tailwind, lucide-react, Sonner (toast), Recharts.
+
+---
+
+# חלק ח׳ — Design System
+
+## 38. עקרונות עיצוב
+
+1. **Calm by default** — 90% מהזמן הדשבורד שקט וירוק. רק חריגות מקפיצות.
+2. **Information density gradient** — KPI Row למעלה (תמצית), Activity Feed למטה (פירוט), Tabs באמצע (מסך מלא).
+3. **Motion meaningful** — אנימציה רק כשמשמעותית. לא יותר מ־300ms.
+4. **Color = semantic** — לעולם לא דקורטיבי. ירוק = OK, אדום = בעיה.
+5. **Whitespace generous** — לא דחוס. רווח אוויר.
+6. **Mobile parity** — כל מסך עובד גם בנייד. גריד 1 עמודה ב־< 768px.
+
+## 39. פלטת צבעים מורחבת
+
+```css
+:root {
+  /* Status colors */
+  --audit-green:   #10b981;  /* IN_YESHIVA, distance GREEN */
+  --audit-green-bg: #d1fae5;
+  --audit-blue:    #3b82f6;  /* OUT_PERMIT, distance BLUE */
+  --audit-blue-bg: #dbeafe;
+  --audit-orange:  #f59e0b;  /* distance ORANGE, partial alert */
+  --audit-orange-bg: #fef3c7;
+  --audit-red:     #ef4444;  /* OUT_NO_PERMIT, distance RED */
+  --audit-red-bg:  #fee2e2;
+  --audit-purple:  #a855f7;  /* EXCUSED_SICK */
+  --audit-purple-bg: #f3e8ff;
+  --audit-gray:    #6b7280;  /* PENDING, UNKNOWN */
+  --audit-gray-bg: #f3f4f6;
+
+  /* Projection mode */
+  --proj-bg: #000;
+  --proj-text: #fff;
+  --proj-accent: #fbbf24;
+  --proj-red: #ff3838;
+  --proj-green: #4ade80;
+}
+```
+
+## 40. טיפוגרפיה ומצב הקרנה
+
+| הקשר | פונט | גודל | משקל |
+|------|------|------|------|
+| Body (regular) | Inter / system | 14-16px | 400 |
+| KPI numbers (regular) | Inter | 32-40px | 700 |
+| KPI numbers (projection) | Inter | 72-96px | 900 |
+| H1 (regular) | Inter | 24-28px | 600 |
+| H1 (projection) | Inter | 64-80px | 700 |
+| Hebrew (regular) | "Rubik", Inter, system | קצת יותר גדול | — |
+| Numbers (latin) | "JetBrains Mono", Inter | — | — |
+
+## 41. אנימציות — "Data Jumping"
+
+### 41.1 כרטיס כיתה — תלמיד מקבל סטטוס חדש
+
+```
+מצב התחלתי:  אפור, scale 1.0, opacity 1.0
+              ↓ (אירוע: response category changed)
+שלב 1 (0ms):  scale 0.92, opacity 0.6, color = new color
+שלב 2 (120ms): scale 1.08, opacity 1.0
+שלב 3 (240ms): scale 1.0
+```
+
+framer-motion:
+```tsx
+<motion.div
+  layout
+  initial={false}
+  animate={{ scale: justChanged ? [1, 0.92, 1.08, 1] : 1 }}
+  transition={{ duration: 0.3 }}
+  style={{ backgroundColor: categoryColor }}
+/>
+```
+
+### 41.2 KPI Numbers — countup
+
+`react-countup` או custom — כל פעם שהמספר משתנה, אנימציה של 600ms.
+
+### 41.3 Heatmap blocks — fill animation
+
+עם CSS transition: `transition: background-color 400ms ease-out`.
+
+### 41.4 Map markers — pulse on new
+
+`@keyframes pulse-marker` — ring around marker, fades in 200ms.
+
+### 41.5 Activity Feed — slide in
+
+חדש נכנס מלמעלה, ישן יורד למטה — framer-motion `<AnimatePresence>`.
+
+### 41.6 Alert — flash + shake
+
+קוביית כיתה: animate בורדר אדום מהבהב 3 פעמים (300ms total) + screen edge flash (10ms red bar בכל הצדדים).
+
+---
+
+## 42. צלילים / Haptic / התראות
+
+### 42.1 קבצי סאונד (לאחסן ב־`public/sounds/`):
+
+| אירוע | סאונד | משך | עוצמה |
+|--------|--------|-----|--------|
+| תלמיד התווסף (response חדש) | `chime-soft.mp3` | 200ms | 30% |
+| התראת מרחק (ORANGE) | `ding.mp3` | 400ms | 50% |
+| אזעקה (RED) | `alert.mp3` | 800ms | 70% |
+| ביקורת התחילה (בצד תלמיד) | `notification.mp3` | 300ms | 60% |
+| ביקורת סגורה | `complete.mp3` | 500ms | 40% |
+
+`howler.js` מנהל את כל הסאונדים. עם volume control גלובלי + mute switch.
+
+### 42.2 Haptic (נייד)
+
+`navigator.vibrate(...)`:
+- תלמיד מקבל בקשה: vibrate(150)
+- תלמיד שלח GPS בהצלחה: vibrate([50, 50, 50])
+- רכז מסמן: vibrate(50)
+
+---
+
+## 43. מצב חושך/אור
+
+כל הצבעים יש להם variants ב־CSS variables. הדשבורד עובד אוטומטית בשני המצבים.
+- מצב הקרנה תמיד חושך (גם אם המשתמש בחר light).
+
+---
+
+## 44. RTL ושפה
+
+- כל הטקסטים בעברית.
+- `dir="rtl"` על `<html>`.
+- Tailwind: שימוש ב־`start`/`end` במקום `left`/`right`.
+- מספרים נשארים שמאל לימין (LTR enclave): `<span dir="ltr">123</span>` במידת הצורך.
+- אייקונים: מיקום פלוס תלוי הקשר — חצי "→" הופך "←" בעברית.
+
+---
+
+# חלק ט׳ — Post-Audit
+
+## 45. מסך סיכום מיידי
+
+ברגע סגירת ביקורת, modal מודאלי מקפיץ (לא navigate):
+
+```
+┌──────────────────────────────────────────────────────────┐
+│              ✅ ביקורת הסתיימה                            │
+│              משך: 04:23                                   │
+│              לפי שעון: 09:15-09:19                        │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│   ┌────────────────────────────┐                         │
+│   │       372 / 381           │                         │
+│   │       בישיבה (97.6%)       │                         │
+│   └────────────────────────────┘                         │
+│                                                          │
+│   🔵  6 בחוץ עם אישור                                    │
+│   🔴  3 בחוץ בלי אישור   [פרטים →]                       │
+│   ⚪  0 לא ידוע                                          │
+│                                                          │
+│   ⚠ 1 אזעקה — יהושע ברק (38 ק"מ)  [פתח →]                │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│        [סגור]              [פתח דוח מלא →]              │
+└──────────────────────────────────────────────────────────┘
+```
+
+## 46. דף "ביקורות קודמות"
+
+`/admin/audit` — דף נחיתה:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  ←  ביקורות                                              │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│        [⚡ פתח ביקורת חדשה]                              │
+│                                                          │
+│  סנן: [כל המצבים ▼] [30 ימים אחרונים ▼] [חפש]            │
+│                                                          │
+│  ────── שני, 15 מאי 2026 ─────                          │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │ 📍 09:15  ביקורת מיקום  04:23  16 כיתות           │ │
+│  │ 372/381 בישיבה (97.6%)  1 אזעקה  [פתח →]           │ │
+│  └────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │ ⚡ 13:30  ביקורת מהירה  01:50  16 כיתות            │ │
+│  │ 378/381 בישיבה (99.2%)  [פתח →]                    │ │
+│  └────────────────────────────────────────────────────┘ │
+│                                                          │
+│  ────── ראשון, 14 מאי 2026 ─────                        │
+│  ...                                                     │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+## 47. השוואה בין ביקורות
+
+```
+/admin/audit/compare?ids=A,B,C
+```
+
+טבלת השוואה: כל ביקורת בעמודה. שורות = KPIs:
+
+```
+┌──────────────────────┬────────┬────────┬────────┐
+│  KPI                 │ 09:15  │ 13:30  │ 14/05  │
+│                      │ מיקום  │ מהיר   │ מיקום  │
+├──────────────────────┼────────┼────────┼────────┤
+│ בישיבה               │ 372    │ 378    │ 374    │
+│ בחוץ עם אישור        │ 6      │ 2      │ 5      │
+│ בחוץ בלי אישור       │ 3      │ 1      │ 2      │
+│ לא ידוע              │ 0      │ 0      │ 0      │
+│ אזעקות (>5km)        │ 1      │ —      │ 0      │
+│ אחוז הגבה (mode 2)   │ 92%    │ —      │ 95%    │
+└──────────────────────┴────────┴────────┴────────┘
+```
+
+גרף קווי: נוכחות לפי זמן.
+
+## 48. ייצוא PDF / Excel
+
+- **PDF** (jspdf + autoTable): דוח מלא — KPI, רשימת תלמידים, אזעקות, מפת snapshot (אם mode=LOCATION).
+- **Excel** (xlsx): גליון per category, גליון לכל הסשנים בטווח.
+
+---
+
+# חלק י׳ — הרשאות וביטחון
+
+## 49. תפקידים והרשאות
+
+| פעולה | מנהל | רכז | תלמיד |
+|--------|------|------|--------|
+| לפתוח ביקורת מהירה | ✅ | ❌ (החלטה: רק admin) | ❌ |
+| לפתוח ביקורת מיקום | ✅ | ❌ | ❌ |
+| לראות ביקורת חיה | ✅ (כולה) | ✅ (כיתה שלו) | ✅ (Sheet) |
+| לסמן תלמיד | ✅ | ✅ (כיתה שלו) | ❌ |
+| לסגור ביקורת | ✅ | ❌ | ❌ |
+| לראות היסטוריה | ✅ (כולה) | ✅ (כיתה שלו) | ❌ |
+| להשוות ביקורות | ✅ | ❌ | ❌ |
+| לאשר אזעקה | ✅ | ✅ (כיתה שלו) | ❌ |
+
+## 50. RLS Policies
+
+(לאפליקציה לאחר ש־RLS יופעל בעתיד — TODO ב־CLAUDE.md):
+
+```sql
+-- audit_sessions: רק admin יכול ליצור/לעדכן/למחוק. כולם יכולים לקרוא ACTIVE.
+ALTER TABLE audit_sessions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "audit_sessions: read all"
+  ON audit_sessions FOR SELECT
+  USING (true);
+
+CREATE POLICY "audit_sessions: admin write"
+  ON audit_sessions FOR INSERT
+  WITH CHECK (auth.jwt() ->> 'role' = 'admin');
+
+-- audit_responses: רכז יכול לעדכן רק תלמידים בכיתה שלו.
+-- (PIN-based system, RLS not enforced yet — TODO)
+```
+
+## 51. PII והגנת פרטיות
+
+- **GPS נשמר רק במהלך ביקורת ACTIVE + 30 ימים אחרי**. cron מוחק.
+- **הסכמה מתועדת**: ה־`audit_responses.gps_status` שומר `DENIED` אם תלמיד דחה — לא הופך אותו "אשם".
+- **הצגה לרכז**: הרכז רואה מרחק של תלמיד שלו (לא קואורדינטה מדויקת ברירת מחדל).
+- **Audit log**: כל פעולה של אדמין/רכז נכנסת ל־`admin_overrides` (קיים).
+
+---
+
+# חלק י"א — GPS Engineering
+
+## 52. בקשת הרשאת geolocation
+
+יותר מתחכמת מהקוד הקיים:
+
+```ts
+// פסאודו-קוד (לא ליישום עכשיו)
+async function collectAuditGPS(sessionId: string): Promise<AuditGpsResult> {
+  // 1. בדוק אם permission כבר אושר
+  const perm = await navigator.permissions.query({ name: 'geolocation' })
+  if (perm.state === 'denied') {
+    return { status: 'DENIED' }
+  }
+
+  // 2. אם prompt — הצג UI הסבר קודם
+  if (perm.state === 'prompt') {
+    const userConsents = await showExplainerDialog()
+    if (!userConsents) return { status: 'DENIED' }
+  }
+
+  // 3. אסוף עם high accuracy, no cache
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ status: 'TIMEOUT' }), 15000)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        clearTimeout(timer)
+        resolve({
+          status: 'OK',
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy_m: pos.coords.accuracy,
+        })
+      },
+      (err) => {
+        clearTimeout(timer)
+        if (err.code === 1) resolve({ status: 'DENIED' })
+        else if (err.code === 2) resolve({ status: 'UNAVAILABLE' })
+        else resolve({ status: 'TIMEOUT' })
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    )
+  })
+}
+```
+
+## 53. בקרת איכות — accuracy filter
+
+- אם `accuracy_m > 200` (רדיוס שגיאה גדול מ־200m): מסמן בעמודה אבל ה־UI מציג ⚠ דגל קטן.
+- אם `accuracy_m > 1000` (אזור מאוד גס): מסומן כ־`UNKNOWN` ו־gps_status=`LOW_ACCURACY`.
+
+## 54. חישוב Haversine
+
+מיושם ב־DB (RPC, ראה למעלה) — גם בצד client לתצוגה מקדימה:
+
+```ts
+function haversine(lat1, lng1, lat2, lng2): number {
+  const R = 6371000
+  const toRad = (d) => d * Math.PI / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLng/2)**2
+  return R * 2 * Math.asin(Math.sqrt(a))
+}
+```
+
+## 55. קטגוריזציה לפי מרחק
+
+תואם להגדרת המנהל:
+
+```
+GREEN:   0   – 300m   (בישיבה)
+BLUE:    300 – 1000m  (קרוב — אזור הישיבה)
+ORANGE:  1km – 5km    (אזור חברון — חוץ מהישיבה)
+RED:     > 5km        (אזעקה — רחוק)
+```
+
+ב־`src/lib/audit/distanceBuckets.ts`:
+```ts
+export const BUCKETS = {
+  GREEN: { max: 300, color: 'green', label: 'בישיבה' },
+  BLUE:  { max: 1000, color: 'blue', label: 'באזור הישיבה' },
+  ORANGE:{ max: 5000, color: 'orange', label: 'אזור חברון' },
+  RED:   { max: Infinity, color: 'red', label: 'מחוץ לטווח' },
+}
+```
+
+## 56. ניהול שגיאות GPS
+
+| code | משמעות | פעולה |
+|------|---------|--------|
+| 1 PERMISSION_DENIED | תלמיד דחה | `gps_status='DENIED'` — רכז יחליט |
+| 2 POSITION_UNAVAILABLE | מכשיר ללא GPS | `gps_status='UNAVAILABLE'` |
+| 3 TIMEOUT | לא חזר בזמן | `gps_status='TIMEOUT'` |
+| custom OFFLINE | אין רשת | `gps_status='OFFLINE'` — נשמר ב־IndexedDB, ישלח כשיחזור |
+
+---
+
+# חלק י"ב — Push & Realtime
+
+## 57. Web Push מורחב
+
+קיים: `send-push` edge function (VAPID + AES-128-GCM). נצטרך:
+- **`send-audit-push`** (חדש) — אותו מנגנון, אבל payload ייעודי לביקורת.
+- **כשל push (HTTP 410):** ננקה את ה־push_token. תלמיד יקבל בקשה רק ברגע שייכנס לאפליקציה.
+- **Service Worker:** עדכון ל־`public/sw.js` — אם payload.kind === 'AUDIT_LOCATION', נציג notification עם ButtonAction "פתח".
+
+## 58. Channels — תכנון מלא
+
+| Channel | Pub | Sub | Filter |
+|---------|-----|-----|---------|
+| `audit:active` | DB | Manager UI | — (1 active session) |
+| `audit_responses` | DB | Manager UI | session_id=eq.X |
+| `audit_responses` | DB | Supervisor UI | session_id=eq.X AND class_id=eq.Y |
+| `audit_alerts` | DB | Manager UI | session_id=eq.X |
+
+Realtime subscription pattern:
+```ts
+const channel = supabase
+  .channel(`audit:${sessionId}`)
+  .on('postgres_changes', {
+    event: 'UPDATE',
+    schema: 'public',
+    table: 'audit_responses',
+    filter: `session_id=eq.${sessionId}`
+  }, (payload) => {
+    auditStore.handleResponseUpdate(payload.new)
+  })
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'audit_alerts',
+    filter: `session_id=eq.${sessionId}`
+  }, (payload) => {
+    auditStore.handleAlertInsert(payload.new)
+    soundManager.play('alert')
+  })
+  .subscribe()
+```
+
+## 59. Reconnection / Heartbeat
+
+- Supabase ריאלטיים מתחבר מחדש אוטומטית.
+- אבל אם UI היה offline > 30 שניות: ה־Hook יבצע re-fetch של `get_audit_full(sessionId)` כדי לסנכרן.
+- Heartbeat: כל 30 שניות, אם realtime לא קיבל שום אירוע, fallback ל־polling.
+
+---
+
+# חלק י"ג — Testing
+
+## 60. תרחישי QA
+
+| # | תרחיש | תוצאה צפויה |
+|---|--------|---------------|
+| T1 | מנהל פותח ביקורת מהירה לכל הכיתות | session ACTIVE + 381 responses PENDING |
+| T2 | רכז מסמן 5 תלמידים, ריענון | 5 הסימונים נשמרו, UI חוזר למצב המעודכן |
+| T3 | מנהל סוגר ביקורת באמצע | כל PENDING הופך UNKNOWN, session CLOSED, סיכום מוצג |
+| T4 | תלמיד 1 שולח GPS 50m, תלמיד 2 שולח 4000m | תלמיד 1 → IN_YESHIVA, תלמיד 2 → OUT_NO_PERMIT + ALERT (אם sensitivity מספקת) |
+| T5 | תלמיד דוחה GPS | gps_status=DENIED, category=UNKNOWN |
+| T6 | תלמיד ב־OFF_CAMPUS עם departure ACTIVE | category=OUT_PERMIT אוטומטית |
+| T7 | רכז עורך תלמיד שכבר GPS סימן | log רושם שינוי, ה־UI מציג שינוי לרכז |
+| T8 | 2 מנהלים פותחים בו זמנית | השני מקבל "AUDIT_ACTIVE" — חוזר לדף שלו |
+| T9 | המנהל מחליף Tab → Heatmap → Map | tab נשמר ב־uiStore (זמני) |
+| T10 | המנהל פותח projection mode | full-screen, רוטציה אחרי 12 שניות |
+| T11 | יוצא מ־projection (ESC) | חוזר לדשבורד הרגיל |
+| T12 | אזעקה RED נוצרת | קוביית הכיתה מהבהבת + ding + Modal יזום למנהל |
+| T13 | רכז מסמן EXCUSED_SICK | category=EXCUSED_SICK, סגול |
+| T14 | מנהל ייצא PDF | קובץ נוצר עם כל הפרטים |
+
+## 61. Edge cases ידועים
+
+1. **תלמיד עם 2 מכשירים** — UPSERT, האחרון מנצח.
+2. **רכז בלי push** — fallback ל־Realtime broadcast.
+3. **timeout GPS על נייד ישן** — חוזר אחרי 15s עם status=TIMEOUT.
+4. **רשת איטית** — Optimistic UI, RPC ברקע, rollback אם נכשל.
+
+## 62. Load testing
+
+- 381 תלמידים שולחים GPS באותה שנייה.
+- Postgres triggers צריכים להתמודד.
+- ביצועי Realtime — Supabase תומך עד ~200 conn/sec.
+
+---
+
+# חלק י"ד — Step-by-Step Roadmap
+
+זה החלק החשוב ביותר במסמך. כל צעד מסומן עם:
+- **תלות** (אילו צעדים קודמים)
+- **קבצים** (אילו קבצים נוגעים)
+- **תוצרים** (מה נוצר/השתנה)
+- **בדיקות** (כיצד לוודא שעבד)
+
+---
+
+## שלב 0 — הכנות סביבה (1-2 ימים)
+
+### 0.1 גיבוי
+- [ ] Snapshot של DB ב־Supabase Dashboard (לפני שינויי schema).
+- [ ] Tag git: `v1-before-audit-rewrite`.
+- [ ] **תוצרים:** backup ID, git tag.
+
+### 0.2 ספריות
+- [ ] `npm install leaflet react-leaflet leaflet.markercluster howler jspdf jspdf-autotable`
+- [ ] `npm install -D @types/leaflet @types/howler`
+- [ ] עדכון `package.json`, `package-lock.json`.
+
+### 0.3 קובץ סוגים
+- [ ] צור `src/types/audit.ts` עם:
+  - `AuditMode = 'MANUAL' | 'LOCATION'`
+  - `AuditSessionStatus = 'ACTIVE' | 'CLOSED' | 'ABORTED' | 'TIMED_OUT'`
+  - `AuditCategory = 'PENDING' | 'IN_YESHIVA' | 'OUT_PERMIT' | 'OUT_NO_PERMIT' | 'UNKNOWN' | 'EXCUSED_SICK'`
+  - `DistanceBucket = 'GREEN' | 'BLUE' | 'ORANGE' | 'RED'`
+  - `AuditSession`, `AuditResponse`, `AuditAlert` interfaces.
+
+### 0.4 קבצי הגדרה
+- [ ] צור `src/lib/audit/categories.ts` (תווית עברית + צבע + אייקון לכל קטגוריה).
+- [ ] צור `src/lib/audit/distanceBuckets.ts` (סף + צבע + תווית).
+- [ ] צור `src/lib/audit/haversine.ts` (פונקציה).
+
+---
+
+## שלב 1 — DB Schema (1-2 ימים)
+
+### 1.1 כתיבת migration
+- [ ] צור `supabase/migrations/20260516_internal_audit_v2.sql` עם:
+  - יצירת 4 הטבלאות.
+  - יצירת 4 indices.
+  - יצירת 2 triggers.
+  - ALTER PUBLICATION supabase_realtime.
+
+### 1.2 הרצה ב־DB
+- [ ] הרץ ב־Supabase Dashboard SQL Editor.
+- [ ] ודא בקליק שהטבלאות נוצרו (`list_tables` MCP).
+
+### 1.3 בדיקה ידנית
+- [ ] INSERT שורת test ל־audit_sessions.
+- [ ] INSERT שורת test ל־audit_responses.
+- [ ] UPDATE category → ודא ש־audit_response_log התעדכן.
+- [ ] UPDATE עם distance_bucket=RED → ודא ש־audit_alerts התעדכן.
+- [ ] DELETE ה־session → ודא CASCADE.
+
+---
+
+## שלב 2 — RPC Functions (2-3 ימים)
+
+### 2.1 RPC: `open_audit`
+- [ ] כתוב SQL function (חתימה + לוגיקה מלאה — ראה סעיף 28.1).
+- [ ] בדיקה: קרא ל־RPC עם class_ids=['כיתה הרב הלל'], mode='MANUAL' — ודא ש־16 שורות responses נוצרו.
+- [ ] בדיקה: תלמיד עם departure ACTIVE → category=OUT_PERMIT אוטומטית.
+
+### 2.2 RPC: `submit_audit_response`
+- [ ] כתוב SQL function (ראה 28.2).
+- [ ] בדיקה: submit עם GPS 50m → category=IN_YESHIVA, bucket=GREEN.
+- [ ] בדיקה: submit עם GPS 6000m → category=OUT_NO_PERMIT, bucket=RED, alert נוצר.
+- [ ] בדיקה: submit עם gps_status='DENIED' → category=UNKNOWN.
+- [ ] בדיקה: submit לסשן לא ACTIVE → error.
+
+### 2.3 RPC: `close_audit`
+- [ ] כתוב SQL function.
+- [ ] בדיקה: PENDING הופכים ל־UNKNOWN, status=CLOSED, closed_at מולא.
+
+### 2.4 RPC: `get_active_audit` + `get_audit_full`
+- [ ] כתוב 2 functions.
+- [ ] בדיקה: get_active מחזיר session אחד או null.
+
+### 2.5 RPC: `acknowledge_audit_alert`
+- [ ] כתוב function.
+- [ ] בדיקה: alert.acknowledged_by התעדכן.
+
+### 2.6 cron: `tick_audit_timeout`
+- [ ] כתוב function.
+- [ ] רישום pg_cron `SELECT cron.schedule('tick_audit_timeout', '*/5 * * * *', 'SELECT tick_audit_timeout()')`.
+
+### 2.7 TypeScript types
+- [ ] הרץ `supabase gen types typescript` או הוסף ידנית ב־`src/lib/api/types.ts`.
+
+---
+
+## שלב 3 — Edge Functions (1-2 ימים)
+
+### 3.1 `send-audit-push`
+- [ ] צור `supabase/functions/send-audit-push/index.ts` — בסיס מ־`send-push` הקיים.
+- [ ] קלט: `{ session_id, target, class_ids }`.
+- [ ] לוגיקה: שלוף push_tokens, שלח VAPID, חזור עם stats.
+- [ ] Deploy: `supabase functions deploy send-audit-push`.
+- [ ] בדיקה: קרא לפונקציה, ראה Push מגיע למכשיר.
+
+### 3.2 `send-audit-reminder`
+- [ ] צור edge function דומה, אבל לרכז ספציפי.
+
+---
+
+## שלב 4 — API Client (1 יום)
+
+### 4.1 `IApiClient` הרחבה
+- [ ] הוסף ל־`src/lib/api/types.ts`:
+  ```ts
+  openAudit(mode, classIds, settings?): Promise<...>
+  submitAuditResponse(...): Promise<...>
+  closeAudit(id, note?): Promise<...>
+  getActiveAudit(): Promise<...>
+  getAuditFull(id): Promise<...>
+  acknowledgeAuditAlert(id, note?): Promise<...>
+  listPastAudits(filters?): Promise<...>
+  ```
+
+### 4.2 supabaseClient
+- [ ] יישם בכל הפונקציות (rpc.invoke + functions.invoke לפי הצורך).
+
+### 4.3 mockClient
+- [ ] יישם stubs לצורך פיתוח offline / tests.
+
+---
+
+## שלב 5 — Frontend Stores + Hooks (2 ימים)
+
+### 5.1 auditStore
+- [ ] צור `src/store/auditStore.ts` עם state + actions (ראה 33.1).
+- [ ] בלי persist (DB הוא source).
+
+### 5.2 auditUiStore
+- [ ] צור `src/store/auditUiStore.ts` (ראה 33.2).
+- [ ] עם persist רק על `activeTab` ו־`projectionMode`.
+
+### 5.3 useActiveAudit
+- [ ] צור hook, ב־mount קורא ל־getActiveAudit + מנוי realtime.
+- [ ] בדיקה: עליית page → store מתעדכן.
+
+### 5.4 useAuditResponses, useAuditAlerts
+- [ ] צור hooks עם Realtime subscription.
+- [ ] בדיקה: עדכון ב־DB → store מתעדכן.
+
+### 5.5 useAuditLocationCollector
+- [ ] לתלמיד. ב־mount: בודק active session + צריך GPS → מציג Sheet.
+- [ ] בדיקה: simulate active LOCATION audit → Sheet נפתח.
+
+### 5.6 useProjectionRotation
+- [ ] timer rotation. paused on user click.
+
+---
+
+## שלב 6 — Components (3-4 ימים)
+
+### 6.1 רכיבי בסיס
+- [ ] `AuditCategoryChip.tsx` — chip בצבע מתאים, אייקון.
+- [ ] `AuditDistanceBadge.tsx` — badge מציג מרחק + bucket color.
+
+### 6.2 רכיבים מורכבים
+- [ ] `AuditKpiRow.tsx` — שורת KPI עם countup.
+- [ ] `AuditClassCard.tsx` — כרטיס כיתה עם פס התקדמות.
+- [ ] `AuditClassGrid.tsx` — grid responsive 1/2/3/4 columns.
+- [ ] `AuditHeatmap.tsx` — heatmap blocks per class, color gradient.
+- [ ] `AuditActivityFeed.tsx` — stream של אירועים עם AnimatePresence.
+- [ ] `AuditAlertList.tsx`, `AuditAlertModal.tsx`.
+
+### 6.3 מפה
+- [ ] `AuditMap.tsx` — Leaflet + 4 circles (300m, 1km, 5km, > 5km).
+- [ ] `AuditMapMarker.tsx` — marker עם pulse animation.
+- [ ] `AuditMapCluster.tsx` — markercluster wrapper.
+
+### 6.4 רכיבי פתיחה
+- [ ] `AuditModeSelector.tsx` — בחירה בין MANUAL / LOCATION.
+- [ ] `AuditClassSelector.tsx` — רשימת כיתות עם תיבות סימון.
+- [ ] `AuditLocationSettings.tsx` — timeout + sensitivity + push target.
+
+### 6.5 רכיבי רכז + תלמיד
+- [ ] `SupervisorAuditPanel.tsx`.
+- [ ] `SupervisorStudentRow.tsx`.
+- [ ] `StudentAuditSheet.tsx` — Bottom Sheet עם "אשר ושלח".
+
+### 6.6 מצב הקרנה
+- [ ] `AuditProjectionMode.tsx` — overlay full-screen.
+
+### 6.7 רכיבי סיכום
+- [ ] `AuditSummaryModal.tsx`, `AuditSummaryStats.tsx`.
+- [ ] `AuditComparePage.tsx`.
+
+---
+
+## שלב 7 — Pages + Routing (2 ימים)
+
+### 7.1 דפים חדשים
+- [ ] `AuditLandingPage.tsx` — `/admin/audit`.
+- [ ] `AuditNewPage.tsx` — `/admin/audit/new`.
+- [ ] `AuditLivePage.tsx` — `/admin/audit/:id/live`.
+- [ ] `AuditSummaryPage.tsx` — `/admin/audit/:id/summary`.
+- [ ] `AuditComparePage.tsx` — `/admin/audit/compare`.
+
+### 7.2 רכז
+- [ ] `SupervisorAuditPage.tsx` — `/class-supervisor/audit/:id` (אם יש active).
+
+### 7.3 תלמיד
+- [ ] הוסף `<StudentAuditSheet>` ל־`StudentLayout` — מופיע אוטומטית כשיש active LOCATION audit.
+
+### 7.4 Routing
+- [ ] עדכן `src/App.tsx` עם הניתובים החדשים.
+- [ ] הסר את הניתוב הישן `/admin/rollcall` או redirect ל־`/admin/audit`.
+
+---
+
+## שלב 8 — Service Worker + Push integration (1 יום)
+
+### 8.1 SW
+- [ ] עדכן `public/sw.js` להתמודד עם `kind: 'AUDIT_LOCATION'`.
+- [ ] notification.actions: [{ action: 'open', title: 'פתח' }].
+- [ ] על click: `clients.openWindow('/student?audit=' + session_id)`.
+
+### 8.2 Client listener
+- [ ] ב־StudentLayout, hook שמאזין ל־message מה־SW.
+- [ ] open Sheet אוטומטית.
+
+---
+
+## שלב 9 — עיצוב, אנימציות, סאונדים (2-3 ימים)
+
+### 9.1 CSS variables
+- [ ] הוסף את משתני הצבע ב־`src/index.css` (ראה 39).
+
+### 9.2 Tailwind config
+- [ ] הוסף עזרים: `bg-audit-green`, `text-audit-red`, וכו'.
+
+### 9.3 אנימציות
+- [ ] התקן `framer-motion` (אם לא קיים).
+- [ ] יישם animation על AuditClassCard ב־category change.
+- [ ] יישם CountUp על KPI numbers.
+
+### 9.4 סאונדים
+- [ ] הוסף קבצים ל־`public/sounds/`.
+- [ ] צור `src/lib/audit/soundManager.ts` (Howler wrapper).
+
+### 9.5 Projection mode
+- [ ] CSS class ייעודי (large fonts, black bg, accent colors).
+- [ ] auto rotation 6-12 sec per tab.
+
+---
+
+## שלב 10 — ייצוא + השוואות (1-2 ימים)
+
+### 10.1 ייצוא PDF
+- [ ] צור `src/lib/audit/exportPdf.ts` — jspdf + autoTable.
+- [ ] כפתור "📄 ייצא PDF" ב־AuditSummaryPage.
+
+### 10.2 ייצוא Excel
+- [ ] צור `src/lib/audit/exportExcel.ts` — xlsx.
+
+### 10.3 השוואה
+- [ ] `AuditComparePage.tsx` עם טבלה דינמית + גרף recharts.
+
+---
+
+## שלב 11 — בדיקות סוף-לסוף (2 ימים)
+
+### 11.1 ידני
+- [ ] רץ דרך כל T1-T14 (ראה סעיף 60).
+- [ ] בדוק refresh במנהל באמצע ביקורת.
+- [ ] בדוק refresh ברכז.
+- [ ] בדוק refresh בתלמיד.
+
+### 11.2 חישוב מרחק
+- [ ] השווה client-side haversine למה ש־DB מחזיר. צריך להיות זהה.
+
+### 11.3 Load
+- [ ] simulate 381 GPS responses ב־5 שניות (script). ודא ש־UI לא קורס.
+
+### 11.4 Push
+- [ ] בדוק בנייד אמיתי שה־Push מגיע ופותח את האפליקציה.
+
+---
+
+## שלב 12 — תיעוד ועדכון CLAUDE.md (1 יום)
+
+### 12.1 עדכון CLAUDE.md
+- [ ] הוסף סעיף 21: "Audit Sessions" עם כל הכללים החדשים.
+- [ ] עדכן סעיף 12 (GPS) — להגיד שעכשיו GPS אוסף גם בביקורת מיקום, לא רק RollCall.
+- [ ] הסר הזכרות של "RollCall" — שנה ל"Audit".
+
+### 12.2 README / docs
+- [ ] תוסיף הוראות הפעלה ביקורת.
+
+### 12.3 GoogleAppsScript
+- [ ] לוודא שאין תלות בטבלאות חדשות.
+
+---
+
+## שלב 13 — Deploy + Monitor (חצי יום)
+
+### 13.1 Pre-deploy
+- [ ] `npm run build` — ודא ללא שגיאות.
+- [ ] `npm run lint` — נקי.
+- [ ] `npm run test` (אם יש).
+
+### 13.2 Deploy
+- [ ] push לבעצה.
+- [ ] Vercel: בודק שה־deploy עלה.
+- [ ] Supabase: כל המיגרציות חלות.
+
+### 13.3 Monitor
+- [ ] בדוק logs ב־Vercel + Supabase 30 דק' אחרי.
+- [ ] בדוק רמת CPU של DB.
+- [ ] ודא שאין spike של errors.
+
+---
+
+## שלב 14 — User Acceptance (1-2 ימים)
+
+### 14.1 הכשרת מנהל
+- [ ] הראה למנהל איך לפתוח ביקורת מהירה.
+- [ ] הראה איך לפתוח ביקורת מיקום.
+- [ ] הראה מצב הקרנה.
+
+### 14.2 הכשרת רכזים
+- [ ] שלח רכזים ל־PIN שלהם, הסבר על המסך החדש.
+
+### 14.3 איסוף feedback
+- [ ] רוץ 3-4 ביקורות בפועל.
+- [ ] רשום נקודות לתיקון.
+- [ ] חזור על שלב 11 לפי הצורך.
+
+---
+
+# נספח A — דוגמת JSON של סשן חי
+
+```json
+{
+  "session": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "mode": "LOCATION",
+    "status": "ACTIVE",
+    "class_ids": ["כיתה הרב הלל", "כיתה הרב יעקב"],
+    "total_students": 41,
+    "started_by": "ADMIN:1234",
+    "started_at": "2026-05-15T09:15:00+03:00",
+    "settings": { "timeout_sec": 120, "sensitivity": "MEDIUM" },
+    "notes": "ביקורת בוקר"
+  },
+  "responses": [
+    {
+      "id": "r1",
+      "session_id": "550e8400-...",
+      "student_id": "s1",
+      "class_id": "כיתה הרב הלל",
+      "category": "IN_YESHIVA",
+      "marked_by": "AUTO_GPS",
+      "marked_at": "2026-05-15T09:15:23+03:00",
+      "gps_lat": 31.5251,
+      "gps_lng": 35.1058,
+      "gps_accuracy_m": 15,
+      "distance_from_campus_m": 32,
+      "distance_bucket": "GREEN",
+      "gps_status": "OK"
+    },
+    {
+      "id": "r2",
+      "student_id": "s5",
+      "category": "OUT_NO_PERMIT",
+      "marked_by": "AUTO_GPS",
+      "gps_lat": 31.7,
+      "gps_lng": 34.9,
+      "distance_from_campus_m": 38500,
+      "distance_bucket": "RED",
+      "gps_status": "OK"
+    }
+  ],
+  "alerts": [
+    {
+      "id": "a1",
+      "session_id": "550e8400-...",
+      "student_id": "s5",
+      "triggered_at": "2026-05-15T09:15:24+03:00",
+      "distance_m": 38500,
+      "gps_lat": 31.7,
+      "gps_lng": 34.9
+    }
+  ],
+  "kpis": {
+    "by_category": {
+      "IN_YESHIVA": 38,
+      "OUT_PERMIT": 1,
+      "OUT_NO_PERMIT": 1,
+      "UNKNOWN": 1,
+      "PENDING": 0
+    },
+    "by_class": {
+      "כיתה הרב הלל": { "total": 16, "marked": 16, "alerts": 0 },
+      "כיתה הרב יעקב": { "total": 25, "marked": 25, "alerts": 1 }
+    },
+    "by_distance_bucket": {
+      "GREEN": 38,
+      "BLUE": 1,
+      "ORANGE": 0,
+      "RED": 1
+    }
+  }
+}
+```
+
+---
+
+# נספח B — דוגמת DDL מלאה
+
+(ראה סעיף 27 — כבר מלא)
+
+---
+
+# נספח C — דוגמת חתימות TypeScript
+
+```ts
+// src/types/audit.ts
+
+export type AuditMode = 'MANUAL' | 'LOCATION'
+
+export type AuditSessionStatus = 'ACTIVE' | 'CLOSED' | 'ABORTED' | 'TIMED_OUT'
+
+export type AuditCategory =
+  | 'PENDING'
+  | 'IN_YESHIVA'
+  | 'OUT_PERMIT'
+  | 'OUT_NO_PERMIT'
+  | 'UNKNOWN'
+  | 'EXCUSED_SICK'
+
+export type DistanceBucket = 'GREEN' | 'BLUE' | 'ORANGE' | 'RED'
+
+export type GpsStatus = 'OK' | 'DENIED' | 'TIMEOUT' | 'OFFLINE' | 'UNAVAILABLE'
+
+export interface AuditSession {
+  id: string
+  mode: AuditMode
+  status: AuditSessionStatus
+  classIds: string[]
+  totalStudents: number
+  startedBy: string
+  startedAt: string
+  closedAt?: string
+  notes?: string
+  settings: {
+    timeoutSec?: number
+    sensitivity?: 'LOW' | 'MEDIUM' | 'HIGH'
+    pushTarget?: 'STUDENTS' | 'SUPERVISORS' | 'BOTH'
+  }
+}
+
+export interface AuditResponse {
+  id: string
+  sessionId: string
+  studentId: string
+  classId: string
+  category: AuditCategory
+  markedBy?: string
+  markedAt?: string
+  gpsLat?: number
+  gpsLng?: number
+  gpsAccuracyM?: number
+  distanceFromCampusM?: number
+  distanceBucket?: DistanceBucket
+  gpsStatus?: GpsStatus
+  departureId?: string
+  note?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuditAlert {
+  id: string
+  sessionId: string
+  studentId: string
+  triggeredAt: string
+  distanceM: number
+  gpsLat?: number
+  gpsLng?: number
+  acknowledgedBy?: string
+  acknowledgedAt?: string
+  note?: string
+}
+
+// API client extension:
+export interface IAuditApiClient {
+  openAudit(mode: AuditMode, classIds: string[], settings?: AuditSession['settings'], notes?: string): Promise<{ sessionId: string; totalStudents: number }>
+  submitAuditResponse(sessionId: string, studentId: string, payload: Partial<AuditResponse>): Promise<{ responseId: string; category: AuditCategory }>
+  closeAudit(sessionId: string, notes?: string): Promise<{ summary: AuditSummary }>
+  getActiveAudit(): Promise<{ session: AuditSession; responses: AuditResponse[]; alerts: AuditAlert[] } | null>
+  getAuditFull(sessionId: string): Promise<{ session: AuditSession; responses: AuditResponse[]; alerts: AuditAlert[] }>
+  acknowledgeAuditAlert(alertId: string, note?: string): Promise<void>
+  listPastAudits(filters?: { mode?: AuditMode; since?: string; until?: string }): Promise<AuditSession[]>
+}
+```
+
+---
+
+# נספח D — דוגמת UI Components Hierarchy
+
+```tsx
+// src/pages/admin/AuditLivePage.tsx (sketch only — לא ליישום עכשיו)
+
+export function AuditLivePage() {
+  const { id } = useParams()
+  const { session, responses, alerts, loading } = useActiveAudit()
+  const { activeTab, setTab, projectionMode } = useAuditUiStore()
+
+  useAuditResponses(id!)
+  useAuditAlerts(id!)
+
+  if (loading) return <Skeleton />
+  if (!session || session.id !== id) return <Navigate to="/admin/audit" />
+
+  return (
+    <div className="audit-live-page">
+      <AuditHeader session={session} />
+      <AuditKpiRow responses={responses} />
+      <AuditTabs value={activeTab} onChange={setTab}>
+        <TabsList>
+          {session.mode === 'LOCATION' && <Tab value="map">🗺 מפה</Tab>}
+          <Tab value="heatmap">🔥 Heatmap</Tab>
+          <Tab value="grid">📊 Grid</Tab>
+          <Tab value="table">📋 טבלה</Tab>
+        </TabsList>
+        <TabsContent value="map"><AuditMap responses={responses} /></TabsContent>
+        <TabsContent value="heatmap"><AuditHeatmap responses={responses} classIds={session.classIds} /></TabsContent>
+        <TabsContent value="grid"><AuditClassGrid responses={responses} classIds={session.classIds} /></TabsContent>
+        <TabsContent value="table"><AuditTable responses={responses} /></TabsContent>
+      </AuditTabs>
+      <AuditAlertList alerts={alerts} />
+      <AuditActivityFeed responses={responses} />
+      <AuditCloseButton sessionId={session.id} />
+      {projectionMode && <AuditProjectionMode />}
+    </div>
+  )
+}
+```
+
+---
+
+# סיכום
+
+**תוכנית זו מכסה את כל מה שדרוש כדי לבנות את "ביקורת פנימית 2.0" מאפס:**
+
+- ✅ שני מצבי הפעלה (מהיר + מיקום)
+- ✅ שימור Refresh — DB כ־source of truth
+- ✅ Real-time בלי תקלות — Realtime + Push יחד
+- ✅ Heatmap + Map + Grid + Table — 4 תצוגות
+- ✅ מצב הקרנה — full-screen + רוטציה
+- ✅ אזעקות — בולטות + נשמרות
+- ✅ Manual mode — UX חדש לרכזים (מסומן אוטומטית מי שיש לו departure)
+- ✅ Location mode — איסוף GPS מתוכנן מחדש, accuracy filter
+- ✅ Permissions — admin / supervisor / student מובדלים
+- ✅ Historical — דף "ביקורות קודמות" + השוואה + ייצוא
+- ✅ Design system — צבעים, אנימציות, סאונדים, RTL
+- ✅ DB schema חדשה — 4 טבלאות + 2 triggers + 6 RPCs
+- ✅ Edge functions — push specific לביקורת
+- ✅ 14 שלבי roadmap, 80+ צעדים ספציפיים
+
+**זמן ביצוע משוער:** 18-25 ימי עבודה לפיתוח מלא + 2-3 ימי QA.
+
+**שלבי קריטיים בסדר עדיפויות:**
+1. **שלב 1+2 (DB + RPCs)** — תשתית. אסור לדלג שלבים.
+2. **שלב 6 (Components)** — הסיפור החזותי. ההשקעה הגדולה.
+3. **שלב 9 (אנימציות + סאונדים)** — מה שעושה את ה־"wow".
+4. **שלב 11 (בדיקות)** — אסור לדלג, לעולם.
+
+---
+
+> **מסמך זה נכתב כתוכנית עיון בלבד.** אין בו שינויי קוד. ברגע שמתחילים לקודד — עוקבים אחרי roadmap שלב אחרי שלב. לכל שלב יש בדיקות מובהקות לפני המעבר לשלב הבא.
+
+---
+# חלק ט"ו — קובץ Migration מלא של SQL
+
+> **הערה:** זה הקובץ המלא של מיגרציה. ניתן להעתיק אותו ל־`supabase/migrations/20260516000000_internal_audit_v2.sql` ולהריץ כמו שהוא. כל שורה מתוארת במלואה.
+
+```sql
+-- ============================================================
+-- INTERNAL AUDIT 2.0 — Full DB Migration
+-- File: supabase/migrations/20260516000000_internal_audit_v2.sql
+-- Author: Internal Audit Master Plan (planning artifact)
+-- Purpose: Replace the legacy ad-hoc RollCall flow with a fully
+--          persisted audit-session subsystem (manual + location).
+-- Safety:  Idempotent — all CREATE statements use IF NOT EXISTS.
+-- Order:   tables → indices → triggers → RPCs → cron → realtime
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 0. Extensions (no-op if already present)
+-- ------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";       -- gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS "pg_cron";        -- tick_audit_timeout schedule
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";        -- search by student name in audit table
+
+-- ------------------------------------------------------------
+-- 1. Tables
+-- ------------------------------------------------------------
+
+-- 1.1 audit_sessions: one row per audit. Forever-retained.
+CREATE TABLE IF NOT EXISTS public.audit_sessions (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    mode            TEXT        NOT NULL
+                                CHECK (mode IN ('MANUAL', 'LOCATION')),
+    status          TEXT        NOT NULL DEFAULT 'ACTIVE'
+                                CHECK (status IN ('ACTIVE','CLOSED','ABORTED','TIMED_OUT')),
+    class_ids       TEXT[]      NOT NULL CHECK (array_length(class_ids,1) > 0),
+    total_students  INT         NOT NULL CHECK (total_students >= 0),
+    started_by      TEXT        NOT NULL,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    closed_at       TIMESTAMPTZ,
+    closed_by       TEXT,
+    notes           TEXT,
+    settings        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_closed_after_started
+        CHECK (closed_at IS NULL OR closed_at >= started_at),
+    CONSTRAINT chk_settings_keys
+        CHECK (
+            settings ?| ARRAY['timeoutSec','sensitivity','pushTarget','showMap']
+            OR settings = '{}'::jsonb
+        )
+);
+
+COMMENT ON TABLE  public.audit_sessions IS 'One row per internal audit session.';
+COMMENT ON COLUMN public.audit_sessions.mode IS 'MANUAL=supervisor marks manually. LOCATION=GPS-based.';
+COMMENT ON COLUMN public.audit_sessions.status IS 'ACTIVE→CLOSED|ABORTED|TIMED_OUT.';
+COMMENT ON COLUMN public.audit_sessions.class_ids IS 'Denormalized list of class IDs included.';
+COMMENT ON COLUMN public.audit_sessions.settings IS 'JSONB: { timeoutSec, sensitivity, pushTarget, showMap }';
+
+-- 1.2 audit_responses: one row per student per session.
+CREATE TABLE IF NOT EXISTS public.audit_responses (
+    id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id               UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
+    student_id               UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    class_id                 TEXT        NOT NULL,
+    category                 TEXT        NOT NULL DEFAULT 'PENDING'
+                                         CHECK (category IN
+                                             ('PENDING','IN_YESHIVA','OUT_PERMIT','OUT_NO_PERMIT','UNKNOWN')),
+    marked_by                TEXT,
+    marked_at                TIMESTAMPTZ,
+    gps_lat                  DOUBLE PRECISION,
+    gps_lng                  DOUBLE PRECISION,
+    gps_accuracy_m           DOUBLE PRECISION,
+    distance_from_campus_m   DOUBLE PRECISION,
+    distance_bucket          TEXT        CHECK (distance_bucket IN ('GREEN','BLUE','ORANGE','RED')),
+    gps_status               TEXT        CHECK (gps_status IN
+                                             ('OK','DENIED','TIMEOUT','OFFLINE','UNAVAILABLE','LOW_ACCURACY')),
+    departure_id             UUID        REFERENCES public.departures(id),
+    note                     TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_audit_responses_student_session UNIQUE (session_id, student_id),
+    CONSTRAINT chk_gps_pair CHECK (
+        (gps_lat IS NULL AND gps_lng IS NULL)
+        OR (gps_lat BETWEEN -90 AND 90 AND gps_lng BETWEEN -180 AND 180)
+    ),
+    CONSTRAINT chk_accuracy_non_negative
+        CHECK (gps_accuracy_m IS NULL OR gps_accuracy_m >= 0),
+    CONSTRAINT chk_distance_non_negative
+        CHECK (distance_from_campus_m IS NULL OR distance_from_campus_m >= 0)
+);
+
+COMMENT ON TABLE  public.audit_responses IS 'Per-student response in an audit session.';
+
+-- 1.3 audit_response_log: full audit trail. INSERT-only.
+CREATE TABLE IF NOT EXISTS public.audit_response_log (
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    response_id    UUID        NOT NULL REFERENCES public.audit_responses(id) ON DELETE CASCADE,
+    session_id     UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
+    student_id     UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    from_category  TEXT,
+    to_category    TEXT        NOT NULL,
+    actor          TEXT        NOT NULL,
+    changed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 1.4 audit_alerts: one row per "out of range" event.
+CREATE TABLE IF NOT EXISTS public.audit_alerts (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id       UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
+    student_id       UUID        NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    triggered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    distance_m       DOUBLE PRECISION NOT NULL,
+    gps_lat          DOUBLE PRECISION,
+    gps_lng          DOUBLE PRECISION,
+    severity         TEXT        NOT NULL DEFAULT 'HIGH'
+                                 CHECK (severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+    acknowledged_by  TEXT,
+    acknowledged_at  TIMESTAMPTZ,
+    note             TEXT
+);
+
+-- 1.5 audit_push_log: trail of push notifications sent.
+CREATE TABLE IF NOT EXISTS public.audit_push_log (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id    UUID        NOT NULL REFERENCES public.audit_sessions(id) ON DELETE CASCADE,
+    target_kind   TEXT        NOT NULL CHECK (target_kind IN ('STUDENT','SUPERVISOR','BROADCAST')),
+    target_id     TEXT,
+    sent_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    success       BOOLEAN     NOT NULL,
+    error_message TEXT
+);
+
+-- ------------------------------------------------------------
+-- 2. Indices
+-- ------------------------------------------------------------
+-- Only one ACTIVE session at a time
+CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_sessions_one_active
+    ON public.audit_sessions ((1)) WHERE status = 'ACTIVE';
+
+CREATE INDEX IF NOT EXISTS ix_audit_sessions_status
+    ON public.audit_sessions (status);
+
+CREATE INDEX IF NOT EXISTS ix_audit_sessions_started_at
+    ON public.audit_sessions (started_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_audit_responses_session_category
+    ON public.audit_responses (session_id, category);
+
+CREATE INDEX IF NOT EXISTS ix_audit_responses_session_class
+    ON public.audit_responses (session_id, class_id, category);
+
+CREATE INDEX IF NOT EXISTS ix_audit_responses_student
+    ON public.audit_responses (student_id, marked_at DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS ix_audit_responses_distance
+    ON public.audit_responses (session_id, distance_bucket)
+    WHERE distance_bucket IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_audit_response_log_session
+    ON public.audit_response_log (session_id, changed_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_audit_alerts_session
+    ON public.audit_alerts (session_id, triggered_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_audit_alerts_open
+    ON public.audit_alerts (session_id)
+    WHERE acknowledged_at IS NULL;
+
+-- ------------------------------------------------------------
+-- 3. Triggers
+-- ------------------------------------------------------------
+
+-- 3.1 updated_at touch on audit_sessions
+CREATE OR REPLACE FUNCTION public.tg_audit_sessions_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_audit_sessions_updated_at ON public.audit_sessions;
+CREATE TRIGGER tr_audit_sessions_updated_at
+    BEFORE UPDATE ON public.audit_sessions
+    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_sessions_updated_at();
+
+-- 3.2 log category changes
+CREATE OR REPLACE FUNCTION public.tg_audit_responses_log_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.category IS DISTINCT FROM OLD.category THEN
+        INSERT INTO public.audit_response_log
+            (response_id, session_id, student_id, from_category, to_category, actor)
+        VALUES
+            (NEW.id, NEW.session_id, NEW.student_id, OLD.category, NEW.category,
+             COALESCE(NEW.marked_by, 'SYSTEM'));
+    END IF;
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_audit_responses_log_change ON public.audit_responses;
+CREATE TRIGGER tr_audit_responses_log_change
+    BEFORE UPDATE ON public.audit_responses
+    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_responses_log_change();
+
+-- 3.3 alert on out-of-range
+CREATE OR REPLACE FUNCTION public.tg_audit_responses_alert()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_severity TEXT;
+BEGIN
+    IF NEW.distance_bucket IN ('ORANGE','RED')
+       AND (OLD.distance_bucket IS NULL OR OLD.distance_bucket NOT IN ('ORANGE','RED'))
+    THEN
+        v_severity := CASE
+            WHEN NEW.distance_bucket = 'RED' THEN 'CRITICAL'
+            ELSE 'MEDIUM'
+        END;
+
+        INSERT INTO public.audit_alerts
+            (session_id, student_id, distance_m, gps_lat, gps_lng, severity)
+        VALUES
+            (NEW.session_id, NEW.student_id,
+             NEW.distance_from_campus_m, NEW.gps_lat, NEW.gps_lng, v_severity);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_audit_responses_alert ON public.audit_responses;
+CREATE TRIGGER tr_audit_responses_alert
+    AFTER UPDATE ON public.audit_responses
+    FOR EACH ROW EXECUTE FUNCTION public.tg_audit_responses_alert();
+
+-- ------------------------------------------------------------
+-- 4. Helper functions
+-- ------------------------------------------------------------
+
+-- Haversine distance in meters between two lat/lng points
+CREATE OR REPLACE FUNCTION public.fn_haversine_m(
+    lat1 DOUBLE PRECISION, lng1 DOUBLE PRECISION,
+    lat2 DOUBLE PRECISION, lng2 DOUBLE PRECISION
+) RETURNS DOUBLE PRECISION
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+AS $$
+DECLARE
+    R CONSTANT DOUBLE PRECISION := 6371000;
+    dLat DOUBLE PRECISION;
+    dLng DOUBLE PRECISION;
+    a DOUBLE PRECISION;
+BEGIN
+    IF lat1 IS NULL OR lng1 IS NULL OR lat2 IS NULL OR lng2 IS NULL THEN
+        RETURN NULL;
+    END IF;
+    dLat := radians(lat2 - lat1);
+    dLng := radians(lng2 - lng1);
+    a := sin(dLat/2) * sin(dLat/2)
+       + cos(radians(lat1)) * cos(radians(lat2))
+       * sin(dLng/2) * sin(dLng/2);
+    RETURN R * 2 * asin(sqrt(a));
+END;
+$$;
+
+-- Compute distance_bucket from distance_m
+CREATE OR REPLACE FUNCTION public.fn_distance_bucket(
+    dist_m DOUBLE PRECISION
+) RETURNS TEXT
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+AS $$
+BEGIN
+    IF dist_m IS NULL THEN RETURN NULL; END IF;
+    IF dist_m <= 300   THEN RETURN 'GREEN';  END IF;
+    IF dist_m <= 1000  THEN RETURN 'BLUE';   END IF;
+    IF dist_m <= 5000  THEN RETURN 'ORANGE'; END IF;
+    RETURN 'RED';
+END;
+$$;
+
+-- ------------------------------------------------------------
+-- 5. RPC: open_audit
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.open_audit(
+    p_mode        TEXT,
+    p_class_ids   TEXT[],
+    p_started_by  TEXT,
+    p_settings    JSONB DEFAULT '{}'::jsonb,
+    p_notes       TEXT  DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+DECLARE
+    v_session_id    UUID;
+    v_existing      UUID;
+    v_total         INT;
+BEGIN
+    -- Validate mode
+    IF p_mode NOT IN ('MANUAL', 'LOCATION') THEN
+        RETURN jsonb_build_object('error', 'INVALID_MODE');
+    END IF;
+
+    -- Validate class_ids
+    IF array_length(p_class_ids, 1) IS NULL OR array_length(p_class_ids, 1) = 0 THEN
+        RETURN jsonb_build_object('error', 'NO_CLASSES_SELECTED');
+    END IF;
+
+    -- Reject if active session exists
+    SELECT id INTO v_existing
+    FROM public.audit_sessions
+    WHERE status = 'ACTIVE'
+    LIMIT 1;
+
+    IF v_existing IS NOT NULL THEN
+        RETURN jsonb_build_object(
+            'error', 'AUDIT_ACTIVE',
+            'existing_session_id', v_existing
+        );
+    END IF;
+
+    -- Create session
+    INSERT INTO public.audit_sessions
+        (mode, class_ids, total_students, started_by, settings, notes)
+    SELECT
+        p_mode,
+        p_class_ids,
+        (SELECT COUNT(*) FROM public.students s WHERE s."classId" = ANY(p_class_ids)),
+        p_started_by,
+        COALESCE(p_settings, '{}'::jsonb),
+        p_notes
+    RETURNING id, total_students INTO v_session_id, v_total;
+
+    -- Pre-create one response per student
+    INSERT INTO public.audit_responses
+        (session_id, student_id, class_id, category, marked_by, marked_at, departure_id)
+    SELECT
+        v_session_id,
+        s.id,
+        s."classId",
+        CASE WHEN d.id IS NOT NULL THEN 'OUT_PERMIT' ELSE 'PENDING' END,
+        CASE WHEN d.id IS NOT NULL THEN 'AUTO_DEPARTURE' ELSE NULL END,
+        CASE WHEN d.id IS NOT NULL THEN NOW() ELSE NULL END,
+        d.id
+    FROM public.students s
+    LEFT JOIN public.departures d
+           ON d.student_id = s.id AND d.status = 'ACTIVE'
+    WHERE s."classId" = ANY(p_class_ids);
+
+    RETURN jsonb_build_object(
+        'session_id',     v_session_id,
+        'total_students', v_total,
+        'mode',           p_mode,
+        'started_at',     NOW()
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 6. RPC: submit_audit_response
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.submit_audit_response(
+    p_session_id       UUID,
+    p_student_id       UUID,
+    p_category         TEXT             DEFAULT NULL,
+    p_gps_lat          DOUBLE PRECISION DEFAULT NULL,
+    p_gps_lng          DOUBLE PRECISION DEFAULT NULL,
+    p_gps_accuracy_m   DOUBLE PRECISION DEFAULT NULL,
+    p_gps_status       TEXT             DEFAULT NULL,
+    p_marked_by        TEXT             DEFAULT NULL,
+    p_note             TEXT             DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+DECLARE
+    v_distance        DOUBLE PRECISION;
+    v_bucket          TEXT;
+    v_final_category  TEXT;
+    v_response_id     UUID;
+    v_session_status  TEXT;
+    v_was_pending     BOOLEAN;
+BEGIN
+    -- Verify session
+    SELECT status INTO v_session_status
+    FROM public.audit_sessions
+    WHERE id = p_session_id;
+
+    IF v_session_status IS NULL THEN
+        RETURN jsonb_build_object('error', 'SESSION_NOT_FOUND');
+    END IF;
+
+    IF v_session_status <> 'ACTIVE' THEN
+        RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE', 'status', v_session_status);
+    END IF;
+
+    -- Compute distance + bucket
+    IF p_gps_lat IS NOT NULL AND p_gps_lng IS NOT NULL THEN
+        v_distance := public.fn_haversine_m(31.5253, 35.1056, p_gps_lat, p_gps_lng);
+        v_bucket   := public.fn_distance_bucket(v_distance);
+    END IF;
+
+    -- Low-accuracy guard: anything > 1000m of error is treated as UNKNOWN
+    IF p_gps_accuracy_m IS NOT NULL AND p_gps_accuracy_m > 1000 THEN
+        v_final_category := 'UNKNOWN';
+    ELSE
+        v_final_category := COALESCE(
+            p_category,
+            CASE
+                WHEN p_gps_status IN ('DENIED','TIMEOUT','OFFLINE','UNAVAILABLE','LOW_ACCURACY')
+                    THEN 'UNKNOWN'
+                WHEN v_bucket = 'GREEN'
+                    THEN 'IN_YESHIVA'
+                WHEN v_bucket IN ('BLUE','ORANGE','RED')
+                    THEN 'OUT_NO_PERMIT'
+                ELSE 'PENDING'
+            END
+        );
+    END IF;
+
+    -- Detect if this was the first transition out of PENDING
+    SELECT (category = 'PENDING') INTO v_was_pending
+    FROM public.audit_responses
+    WHERE session_id = p_session_id AND student_id = p_student_id;
+
+    -- Upsert
+    UPDATE public.audit_responses SET
+        category                = v_final_category,
+        marked_by               = COALESCE(p_marked_by, marked_by, 'AUTO_GPS'),
+        marked_at               = NOW(),
+        gps_lat                 = COALESCE(p_gps_lat, gps_lat),
+        gps_lng                 = COALESCE(p_gps_lng, gps_lng),
+        gps_accuracy_m          = COALESCE(p_gps_accuracy_m, gps_accuracy_m),
+        distance_from_campus_m  = COALESCE(v_distance, distance_from_campus_m),
+        distance_bucket         = COALESCE(v_bucket, distance_bucket),
+        gps_status              = COALESCE(p_gps_status, gps_status),
+        note                    = COALESCE(p_note, note)
+    WHERE session_id = p_session_id AND student_id = p_student_id
+    RETURNING id INTO v_response_id;
+
+    IF v_response_id IS NULL THEN
+        RETURN jsonb_build_object('error', 'RESPONSE_NOT_FOUND');
+    END IF;
+
+    RETURN jsonb_build_object(
+        'response_id',       v_response_id,
+        'category',          v_final_category,
+        'distance_m',        v_distance,
+        'distance_bucket',   v_bucket,
+        'was_pending',       v_was_pending
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.submit_audit_response(UUID, UUID, TEXT, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, TEXT, TEXT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 7. RPC: close_audit
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.close_audit(
+    p_session_id UUID,
+    p_closed_by  TEXT,
+    p_notes      TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+DECLARE
+    v_status TEXT;
+    v_summary JSONB;
+BEGIN
+    SELECT status INTO v_status FROM public.audit_sessions WHERE id = p_session_id;
+
+    IF v_status IS NULL THEN
+        RETURN jsonb_build_object('error', 'SESSION_NOT_FOUND');
+    END IF;
+
+    IF v_status <> 'ACTIVE' THEN
+        RETURN jsonb_build_object('error', 'SESSION_NOT_ACTIVE', 'status', v_status);
+    END IF;
+
+    -- Convert PENDING → UNKNOWN
+    UPDATE public.audit_responses
+       SET category = 'UNKNOWN',
+           marked_by = 'AUTO_CLOSE',
+           marked_at = NOW()
+     WHERE session_id = p_session_id AND category = 'PENDING';
+
+    -- Close
+    UPDATE public.audit_sessions
+       SET status    = 'CLOSED',
+           closed_at = NOW(),
+           closed_by = p_closed_by,
+           notes     = COALESCE(p_notes, notes)
+     WHERE id = p_session_id;
+
+    -- Compute summary
+    SELECT jsonb_build_object(
+        'in_yeshiva',   COUNT(*) FILTER (WHERE category='IN_YESHIVA'),
+        'out_permit',   COUNT(*) FILTER (WHERE category='OUT_PERMIT'),
+        'out_no_permit',COUNT(*) FILTER (WHERE category='OUT_NO_PERMIT'),
+        'unknown',      COUNT(*) FILTER (WHERE category='UNKNOWN'),
+        'alerts_count', (SELECT COUNT(*) FROM public.audit_alerts WHERE session_id = p_session_id)
+    ) INTO v_summary
+    FROM public.audit_responses
+    WHERE session_id = p_session_id;
+
+    RETURN jsonb_build_object(
+        'session_id', p_session_id,
+        'status',     'CLOSED',
+        'summary',    v_summary
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.close_audit(UUID, TEXT, TEXT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 8. RPC: abort_audit
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.abort_audit(
+    p_session_id UUID,
+    p_actor      TEXT,
+    p_reason     TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+BEGIN
+    UPDATE public.audit_sessions
+       SET status='ABORTED', closed_at=NOW(), closed_by=p_actor, notes=COALESCE(p_reason, notes)
+     WHERE id=p_session_id AND status='ACTIVE';
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error','SESSION_NOT_ACTIVE');
+    END IF;
+
+    RETURN jsonb_build_object('status','ABORTED','session_id',p_session_id);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.abort_audit(UUID, TEXT, TEXT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 9. RPC: get_active_audit
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_active_audit()
+RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER STABLE
+AS $$
+DECLARE
+    v_session  public.audit_sessions%ROWTYPE;
+    v_payload  JSONB;
+BEGIN
+    SELECT * INTO v_session
+    FROM public.audit_sessions
+    WHERE status = 'ACTIVE'
+    ORDER BY started_at DESC
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('session', NULL);
+    END IF;
+
+    SELECT jsonb_build_object(
+        'session', to_jsonb(v_session),
+        'responses', COALESCE(
+            (SELECT jsonb_agg(to_jsonb(ar.*))
+             FROM public.audit_responses ar
+             WHERE ar.session_id = v_session.id),
+            '[]'::jsonb),
+        'alerts', COALESCE(
+            (SELECT jsonb_agg(to_jsonb(aa.*))
+             FROM public.audit_alerts aa
+             WHERE aa.session_id = v_session.id),
+            '[]'::jsonb),
+        'kpis', public.compute_audit_kpis(v_session.id)
+    ) INTO v_payload;
+
+    RETURN v_payload;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_active_audit() TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 10. RPC: get_audit_full
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_audit_full(p_session_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER STABLE
+AS $$
+DECLARE
+    v_session public.audit_sessions%ROWTYPE;
+BEGIN
+    SELECT * INTO v_session FROM public.audit_sessions WHERE id = p_session_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error','SESSION_NOT_FOUND');
+    END IF;
+
+    RETURN jsonb_build_object(
+        'session', to_jsonb(v_session),
+        'responses', COALESCE(
+            (SELECT jsonb_agg(to_jsonb(ar.*))
+             FROM public.audit_responses ar
+             WHERE ar.session_id = p_session_id),
+            '[]'::jsonb),
+        'alerts', COALESCE(
+            (SELECT jsonb_agg(to_jsonb(aa.*))
+             FROM public.audit_alerts aa
+             WHERE aa.session_id = p_session_id),
+            '[]'::jsonb),
+        'log', COALESCE(
+            (SELECT jsonb_agg(to_jsonb(l.*) ORDER BY l.changed_at)
+             FROM public.audit_response_log l
+             WHERE l.session_id = p_session_id),
+            '[]'::jsonb),
+        'kpis', public.compute_audit_kpis(p_session_id)
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_audit_full(UUID) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 11. RPC: compute_audit_kpis (used by both)
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.compute_audit_kpis(p_session_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    v_by_category JSONB;
+    v_by_class    JSONB;
+    v_by_bucket   JSONB;
+BEGIN
+    SELECT jsonb_object_agg(category, cnt)
+      INTO v_by_category
+    FROM (
+        SELECT category, COUNT(*) AS cnt
+        FROM public.audit_responses
+        WHERE session_id = p_session_id
+        GROUP BY category
+    ) t;
+
+    SELECT jsonb_object_agg(class_id, sub)
+      INTO v_by_class
+    FROM (
+        SELECT class_id,
+               jsonb_build_object(
+                   'total',         COUNT(*),
+                   'in_yeshiva',    COUNT(*) FILTER (WHERE category='IN_YESHIVA'),
+                   'out_permit',    COUNT(*) FILTER (WHERE category='OUT_PERMIT'),
+                   'out_no_permit', COUNT(*) FILTER (WHERE category='OUT_NO_PERMIT'),
+                   'unknown',       COUNT(*) FILTER (WHERE category='UNKNOWN'),
+                   'pending',       COUNT(*) FILTER (WHERE category='PENDING')
+               ) AS sub
+        FROM public.audit_responses
+        WHERE session_id = p_session_id
+        GROUP BY class_id
+    ) t;
+
+    SELECT jsonb_object_agg(distance_bucket, cnt)
+      INTO v_by_bucket
+    FROM (
+        SELECT distance_bucket, COUNT(*) AS cnt
+        FROM public.audit_responses
+        WHERE session_id = p_session_id AND distance_bucket IS NOT NULL
+        GROUP BY distance_bucket
+    ) t;
+
+    RETURN jsonb_build_object(
+        'by_category', COALESCE(v_by_category, '{}'::jsonb),
+        'by_class',    COALESCE(v_by_class,    '{}'::jsonb),
+        'by_bucket',   COALESCE(v_by_bucket,   '{}'::jsonb)
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.compute_audit_kpis(UUID) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 12. RPC: acknowledge_audit_alert
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.acknowledge_audit_alert(
+    p_alert_id UUID,
+    p_actor    TEXT,
+    p_note     TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+BEGIN
+    UPDATE public.audit_alerts
+       SET acknowledged_by = p_actor,
+           acknowledged_at = NOW(),
+           note            = COALESCE(p_note, note)
+     WHERE id = p_alert_id
+       AND acknowledged_at IS NULL;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error','ALERT_ALREADY_ACKNOWLEDGED_OR_MISSING');
+    END IF;
+
+    RETURN jsonb_build_object('alert_id', p_alert_id, 'acknowledged_by', p_actor);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.acknowledge_audit_alert(UUID, TEXT, TEXT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 13. RPC: list_past_audits
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.list_past_audits(
+    p_mode  TEXT DEFAULT NULL,
+    p_since TIMESTAMPTZ DEFAULT NULL,
+    p_until TIMESTAMPTZ DEFAULT NULL,
+    p_limit INT DEFAULT 50
+) RETURNS JSONB
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN COALESCE(
+        (SELECT jsonb_agg(to_jsonb(s.*) ORDER BY s.started_at DESC)
+         FROM public.audit_sessions s
+         WHERE (p_mode  IS NULL OR s.mode = p_mode)
+           AND (p_since IS NULL OR s.started_at >= p_since)
+           AND (p_until IS NULL OR s.started_at <= p_until)
+         ORDER BY s.started_at DESC
+         LIMIT p_limit),
+        '[]'::jsonb
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.list_past_audits(TEXT, TIMESTAMPTZ, TIMESTAMPTZ, INT) TO anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 14. RPC: tick_audit_timeout (cron)
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.tick_audit_timeout()
+RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+DECLARE
+    v_count INT;
+BEGIN
+    UPDATE public.audit_sessions
+       SET status='TIMED_OUT', closed_at=NOW()
+     WHERE status='ACTIVE'
+       AND started_at < NOW() - INTERVAL '24 hours';
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$;
+
+-- Schedule via pg_cron
+SELECT cron.schedule(
+    'tick_audit_timeout',
+    '*/5 * * * *',
+    $$SELECT public.tick_audit_timeout();$$
+);
+
+-- ------------------------------------------------------------
+-- 15. Realtime publication
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND tablename = 'audit_sessions'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_sessions;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND tablename = 'audit_responses'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_responses;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND tablename = 'audit_alerts'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_alerts;
+    END IF;
+END $$;
+
+COMMIT;
+
+-- ============================================================
+-- END OF MIGRATION
+-- ============================================================
+```
+
+---
+
+# חלק ט"ז — TypeScript Types (קבצים מלאים)
+
+## 16.1 `src/types/audit.ts`
+
+```ts
+// src/types/audit.ts
+// All TypeScript types for the Internal Audit subsystem.
+// This is the single source of truth for shapes shared between
+// the API layer, stores, hooks, and UI components.
+
+// ---- Enums (string-literal unions; matches DB CHECK constraints) ----
+
+export const AUDIT_MODES = ['MANUAL', 'LOCATION'] as const
+export type AuditMode = typeof AUDIT_MODES[number]
+
+export const AUDIT_SESSION_STATUSES = ['ACTIVE', 'CLOSED', 'ABORTED', 'TIMED_OUT'] as const
+export type AuditSessionStatus = typeof AUDIT_SESSION_STATUSES[number]
+
+export const AUDIT_CATEGORIES = [
+  'PENDING',
+  'IN_YESHIVA',
+  'OUT_PERMIT',
+  'OUT_NO_PERMIT',
+  'UNKNOWN',
+] as const
+export type AuditCategory = typeof AUDIT_CATEGORIES[number]
+
+export const DISTANCE_BUCKETS = ['GREEN', 'BLUE', 'ORANGE', 'RED'] as const
+export type DistanceBucket = typeof DISTANCE_BUCKETS[number]
+
+export const GPS_STATUSES = [
+  'OK',
+  'DENIED',
+  'TIMEOUT',
+  'OFFLINE',
+  'UNAVAILABLE',
+  'LOW_ACCURACY',
+] as const
+export type GpsStatus = typeof GPS_STATUSES[number]
+
+export const ALERT_SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const
+export type AlertSeverity = typeof ALERT_SEVERITIES[number]
+
+export const PUSH_TARGETS = ['STUDENTS', 'SUPERVISORS', 'BOTH'] as const
+export type PushTarget = typeof PUSH_TARGETS[number]
+
+export const SENSITIVITIES = ['LOW', 'MEDIUM', 'HIGH'] as const
+export type Sensitivity = typeof SENSITIVITIES[number]
+
+// ---- Session settings ----
+
+export interface AuditSessionSettings {
+  /** Seconds before sending reminder pushes. Default: 120 */
+  timeoutSec?: number
+  /** Alert threshold sensitivity */
+  sensitivity?: Sensitivity
+  /** Who to send push to */
+  pushTarget?: PushTarget
+  /** Whether to show map by default */
+  showMap?: boolean
+  /** Auto-rotate projection mode dwell time (sec) */
+  projectionDwellSec?: number
+}
+
+// ---- Domain entities (match DB row shapes via snake_case → camelCase) ----
+
+export interface AuditSession {
+  id: string
+  mode: AuditMode
+  status: AuditSessionStatus
+  classIds: string[]
+  totalStudents: number
+  startedBy: string
+  startedAt: string             // ISO-8601 with TZ
+  closedAt: string | null
+  closedBy: string | null
+  notes: string | null
+  settings: AuditSessionSettings
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuditResponse {
+  id: string
+  sessionId: string
+  studentId: string
+  classId: string
+  category: AuditCategory
+  markedBy: string | null
+  markedAt: string | null
+  gpsLat: number | null
+  gpsLng: number | null
+  gpsAccuracyM: number | null
+  distanceFromCampusM: number | null
+  distanceBucket: DistanceBucket | null
+  gpsStatus: GpsStatus | null
+  departureId: string | null
+  note: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuditAlert {
+  id: string
+  sessionId: string
+  studentId: string
+  triggeredAt: string
+  distanceM: number
+  gpsLat: number | null
+  gpsLng: number | null
+  severity: AlertSeverity
+  acknowledgedBy: string | null
+  acknowledgedAt: string | null
+  note: string | null
+}
+
+export interface AuditResponseLogEntry {
+  id: string
+  responseId: string
+  sessionId: string
+  studentId: string
+  fromCategory: AuditCategory | null
+  toCategory: AuditCategory
+  actor: string
+  changedAt: string
+}
+
+// ---- KPI aggregates (from RPC compute_audit_kpis) ----
+
+export interface AuditKpis {
+  byCategory: Partial<Record<AuditCategory, number>>
+  byClass: Record<string, AuditClassKpis>
+  byBucket: Partial<Record<DistanceBucket, number>>
+}
+
+export interface AuditClassKpis {
+  total: number
+  in_yeshiva: number
+  out_permit: number
+  out_no_permit: number
+  unknown: number
+  pending: number
+}
+
+// ---- Payloads ----
+
+export interface OpenAuditPayload {
+  mode: AuditMode
+  classIds: string[]
+  startedBy: string
+  settings?: AuditSessionSettings
+  notes?: string
+}
+
+export interface SubmitAuditResponsePayload {
+  sessionId: string
+  studentId: string
+  category?: AuditCategory
+  gpsLat?: number
+  gpsLng?: number
+  gpsAccuracyM?: number
+  gpsStatus?: GpsStatus
+  markedBy?: string
+  note?: string
+}
+
+export interface CloseAuditPayload {
+  sessionId: string
+  closedBy: string
+  notes?: string
+}
+
+// ---- Type guards ----
+
+export function isAuditMode(x: unknown): x is AuditMode {
+  return typeof x === 'string' && (AUDIT_MODES as readonly string[]).includes(x)
+}
+
+export function isAuditCategory(x: unknown): x is AuditCategory {
+  return typeof x === 'string' && (AUDIT_CATEGORIES as readonly string[]).includes(x)
+}
+
+export function isDistanceBucket(x: unknown): x is DistanceBucket {
+  return typeof x === 'string' && (DISTANCE_BUCKETS as readonly string[]).includes(x)
+}
+
+// ---- Realtime payloads (Supabase wire format → our types) ----
+
+export interface RealtimeAuditEvent {
+  schema: 'public'
+  table: 'audit_sessions' | 'audit_responses' | 'audit_alerts'
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+  new: any
+  old: any
+}
+```
+
+## 16.2 `src/lib/audit/categories.ts`
+
+```ts
+// src/lib/audit/categories.ts
+// Single source of truth for category labels, icons, colors.
+// Used by every UI component that renders a category.
+
+import type { AuditCategory } from '@/types/audit'
+import {
+  Check,
+  LogOut,
+  AlertOctagon,
+  HelpCircle,
+  Clock,
+  type LucideIcon,
+} from 'lucide-react'
+
+export interface CategoryMeta {
+  label: string                 // Hebrew label
+  shortLabel: string            // ultra-short for badges
+  color: string                 // Tailwind class (background)
+  bgColor: string               // pale background
+  borderColor: string
+  textColor: string
+  icon: LucideIcon
+  description: string
+  priority: number              // for sorting (higher = more attention)
+}
+
+export const CATEGORY_META: Record<AuditCategory, CategoryMeta> = {
+  PENDING: {
+    label: 'ממתין',
+    shortLabel: 'ממ',
+    color: 'bg-gray-300 dark:bg-gray-600',
+    bgColor: 'bg-gray-100 dark:bg-gray-800',
+    borderColor: 'border-gray-300 dark:border-gray-600',
+    textColor: 'text-gray-700 dark:text-gray-300',
+    icon: Clock,
+    description: 'התלמיד עדיין לא הגיב/סומן',
+    priority: 30,
+  },
+  IN_YESHIVA: {
+    label: 'נוכח',
+    shortLabel: 'נוכח',
+    color: 'bg-emerald-500',
+    bgColor: 'bg-emerald-50 dark:bg-emerald-950',
+    borderColor: 'border-emerald-500',
+    textColor: 'text-emerald-700 dark:text-emerald-400',
+    icon: Check,
+    description: 'התלמיד נמצא בישיבה',
+    priority: 10,
+  },
+  OUT_PERMIT: {
+    label: 'בחוץ עם אישור',
+    shortLabel: 'עם אישור',
+    color: 'bg-blue-500',
+    bgColor: 'bg-blue-50 dark:bg-blue-950',
+    borderColor: 'border-blue-500',
+    textColor: 'text-blue-700 dark:text-blue-400',
+    icon: LogOut,
+    description: 'התלמיד יצא עם יציאה מאושרת',
+    priority: 20,
+  },
+  OUT_NO_PERMIT: {
+    label: 'בחוץ ללא אישור',
+    shortLabel: 'ללא אישור',
+    color: 'bg-red-500',
+    bgColor: 'bg-red-50 dark:bg-red-950',
+    borderColor: 'border-red-500',
+    textColor: 'text-red-700 dark:text-red-400',
+    icon: AlertOctagon,
+    description: 'התלמיד מחוץ לישיבה ללא אישור',
+    priority: 100,
+  },
+  UNKNOWN: {
+    label: 'לא ידוע',
+    shortLabel: 'לא ידוע',
+    color: 'bg-amber-400',
+    bgColor: 'bg-amber-50 dark:bg-amber-950',
+    borderColor: 'border-amber-400',
+    textColor: 'text-amber-700 dark:text-amber-400',
+    icon: HelpCircle,
+    description: 'התלמיד לא הגיב או GPS דחה',
+    priority: 60,
+  },
+}
+
+export function getCategoryMeta(c: AuditCategory): CategoryMeta {
+  return CATEGORY_META[c] ?? CATEGORY_META.PENDING
+}
+
+// Manual-mode buttons (3 categories only the supervisor picks)
+export const MANUAL_PICKABLE_CATEGORIES: AuditCategory[] = [
+  'IN_YESHIVA',
+  'OUT_PERMIT',
+  'OUT_NO_PERMIT',
+]
+
+// Sort categories by priority (descending: highest priority first)
+export function sortCategoriesByPriority(cats: AuditCategory[]): AuditCategory[] {
+  return [...cats].sort(
+    (a, b) => getCategoryMeta(b).priority - getCategoryMeta(a).priority
+  )
+}
+```
+
+## 16.3 `src/lib/audit/distanceBuckets.ts`
+
+```ts
+// src/lib/audit/distanceBuckets.ts
+// Distance bucket configuration. THESE NUMBERS MUST MATCH THE RPC.
+// (See fn_distance_bucket in the migration file.)
+
+import type { DistanceBucket } from '@/types/audit'
+
+export interface BucketMeta {
+  bucket: DistanceBucket
+  maxMeters: number              // inclusive upper bound; Infinity for RED
+  label: string                  // Hebrew long label
+  shortLabel: string
+  color: string                  // hex
+  twBg: string                   // tailwind bg class
+  twBorder: string
+  twText: string
+  twRing: string
+  emoji: string
+}
+
+export const DISTANCE_BUCKETS_ORDERED: BucketMeta[] = [
+  {
+    bucket: 'GREEN',
+    maxMeters: 300,
+    label: 'בישיבה',
+    shortLabel: 'בישיבה',
+    color: '#10b981',
+    twBg: 'bg-emerald-500',
+    twBorder: 'border-emerald-500',
+    twText: 'text-emerald-700 dark:text-emerald-400',
+    twRing: 'ring-emerald-300 dark:ring-emerald-700',
+    emoji: '🟢',
+  },
+  {
+    bucket: 'BLUE',
+    maxMeters: 1000,
+    label: 'באזור הישיבה',
+    shortLabel: 'קרוב',
+    color: '#3b82f6',
+    twBg: 'bg-blue-500',
+    twBorder: 'border-blue-500',
+    twText: 'text-blue-700 dark:text-blue-400',
+    twRing: 'ring-blue-300 dark:ring-blue-700',
+    emoji: '🔵',
+  },
+  {
+    bucket: 'ORANGE',
+    maxMeters: 5000,
+    label: 'אזור חברון',
+    shortLabel: 'כתום',
+    color: '#f59e0b',
+    twBg: 'bg-amber-500',
+    twBorder: 'border-amber-500',
+    twText: 'text-amber-700 dark:text-amber-400',
+    twRing: 'ring-amber-300 dark:ring-amber-700',
+    emoji: '🟠',
+  },
+  {
+    bucket: 'RED',
+    maxMeters: Infinity,
+    label: 'מחוץ לטווח',
+    shortLabel: 'רחוק',
+    color: '#ef4444',
+    twBg: 'bg-red-500',
+    twBorder: 'border-red-500',
+    twText: 'text-red-700 dark:text-red-400',
+    twRing: 'ring-red-300 dark:ring-red-700',
+    emoji: '🔴',
+  },
+]
+
+export function bucketFromMeters(m: number | null | undefined): DistanceBucket | null {
+  if (m == null || Number.isNaN(m) || m < 0) return null
+  for (const b of DISTANCE_BUCKETS_ORDERED) {
+    if (m <= b.maxMeters) return b.bucket
+  }
+  return 'RED'
+}
+
+export function getBucketMeta(b: DistanceBucket): BucketMeta {
+  const m = DISTANCE_BUCKETS_ORDERED.find(x => x.bucket === b)
+  if (!m) throw new Error(`Unknown bucket: ${b}`)
+  return m
+}
+
+export function formatDistance(m: number | null | undefined): string {
+  if (m == null) return '—'
+  if (m < 1000) return `${Math.round(m)}m`
+  return `${(m / 1000).toFixed(1)} ק"מ`
+}
+```
+
+## 16.4 `src/lib/audit/haversine.ts`
+
+```ts
+// src/lib/audit/haversine.ts
+// Great-circle distance in meters between two lat/lng points.
+// Mirrors the SQL fn_haversine_m function — both must agree.
+
+export const CAMPUS_LAT = 31.5253
+export const CAMPUS_LNG = 35.1056
+export const EARTH_RADIUS_M = 6371000
+
+export function haversineMeters(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number {
+  if (!isFinite(lat1) || !isFinite(lng1) || !isFinite(lat2) || !isFinite(lng2)) {
+    return NaN
+  }
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return EARTH_RADIUS_M * 2 * Math.asin(Math.sqrt(a))
+}
+
+export function distanceFromCampus(lat: number, lng: number): number {
+  return haversineMeters(CAMPUS_LAT, CAMPUS_LNG, lat, lng)
+}
+```
+
+## 16.5 `src/lib/audit/gpsCollector.ts`
+
+```ts
+// src/lib/audit/gpsCollector.ts
+// Hardened wrapper around navigator.geolocation.getCurrentPosition.
+// Returns a discriminated union with explicit error types.
+
+import type { GpsStatus } from '@/types/audit'
+
+export type GpsResult =
+  | {
+      status: 'OK'
+      lat: number
+      lng: number
+      accuracyM: number
+      timestamp: number
+    }
+  | {
+      status: Exclude<GpsStatus, 'OK'>
+      reason?: string
+    }
+
+export interface CollectOptions {
+  timeoutMs?: number
+  highAccuracy?: boolean
+  maxAccuracyM?: number       // results worse than this → LOW_ACCURACY
+}
+
+const DEFAULTS: Required<CollectOptions> = {
+  timeoutMs: 15000,
+  highAccuracy: true,
+  maxAccuracyM: 1000,
+}
+
+export async function checkPermission(): Promise<PermissionState | 'unknown'> {
+  if (!('permissions' in navigator)) return 'unknown'
+  try {
+    const p = await navigator.permissions.query({ name: 'geolocation' as PermissionName })
+    return p.state
+  } catch {
+    return 'unknown'
+  }
+}
+
+export function isOnline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine !== false
+}
+
+export async function collectGps(opts: CollectOptions = {}): Promise<GpsResult> {
+  const cfg = { ...DEFAULTS, ...opts }
+
+  if (!('geolocation' in navigator)) {
+    return { status: 'UNAVAILABLE', reason: 'navigator.geolocation missing' }
+  }
+
+  if (!isOnline()) {
+    return { status: 'OFFLINE', reason: 'navigator.onLine = false' }
+  }
+
+  return new Promise<GpsResult>((resolve) => {
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve({ status: 'TIMEOUT', reason: `Exceeded ${cfg.timeoutMs}ms` })
+    }, cfg.timeoutMs)
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+
+        const { latitude, longitude, accuracy } = pos.coords
+        if (accuracy > cfg.maxAccuracyM) {
+          resolve({
+            status: 'LOW_ACCURACY',
+            reason: `Accuracy ${accuracy.toFixed(0)}m > ${cfg.maxAccuracyM}m`,
+          })
+          return
+        }
+
+        resolve({
+          status: 'OK',
+          lat: latitude,
+          lng: longitude,
+          accuracyM: accuracy,
+          timestamp: pos.timestamp,
+        })
+      },
+      (err) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+
+        const map: Record<number, GpsStatus> = {
+          1: 'DENIED',
+          2: 'UNAVAILABLE',
+          3: 'TIMEOUT',
+        }
+        resolve({
+          status: map[err.code] ?? 'UNAVAILABLE',
+          reason: err.message,
+        })
+      },
+      {
+        enableHighAccuracy: cfg.highAccuracy,
+        timeout: cfg.timeoutMs,
+        maximumAge: 0,
+      },
+    )
+  })
+}
+
+export async function collectGpsWithRetry(
+  opts: CollectOptions = {},
+  retries = 1,
+): Promise<GpsResult> {
+  let last: GpsResult = await collectGps(opts)
+  for (let i = 0; i < retries; i++) {
+    if (last.status === 'OK') return last
+    if (last.status === 'DENIED' || last.status === 'UNAVAILABLE') return last
+    last = await collectGps(opts)
+  }
+  return last
+}
+```
+
+## 16.6 `src/lib/audit/soundManager.ts`
+
+```ts
+// src/lib/audit/soundManager.ts
+// Howler.js wrapper for audit-related sounds.
+
+import { Howl } from 'howler'
+
+type SoundKey = 'chime' | 'ding' | 'alert' | 'notification' | 'complete'
+
+const SOURCES: Record<SoundKey, { src: string[]; volume: number }> = {
+  chime:        { src: ['/sounds/chime-soft.mp3'], volume: 0.30 },
+  ding:         { src: ['/sounds/ding.mp3'],       volume: 0.50 },
+  alert:        { src: ['/sounds/alert.mp3'],      volume: 0.70 },
+  notification: { src: ['/sounds/notification.mp3'], volume: 0.60 },
+  complete:     { src: ['/sounds/complete.mp3'],   volume: 0.40 },
+}
+
+const cache: Partial<Record<SoundKey, Howl>> = {}
+let globalMuted = false
+
+export function setGlobalMute(muted: boolean) { globalMuted = muted }
+export function isMuted() { return globalMuted }
+
+export function play(key: SoundKey): void {
+  if (globalMuted) return
+  if (!cache[key]) {
+    cache[key] = new Howl({ src: SOURCES[key].src, volume: SOURCES[key].volume })
+  }
+  try {
+    cache[key]!.play()
+  } catch (e) {
+    console.warn('[soundManager] play failed', key, e)
+  }
+}
+
+export function preloadAll(): void {
+  for (const key of Object.keys(SOURCES) as SoundKey[]) {
+    if (!cache[key]) {
+      cache[key] = new Howl({ src: SOURCES[key].src, volume: SOURCES[key].volume, preload: true })
+    }
+  }
+}
+```
+
+---
+
+# חלק י"ז — Zustand Stores (קוד מלא)
+
+## 17.1 `src/store/auditStore.ts`
+
+```ts
+// src/store/auditStore.ts
+// Zustand store for the active audit session.
+// SOURCE OF TRUTH: DB. This store mirrors DB state via RPC + Realtime.
+// NEVER persist this store — every page load re-fetches from DB.
+
+import { create } from 'zustand'
+import type {
+  AuditSession,
+  AuditResponse,
+  AuditAlert,
+  AuditCategory,
+  AuditKpis,
+} from '@/types/audit'
+import { api } from '@/lib/api'
+
+interface AuditStoreState {
+  session: AuditSession | null
+  responses: Map<string, AuditResponse>      // key: studentId
+  alerts: AuditAlert[]
+  kpis: AuditKpis | null
+  loading: boolean
+  error: string | null
+  lastSync: number | null
+
+  // queries
+  loadActive: () => Promise<void>
+  loadById: (sessionId: string) => Promise<void>
+
+  // mutations
+  open: (
+    mode: 'MANUAL' | 'LOCATION',
+    classIds: string[],
+    startedBy: string,
+    settings?: Record<string, unknown>,
+    notes?: string,
+  ) => Promise<string>
+  close: (closedBy: string, notes?: string) => Promise<void>
+  abort: (actor: string, reason?: string) => Promise<void>
+  submitResponse: (
+    studentId: string,
+    payload: Partial<AuditResponse> & { markedBy?: string },
+  ) => Promise<void>
+  acknowledgeAlert: (alertId: string, actor: string, note?: string) => Promise<void>
+
+  // realtime hooks
+  upsertResponse: (r: AuditResponse) => void
+  insertAlert: (a: AuditAlert) => void
+  updateSession: (s: AuditSession) => void
+
+  // utilities
+  reset: () => void
+}
+
+export const useAuditStore = create<AuditStoreState>((set, get) => ({
+  session: null,
+  responses: new Map(),
+  alerts: [],
+  kpis: null,
+  loading: false,
+  error: null,
+  lastSync: null,
+
+  loadActive: async () => {
+    set({ loading: true, error: null })
+    try {
+      const data = await api.getActiveAudit()
+      if (!data || !data.session) {
+        set({ session: null, responses: new Map(), alerts: [], kpis: null, loading: false, lastSync: Date.now() })
+        return
+      }
+      const respMap = new Map<string, AuditResponse>()
+      for (const r of data.responses) respMap.set(r.studentId, r)
+      set({
+        session: data.session,
+        responses: respMap,
+        alerts: data.alerts,
+        kpis: data.kpis,
+        loading: false,
+        lastSync: Date.now(),
+      })
+    } catch (e: any) {
+      set({ loading: false, error: e?.message ?? 'failed_to_load_audit' })
+    }
+  },
+
+  loadById: async (sessionId) => {
+    set({ loading: true, error: null })
+    try {
+      const data = await api.getAuditFull(sessionId)
+      const respMap = new Map<string, AuditResponse>()
+      for (const r of data.responses) respMap.set(r.studentId, r)
+      set({
+        session: data.session,
+        responses: respMap,
+        alerts: data.alerts,
+        kpis: data.kpis,
+        loading: false,
+        lastSync: Date.now(),
+      })
+    } catch (e: any) {
+      set({ loading: false, error: e?.message ?? 'failed_to_load_audit' })
+    }
+  },
+
+  open: async (mode, classIds, startedBy, settings, notes) => {
+    const res = await api.openAudit({ mode, classIds, startedBy, settings, notes })
+    if ('error' in res) throw new Error(res.error)
+    await get().loadById(res.session_id)
+    return res.session_id
+  },
+
+  close: async (closedBy, notes) => {
+    const s = get().session
+    if (!s) throw new Error('no_active_session')
+    const res = await api.closeAudit({ sessionId: s.id, closedBy, notes })
+    if ('error' in res) throw new Error(res.error)
+    set({ session: { ...s, status: 'CLOSED', closedAt: new Date().toISOString(), closedBy } })
+  },
+
+  abort: async (actor, reason) => {
+    const s = get().session
+    if (!s) throw new Error('no_active_session')
+    await api.abortAudit(s.id, actor, reason)
+    set({ session: { ...s, status: 'ABORTED', closedAt: new Date().toISOString(), closedBy: actor } })
+  },
+
+  submitResponse: async (studentId, payload) => {
+    const s = get().session
+    if (!s) throw new Error('no_active_session')
+    await api.submitAuditResponse({ sessionId: s.id, studentId, ...payload })
+    // realtime will push the canonical row back, but optimistic update here:
+    const cur = get().responses.get(studentId)
+    if (cur) {
+      const next = new Map(get().responses)
+      next.set(studentId, { ...cur, ...payload, markedAt: new Date().toISOString() } as AuditResponse)
+      set({ responses: next })
+    }
+  },
+
+  acknowledgeAlert: async (alertId, actor, note) => {
+    await api.acknowledgeAuditAlert(alertId, actor, note)
+    set({
+      alerts: get().alerts.map(a =>
+        a.id === alertId
+          ? { ...a, acknowledgedBy: actor, acknowledgedAt: new Date().toISOString(), note: note ?? a.note }
+          : a,
+      ),
+    })
+  },
+
+  upsertResponse: (r) => {
+    const next = new Map(get().responses)
+    next.set(r.studentId, r)
+    set({ responses: next })
+  },
+
+  insertAlert: (a) => {
+    set({ alerts: [a, ...get().alerts] })
+  },
+
+  updateSession: (s) => {
+    set({ session: s })
+  },
+
+  reset: () => {
+    set({ session: null, responses: new Map(), alerts: [], kpis: null, error: null })
+  },
+}))
+
+// Selectors
+export const selectKpis = (s: AuditStoreState) => s.kpis
+export const selectClassResponses = (classId: string) => (s: AuditStoreState) =>
+  [...s.responses.values()].filter(r => r.classId === classId)
+export const selectAlertsOpen = (s: AuditStoreState) =>
+  s.alerts.filter(a => !a.acknowledgedAt)
+```
+
+## 17.2 `src/store/auditUiStore.ts`
+
+```ts
+// src/store/auditUiStore.ts
+// UI-only state for the audit dashboard. PERSISTED to localStorage.
+// (Tab selection, filters, projection mode survive a refresh.)
+
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import type { AuditCategory } from '@/types/audit'
+
+export type LiveTab = 'map' | 'heatmap' | 'grid' | 'table' | 'feed'
+
+interface AuditUiState {
+  activeTab: LiveTab
+  classFilter: string[]
+  categoryFilter: AuditCategory[]
+  minDistance: number | null
+  projectionMode: boolean
+  projectionPaused: boolean
+  soundEnabled: boolean
+
+  setTab: (t: LiveTab) => void
+  setClassFilter: (ids: string[]) => void
+  toggleCategoryFilter: (c: AuditCategory) => void
+  setMinDistance: (m: number | null) => void
+  enterProjection: () => void
+  exitProjection: () => void
+  toggleProjectionPause: () => void
+  setSoundEnabled: (b: boolean) => void
+  resetFilters: () => void
+}
+
+export const useAuditUiStore = create<AuditUiState>()(
+  persist(
+    (set, get) => ({
+      activeTab: 'grid',
+      classFilter: [],
+      categoryFilter: [],
+      minDistance: null,
+      projectionMode: false,
+      projectionPaused: false,
+      soundEnabled: true,
+
+      setTab: (t) => set({ activeTab: t }),
+      setClassFilter: (ids) => set({ classFilter: ids }),
+      toggleCategoryFilter: (c) => {
+        const cur = get().categoryFilter
+        set({
+          categoryFilter: cur.includes(c) ? cur.filter(x => x !== c) : [...cur, c],
+        })
+      },
+      setMinDistance: (m) => set({ minDistance: m }),
+      enterProjection: () => set({ projectionMode: true, projectionPaused: false }),
+      exitProjection: () => set({ projectionMode: false, projectionPaused: false }),
+      toggleProjectionPause: () => set({ projectionPaused: !get().projectionPaused }),
+      setSoundEnabled: (b) => set({ soundEnabled: b }),
+      resetFilters: () => set({ classFilter: [], categoryFilter: [], minDistance: null }),
+    }),
+    {
+      name: 'audit-ui-store',
+      partialize: (s) => ({
+        activeTab: s.activeTab,
+        soundEnabled: s.soundEnabled,
+      }),
+    },
+  ),
+)
+```
+
+---
+
+# חלק י"ח — Hooks (קוד מלא)
+
+## 18.1 `src/hooks/useActiveAudit.ts`
+
+```tsx
+// src/hooks/useActiveAudit.ts
+// Loads the active audit on mount and subscribes to realtime.
+
+import { useEffect, useRef } from 'react'
+import { supabase } from '@/lib/api/supabaseClient'
+import { useAuditStore } from '@/store/auditStore'
+import * as sound from '@/lib/audit/soundManager'
+
+export function useActiveAudit() {
+  const session = useAuditStore(s => s.session)
+  const loadActive = useAuditStore(s => s.loadActive)
+  const upsertResponse = useAuditStore(s => s.upsertResponse)
+  const insertAlert = useAuditStore(s => s.insertAlert)
+  const updateSession = useAuditStore(s => s.updateSession)
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+
+  useEffect(() => {
+    loadActive()
+  }, [loadActive])
+
+  useEffect(() => {
+    if (!session?.id) return
+    const sid = session.id
+
+    const ch = supabase
+      .channel(`audit:${sid}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'audit_responses', filter: `session_id=eq.${sid}` },
+        (payload) => {
+          if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
+            upsertResponse(payload.new as any)
+            sound.play('chime')
+          }
+        })
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'audit_alerts', filter: `session_id=eq.${sid}` },
+        (payload) => {
+          insertAlert(payload.new as any)
+          sound.play('alert')
+        })
+      .on('postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` },
+        (payload) => {
+          updateSession(payload.new as any)
+        })
+      .subscribe()
+
+    channelRef.current = ch
+
+    // Polling fallback: every 30s, refetch if no realtime events for > 30s
+    const pollInterval = window.setInterval(() => {
+      const last = useAuditStore.getState().lastSync
+      if (last && Date.now() - last > 30000) {
+        loadActive()
+      }
+    }, 30000)
+
+    return () => {
+      window.clearInterval(pollInterval)
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
+  }, [session?.id, upsertResponse, insertAlert, updateSession, loadActive])
+
+  return { session }
+}
+```
+
+## 18.2 `src/hooks/useAuditStats.ts`
+
+```tsx
+// src/hooks/useAuditStats.ts
+// Memoized aggregations over audit_responses.
+
+import { useMemo } from 'react'
+import { useAuditStore } from '@/store/auditStore'
+import type { AuditCategory, DistanceBucket } from '@/types/audit'
+
+export interface AuditStats {
+  total: number
+  byCategory: Record<AuditCategory, number>
+  byBucket: Record<DistanceBucket, number>
+  byClass: Record<string, { total: number; marked: number; alerts: number }>
+  progressPct: number             // marked / total
+  alertsOpen: number
+}
+
+const EMPTY_CAT: Record<AuditCategory, number> = {
+  PENDING: 0, IN_YESHIVA: 0, OUT_PERMIT: 0, OUT_NO_PERMIT: 0, UNKNOWN: 0,
+}
+const EMPTY_BUCKET: Record<DistanceBucket, number> = {
+  GREEN: 0, BLUE: 0, ORANGE: 0, RED: 0,
+}
+
+export function useAuditStats(): AuditStats {
+  const responses = useAuditStore(s => s.responses)
+  const alerts = useAuditStore(s => s.alerts)
+
+  return useMemo(() => {
+    const byCategory = { ...EMPTY_CAT }
+    const byBucket = { ...EMPTY_BUCKET }
+    const byClass: Record<string, { total: number; marked: number; alerts: number }> = {}
+    let total = 0
+    let marked = 0
+
+    for (const r of responses.values()) {
+      total++
+      byCategory[r.category] = (byCategory[r.category] ?? 0) + 1
+      if (r.distanceBucket) byBucket[r.distanceBucket]++
+      if (!byClass[r.classId]) byClass[r.classId] = { total: 0, marked: 0, alerts: 0 }
+      byClass[r.classId].total++
+      if (r.category !== 'PENDING') {
+        byClass[r.classId].marked++
+        marked++
+      }
+    }
+    for (const a of alerts) {
+      if (a.acknowledgedAt) continue
+      const cls = responses.get(a.studentId)?.classId
+      if (cls && byClass[cls]) byClass[cls].alerts++
+    }
+    return {
+      total,
+      byCategory,
+      byBucket,
+      byClass,
+      progressPct: total === 0 ? 0 : Math.round((marked / total) * 100),
+      alertsOpen: alerts.filter(a => !a.acknowledgedAt).length,
+    }
+  }, [responses, alerts])
+}
+```
+
+## 18.3 `src/hooks/useAuditLocationCollector.ts`
+
+```tsx
+// src/hooks/useAuditLocationCollector.ts
+// On student device: when an active LOCATION audit exists and our
+// response is PENDING, open the GPS sheet automatically.
+
+import { useEffect, useState } from 'react'
+import { useAuditStore } from '@/store/auditStore'
+import { collectGps } from '@/lib/audit/gpsCollector'
+import { api } from '@/lib/api'
+import { useAuthStore } from '@/store/authStore'
+import { toast } from 'sonner'
+
+export type CollectorPhase =
+  | 'idle'
+  | 'awaiting_consent'
+  | 'collecting'
+  | 'submitting'
+  | 'done'
+  | 'denied'
+  | 'error'
+
+export function useAuditLocationCollector() {
+  const session = useAuditStore(s => s.session)
+  const responses = useAuditStore(s => s.responses)
+  const studentId = useAuthStore(s => s.currentUser?.id)
+  const [phase, setPhase] = useState<CollectorPhase>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  // Determine if we need to act
+  const ourResponse = studentId ? responses.get(studentId) : undefined
+  const shouldAct =
+    !!session &&
+    session.status === 'ACTIVE' &&
+    session.mode === 'LOCATION' &&
+    !!ourResponse &&
+    ourResponse.category === 'PENDING'
+
+  useEffect(() => {
+    if (shouldAct && phase === 'idle') setPhase('awaiting_consent')
+    if (!shouldAct && phase !== 'done' && phase !== 'idle') setPhase('idle')
+  }, [shouldAct, phase])
+
+  async function confirm() {
+    if (!session || !studentId) return
+    setPhase('collecting')
+    setError(null)
+    const result = await collectGps({ timeoutMs: 15000, highAccuracy: true })
+    setPhase('submitting')
+
+    try {
+      if (result.status === 'OK') {
+        await api.submitAuditResponse({
+          sessionId: session.id,
+          studentId,
+          gpsLat: result.lat,
+          gpsLng: result.lng,
+          gpsAccuracyM: result.accuracyM,
+          gpsStatus: 'OK',
+          markedBy: 'AUTO_GPS',
+        })
+      } else {
+        await api.submitAuditResponse({
+          sessionId: session.id,
+          studentId,
+          gpsStatus: result.status,
+          markedBy: 'AUTO_GPS',
+        })
+      }
+      setPhase('done')
+      toast.success(result.status === 'OK' ? 'נשלח ✓' : 'שלום — לא נמצא מיקום, רכז יבדוק')
+    } catch (e: any) {
+      setPhase('error')
+      setError(e?.message ?? 'submit_failed')
+      toast.error('שגיאה בשליחה')
+    }
+  }
+
+  async function refuse() {
+    if (!session || !studentId) return
+    try {
+      await api.submitAuditResponse({
+        sessionId: session.id,
+        studentId,
+        gpsStatus: 'DENIED',
+        markedBy: 'AUTO_GPS',
+      })
+      setPhase('denied')
+      toast.info('הרכז יקבל את הבקשה לאישור ידני')
+    } catch (e) {
+      toast.error('שגיאה')
+    }
+  }
+
+  return { phase, error, shouldAct, confirm, refuse }
+}
+```
+
+## 18.4 `src/hooks/useProjectionRotation.ts`
+
+```tsx
+// src/hooks/useProjectionRotation.ts
+// Rotates the active tab while projection mode is on.
+
+import { useEffect } from 'react'
+import { useAuditUiStore, type LiveTab } from '@/store/auditUiStore'
+
+const SEQUENCE: { tab: LiveTab; dwellMs: number }[] = [
+  { tab: 'grid',    dwellMs: 12000 },
+  { tab: 'heatmap', dwellMs: 8000 },
+  { tab: 'map',     dwellMs: 10000 },
+  { tab: 'feed',    dwellMs: 6000 },
+]
+
+export function useProjectionRotation() {
+  const projectionMode = useAuditUiStore(s => s.projectionMode)
+  const projectionPaused = useAuditUiStore(s => s.projectionPaused)
+  const setTab = useAuditUiStore(s => s.setTab)
+  const activeTab = useAuditUiStore(s => s.activeTab)
+
+  useEffect(() => {
+    if (!projectionMode || projectionPaused) return
+    const idx = SEQUENCE.findIndex(s => s.tab === activeTab)
+    const next = SEQUENCE[(idx + 1) % SEQUENCE.length]
+    const cur = SEQUENCE[idx >= 0 ? idx : 0]
+    const timer = window.setTimeout(() => setTab(next.tab), cur.dwellMs)
+    return () => window.clearTimeout(timer)
+  }, [projectionMode, projectionPaused, activeTab, setTab])
+}
+```
+
+---
+
+# חלק י"ט — React Components (קוד מלא)
+
+## 19.1 `src/components/audit/AuditCategoryChip.tsx`
+
+```tsx
+// src/components/audit/AuditCategoryChip.tsx
+import { cn } from '@/lib/utils'
+import { getCategoryMeta } from '@/lib/audit/categories'
+import type { AuditCategory } from '@/types/audit'
+
+interface Props {
+  category: AuditCategory
+  size?: 'sm' | 'md' | 'lg'
+  showIcon?: boolean
+  className?: string
+}
+
+export function AuditCategoryChip({ category, size = 'md', showIcon = true, className }: Props) {
+  const m = getCategoryMeta(category)
+  const Icon = m.icon
+  const sizeClasses = {
+    sm: 'text-xs px-2 py-0.5 gap-1',
+    md: 'text-sm px-2.5 py-1 gap-1.5',
+    lg: 'text-base px-3 py-1.5 gap-2',
+  }[size]
+  const iconSize = { sm: 12, md: 14, lg: 16 }[size]
+
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center rounded-full font-medium border',
+        m.bgColor, m.textColor, m.borderColor,
+        sizeClasses,
+        className,
+      )}
+    >
+      {showIcon && <Icon size={iconSize} />}
+      <span>{m.label}</span>
+    </span>
+  )
+}
+```
+
+## 19.2 `src/components/audit/AuditDistanceBadge.tsx`
+
+```tsx
+// src/components/audit/AuditDistanceBadge.tsx
+import { cn } from '@/lib/utils'
+import { getBucketMeta, formatDistance } from '@/lib/audit/distanceBuckets'
+import type { DistanceBucket } from '@/types/audit'
+
+interface Props {
+  bucket: DistanceBucket | null
+  distanceM: number | null
+  className?: string
+  size?: 'sm' | 'md'
+}
+
+export function AuditDistanceBadge({ bucket, distanceM, className, size = 'md' }: Props) {
+  if (!bucket) return <span className="text-xs text-muted-foreground">—</span>
+  const m = getBucketMeta(bucket)
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1 rounded-full border-2',
+      m.twBorder, m.twText,
+      size === 'sm' ? 'text-[10px] px-1.5 py-0' : 'text-xs px-2 py-0.5',
+      className,
+    )}>
+      <span className={cn('w-1.5 h-1.5 rounded-full', m.twBg)} />
+      <span dir="ltr">{formatDistance(distanceM)}</span>
+    </span>
+  )
+}
+```
+
+## 19.3 `src/components/audit/AuditKpiRow.tsx`
+
+```tsx
+// src/components/audit/AuditKpiRow.tsx
+import CountUp from 'react-countup'
+import { useAuditStats } from '@/hooks/useAuditStats'
+import { CATEGORY_META } from '@/lib/audit/categories'
+import { AlertTriangle } from 'lucide-react'
+import { cn } from '@/lib/utils'
+
+export function AuditKpiRow() {
+  const { byCategory, alertsOpen, total, progressPct } = useAuditStats()
+
+  const items = [
+    { key: 'IN_YESHIVA' as const, count: byCategory.IN_YESHIVA },
+    { key: 'OUT_PERMIT' as const, count: byCategory.OUT_PERMIT },
+    { key: 'OUT_NO_PERMIT' as const, count: byCategory.OUT_NO_PERMIT },
+    { key: 'UNKNOWN' as const, count: byCategory.UNKNOWN },
+    { key: 'PENDING' as const, count: byCategory.PENDING },
+  ]
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+      {items.map((it) => {
+        const m = CATEGORY_META[it.key]
+        return (
+          <div
+            key={it.key}
+            className={cn(
+              'rounded-2xl border-2 p-4 shadow-sm transition-all',
+              m.bgColor, m.borderColor,
+            )}
+            data-testid={`kpi-${it.key.toLowerCase()}`}
+          >
+            <div className={cn('text-3xl font-bold tabular-nums', m.textColor)}>
+              <CountUp end={it.count} duration={0.6} preserveValue />
+            </div>
+            <div className={cn('text-xs mt-1', m.textColor)}>{m.label}</div>
+          </div>
+        )
+      })}
+
+      <div
+        className={cn(
+          'rounded-2xl border-2 p-4 shadow-sm',
+          alertsOpen > 0
+            ? 'bg-red-50 dark:bg-red-950 border-red-500 animate-pulse'
+            : 'bg-gray-50 dark:bg-gray-900 border-gray-300',
+        )}
+        data-testid="kpi-alerts"
+      >
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={20} className={alertsOpen > 0 ? 'text-red-600' : 'text-gray-400'} />
+          <div className={cn('text-3xl font-bold tabular-nums', alertsOpen > 0 ? 'text-red-700' : 'text-gray-500')}>
+            <CountUp end={alertsOpen} duration={0.4} preserveValue />
+          </div>
+        </div>
+        <div className={cn('text-xs mt-1', alertsOpen > 0 ? 'text-red-700' : 'text-gray-500')}>
+          אזעקות פתוחות
+        </div>
+      </div>
+    </div>
+  )
+}
+```
+
+## 19.4 `src/components/audit/AuditClassCard.tsx`
+
+```tsx
+// src/components/audit/AuditClassCard.tsx
+import { useMemo } from 'react'
+import { motion } from 'framer-motion'
+import { useAuditStore } from '@/store/auditStore'
+import { CATEGORY_META } from '@/lib/audit/categories'
+import { cn } from '@/lib/utils'
+import { ChevronLeft } from 'lucide-react'
+
+interface Props {
+  classId: string
+  onClick?: () => void
+}
+
+export function AuditClassCard({ classId, onClick }: Props) {
+  const responses = useAuditStore(s => s.responses)
+
+  const stats = useMemo(() => {
+    const all = [...responses.values()].filter(r => r.classId === classId)
+    const total = all.length
+    const marked = all.filter(r => r.category !== 'PENDING').length
+    const inYeshiva = all.filter(r => r.category === 'IN_YESHIVA').length
+    const outPermit = all.filter(r => r.category === 'OUT_PERMIT').length
+    const outNoPermit = all.filter(r => r.category === 'OUT_NO_PERMIT').length
+    const unknown = all.filter(r => r.category === 'UNKNOWN').length
+    const pending = all.filter(r => r.category === 'PENDING').length
+    const pct = total === 0 ? 0 : Math.round((marked / total) * 100)
+    return { total, marked, inYeshiva, outPermit, outNoPermit, unknown, pending, pct }
+  }, [responses, classId])
+
+  const hasAlert = stats.outNoPermit > 0
+  const isDone = stats.pct === 100
+  const isUntouched = stats.marked === 0
+
+  return (
+    <motion.button
+      layout
+      onClick={onClick}
+      whileHover={{ scale: 1.02 }}
+      whileTap={{ scale: 0.98 }}
+      className={cn(
+        'rounded-2xl border-2 p-4 text-start w-full shadow-sm transition-colors',
+        isDone && !hasAlert && 'bg-emerald-50 dark:bg-emerald-950 border-emerald-300',
+        hasAlert && 'bg-red-50 dark:bg-red-950 border-red-500 animate-[flash_1s_ease-in-out_3]',
+        !isDone && !hasAlert && !isUntouched && 'bg-amber-50 dark:bg-amber-950 border-amber-300',
+        isUntouched && 'bg-gray-50 dark:bg-gray-900 border-gray-300',
+      )}
+    >
+      <div className="flex justify-between items-start mb-2">
+        <div className="font-semibold text-lg">{classId}</div>
+        <ChevronLeft size={20} className="text-muted-foreground" />
+      </div>
+
+      <div className="text-xs text-muted-foreground mb-2 tabular-nums">
+        {stats.marked} / {stats.total} ({stats.pct}%)
+      </div>
+
+      <div className="w-full h-2 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden mb-3">
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${stats.pct}%` }}
+          transition={{ duration: 0.6, ease: 'easeOut' }}
+          className={cn(
+            'h-full',
+            hasAlert ? 'bg-red-500' : isDone ? 'bg-emerald-500' : 'bg-blue-500',
+          )}
+        />
+      </div>
+
+      <div className="flex items-center gap-2 text-xs flex-wrap">
+        <Pill bg="bg-emerald-100" text="text-emerald-800" count={stats.inYeshiva} label="נוכח" />
+        <Pill bg="bg-blue-100"    text="text-blue-800"    count={stats.outPermit}  label="עם א'" />
+        <Pill bg="bg-red-100"     text="text-red-800"     count={stats.outNoPermit} label="ללא א'" />
+        <Pill bg="bg-amber-100"   text="text-amber-800"   count={stats.unknown}    label="לא ידוע" />
+        {stats.pending > 0 && (
+          <Pill bg="bg-gray-100" text="text-gray-700" count={stats.pending} label="ממתין" />
+        )}
+      </div>
+    </motion.button>
+  )
+}
+
+function Pill({ bg, text, count, label }: { bg: string; text: string; count: number; label: string }) {
+  if (count === 0) return null
+  return (
+    <span className={cn('rounded-full px-1.5 py-0.5', bg, text)}>
+      <span className="tabular-nums font-semibold">{count}</span> {label}
+    </span>
+  )
+}
+```
+
+## 19.5 `src/components/audit/AuditClassGrid.tsx`
+
+```tsx
+// src/components/audit/AuditClassGrid.tsx
+import { useMemo, useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
+import { AuditClassCard } from './AuditClassCard'
+import { AuditClassDrawer } from './AuditClassDrawer'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuditStats } from '@/hooks/useAuditStats'
+
+export function AuditClassGrid() {
+  const session = useAuditStore(s => s.session)
+  const stats = useAuditStats()
+  const [openClassId, setOpenClassId] = useState<string | null>(null)
+
+  // Sort by: alerts first, untouched second, in-progress third, done last
+  const sortedClassIds = useMemo(() => {
+    if (!session) return []
+    const ranks = session.classIds.map(cid => {
+      const s = stats.byClass[cid] ?? { total: 0, marked: 0, alerts: 0 }
+      const pct = s.total === 0 ? 0 : s.marked / s.total
+      const rank =
+        s.alerts > 0 ? 0
+        : s.marked === 0 ? 1
+        : pct < 1 ? 2
+        : 3
+      return { cid, rank, pct }
+    })
+    return ranks
+      .sort((a, b) => a.rank - b.rank || (b.pct - a.pct))
+      .map(r => r.cid)
+  }, [session, stats])
+
+  if (!session) return null
+
+  return (
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <AnimatePresence>
+          {sortedClassIds.map(cid => (
+            <AuditClassCard
+              key={cid}
+              classId={cid}
+              onClick={() => setOpenClassId(cid)}
+            />
+          ))}
+        </AnimatePresence>
+      </div>
+      {openClassId && (
+        <AuditClassDrawer
+          classId={openClassId}
+          open
+          onClose={() => setOpenClassId(null)}
+        />
+      )}
+    </>
+  )
+}
+```
+
+## 19.6 `src/components/audit/AuditMap.tsx`
+
+```tsx
+// src/components/audit/AuditMap.tsx
+// Leaflet-based live map of student locations.
+
+import 'leaflet/dist/leaflet.css'
+import { useEffect, useMemo, useRef } from 'react'
+import { MapContainer, TileLayer, Circle, Marker, Tooltip, useMap } from 'react-leaflet'
+import L from 'leaflet'
+import MarkerClusterGroup from 'react-leaflet-cluster'
+import { useAuditStore } from '@/store/auditStore'
+import { CAMPUS_LAT, CAMPUS_LNG } from '@/lib/audit/haversine'
+import { DISTANCE_BUCKETS_ORDERED, getBucketMeta } from '@/lib/audit/distanceBuckets'
+
+const COLORS_BY_BUCKET: Record<string, string> = {
+  GREEN: '#10b981',
+  BLUE: '#3b82f6',
+  ORANGE: '#f59e0b',
+  RED: '#ef4444',
+}
+
+function dotIcon(color: string, pulse = false) {
+  return L.divIcon({
+    className: 'audit-dot',
+    html: `<div style="
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: ${color};
+      border: 2px solid white;
+      box-shadow: 0 0 0 2px ${color}55, 0 1px 4px rgba(0,0,0,0.3);
+      ${pulse ? 'animation: audit-marker-pulse 1.4s ease-in-out infinite;' : ''}
+    "></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  })
+}
+
+export function AuditMap() {
+  const responses = useAuditStore(s => s.responses)
+  const positioned = useMemo(
+    () => [...responses.values()].filter(r => r.gpsLat != null && r.gpsLng != null),
+    [responses],
+  )
+
+  return (
+    <div className="relative h-[600px] rounded-2xl overflow-hidden border-2">
+      <MapContainer center={[CAMPUS_LAT, CAMPUS_LNG]} zoom={14} className="h-full w-full">
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+
+        {/* Concentric range circles */}
+        {DISTANCE_BUCKETS_ORDERED.filter(b => b.maxMeters < Infinity).map(b => (
+          <Circle
+            key={b.bucket}
+            center={[CAMPUS_LAT, CAMPUS_LNG]}
+            radius={b.maxMeters}
+            pathOptions={{
+              color: b.color,
+              weight: 1,
+              opacity: 0.4,
+              fillOpacity: 0,
+              dashArray: '4 6',
+            }}
+          />
+        ))}
+
+        {/* Campus marker */}
+        <Marker
+          position={[CAMPUS_LAT, CAMPUS_LNG]}
+          icon={L.divIcon({
+            className: 'audit-campus',
+            html: '<div style="font-size:24px;">🏫</div>',
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+          })}
+        />
+
+        {/* Student markers (clustered) */}
+        <MarkerClusterGroup chunkedLoading>
+          {positioned.map(r => {
+            const color = r.distanceBucket ? COLORS_BY_BUCKET[r.distanceBucket] : '#9ca3af'
+            const pulse = r.distanceBucket === 'RED'
+            return (
+              <Marker
+                key={r.id}
+                position={[r.gpsLat!, r.gpsLng!]}
+                icon={dotIcon(color, pulse)}
+              >
+                <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                  <div className="text-sm">
+                    <div className="font-semibold">{r.studentId.slice(0, 8)}</div>
+                    <div className="text-xs">{r.classId}</div>
+                    <div className="text-xs" dir="ltr">
+                      {r.distanceFromCampusM
+                        ? `${Math.round(r.distanceFromCampusM)}m`
+                        : '—'}
+                    </div>
+                  </div>
+                </Tooltip>
+              </Marker>
+            )
+          })}
+        </MarkerClusterGroup>
+      </MapContainer>
+
+      {/* Legend overlay */}
+      <div className="absolute top-3 end-3 bg-white/95 dark:bg-gray-900/95 rounded-xl p-3 shadow-lg z-[1000] text-xs">
+        <div className="font-semibold mb-2">מקרא</div>
+        {DISTANCE_BUCKETS_ORDERED.map(b => (
+          <div key={b.bucket} className="flex items-center gap-2 my-1">
+            <span className="w-3 h-3 rounded-full" style={{ background: b.color }} />
+            <span>{b.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+```
+
+## 19.7 `src/components/audit/AuditHeatmap.tsx`
+
+```tsx
+// src/components/audit/AuditHeatmap.tsx
+// Heatmap by class. Each cell = a class. Color = % marked.
+
+import { useAuditStore } from '@/store/auditStore'
+import { useAuditStats } from '@/hooks/useAuditStats'
+import { motion } from 'framer-motion'
+import { cn } from '@/lib/utils'
+
+// Group classIds by grade prefix using normalizeHebrew rules
+function groupClasses(classIds: string[]): Record<string, string[]> {
+  // Simple grouping by inferring "shiur" from classId is complex; fallback:
+  // we return a flat single group "כיתות". Real impl should query students store
+  // for the actual grade.
+  return { 'כיתות': classIds }
+}
+
+export function AuditHeatmap() {
+  const session = useAuditStore(s => s.session)
+  const stats = useAuditStats()
+  if (!session) return null
+
+  const groups = groupClasses(session.classIds)
+
+  return (
+    <div className="space-y-6">
+      {Object.entries(groups).map(([grade, ids]) => (
+        <div key={grade}>
+          <h3 className="text-lg font-semibold mb-3">{grade}</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+            {ids.map(cid => {
+              const s = stats.byClass[cid] ?? { total: 0, marked: 0, alerts: 0 }
+              const pct = s.total === 0 ? 0 : s.marked / s.total
+              const hsl = pctToHsl(pct, s.alerts > 0)
+              return (
+                <motion.div
+                  key={cid}
+                  layout
+                  className={cn(
+                    'rounded-xl p-3 border-2 text-center transition-colors',
+                    s.alerts > 0 && 'animate-pulse border-red-500',
+                  )}
+                  style={{ backgroundColor: hsl }}
+                >
+                  <div className="text-2xl mb-1">
+                    {s.alerts > 0 ? '🔴' : pct >= 0.99 ? '✓' : pct >= 0.8 ? '🟢' : pct >= 0.5 ? '🟠' : '⚪'}
+                  </div>
+                  <div className="text-3xl font-bold tabular-nums">
+                    {Math.round(pct * 100)}%
+                  </div>
+                  <div className="text-xs mt-1 line-clamp-1">{cid}</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    {s.marked}/{s.total}
+                  </div>
+                </motion.div>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function pctToHsl(pct: number, hasAlert: boolean): string {
+  if (hasAlert) return 'hsl(0, 80%, 90%)'
+  if (pct >= 0.99) return 'hsl(142, 76%, 88%)'
+  if (pct >= 0.8) return 'hsl(142, 50%, 92%)'
+  if (pct >= 0.5) return 'hsl(45, 80%, 90%)'
+  return 'hsl(210, 10%, 95%)'
+}
+```
+
+## 19.8 `src/components/audit/AuditActivityFeed.tsx`
+
+```tsx
+// src/components/audit/AuditActivityFeed.tsx
+// Streaming feed of recent audit actions.
+
+import { useMemo } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { useAuditStore } from '@/store/auditStore'
+import { CATEGORY_META } from '@/lib/audit/categories'
+import { formatDistance } from '@/lib/audit/distanceBuckets'
+import { Clock } from 'lucide-react'
+
+const MAX_ITEMS = 30
+
+export function AuditActivityFeed() {
+  const responses = useAuditStore(s => s.responses)
+
+  const items = useMemo(() => {
+    return [...responses.values()]
+      .filter(r => r.markedAt)
+      .sort((a, b) => (a.markedAt! < b.markedAt! ? 1 : -1))
+      .slice(0, MAX_ITEMS)
+  }, [responses])
+
+  return (
+    <div className="rounded-2xl border-2 p-4 bg-white dark:bg-gray-900 h-[400px] overflow-hidden flex flex-col">
+      <div className="flex items-center gap-2 mb-3">
+        <Clock size={18} />
+        <h3 className="font-semibold">פיד פעילות חי</h3>
+      </div>
+      <div className="overflow-y-auto flex-1 space-y-1.5">
+        <AnimatePresence initial={false}>
+          {items.map(r => {
+            const m = CATEGORY_META[r.category]
+            const Icon = m.icon
+            return (
+              <motion.div
+                key={r.id + (r.markedAt ?? '')}
+                initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className={`flex items-center gap-3 p-2 rounded-lg ${m.bgColor}`}
+              >
+                <Icon size={16} className={m.textColor} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs tabular-nums text-muted-foreground" dir="ltr">
+                      {r.markedAt ? new Date(r.markedAt).toLocaleTimeString('he-IL') : ''}
+                    </span>
+                    <span className="text-sm font-medium truncate">{r.classId}</span>
+                  </div>
+                  <div className={`text-xs ${m.textColor}`}>
+                    {r.markedBy === 'AUTO_GPS'
+                      ? `GPS: ${m.label}${r.distanceFromCampusM ? ` (${formatDistance(r.distanceFromCampusM)})` : ''}`
+                      : r.markedBy === 'AUTO_DEPARTURE'
+                        ? 'אוטומטית: יציאה מאושרת'
+                        : `${r.markedBy ?? '?'} → ${m.label}`}
+                  </div>
+                </div>
+              </motion.div>
+            )
+          })}
+        </AnimatePresence>
+        {items.length === 0 && (
+          <div className="text-center text-sm text-muted-foreground py-8">
+            עוד אין פעילות. ממתין לתגובות...
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+```
+
+## 19.9 `src/components/audit/AuditAlertList.tsx`
+
+```tsx
+// src/components/audit/AuditAlertList.tsx
+import { motion, AnimatePresence } from 'framer-motion'
+import { AlertTriangle, Check, MapPin } from 'lucide-react'
+import { useAuditStore } from '@/store/auditStore'
+import { formatDistance } from '@/lib/audit/distanceBuckets'
+import { Button } from '@/components/ui/button'
+
+export function AuditAlertList() {
+  const alerts = useAuditStore(s => s.alerts)
+  const acknowledge = useAuditStore(s => s.acknowledgeAlert)
+  const openAlerts = alerts.filter(a => !a.acknowledgedAt)
+
+  if (openAlerts.length === 0) {
+    return (
+      <div className="text-sm text-muted-foreground p-4 text-center">
+        ✓ אין אזעקות פתוחות
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <AnimatePresence>
+        {openAlerts.map(a => (
+          <motion.div
+            key={a.id}
+            initial={{ opacity: 0, scale: 0.95, x: -20 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            className={`rounded-xl border-2 p-3 flex items-center gap-3 ${
+              a.severity === 'CRITICAL'
+                ? 'bg-red-50 dark:bg-red-950 border-red-500'
+                : 'bg-amber-50 dark:bg-amber-950 border-amber-500'
+            }`}
+          >
+            <AlertTriangle size={24} className={a.severity === 'CRITICAL' ? 'text-red-600' : 'text-amber-600'} />
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold text-sm">תלמיד מחוץ לטווח</div>
+              <div className="text-xs text-muted-foreground flex items-center gap-3">
+                <span dir="ltr"><MapPin size={12} className="inline" /> {formatDistance(a.distanceM)}</span>
+                <span>{new Date(a.triggeredAt).toLocaleTimeString('he-IL')}</span>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => acknowledge(a.id, 'ADMIN')}
+            >
+              <Check size={14} />
+              סמן כנצפה
+            </Button>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
+  )
+}
+```
+
+## 19.10 `src/components/audit/AuditModeSelector.tsx`
+
+```tsx
+// src/components/audit/AuditModeSelector.tsx
+import { Zap, MapPin } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { AuditMode } from '@/types/audit'
+
+interface Props {
+  value: AuditMode | null
+  onChange: (mode: AuditMode) => void
+}
+
+const OPTIONS: { mode: AuditMode; title: string; subtitle: string; Icon: any; bg: string; border: string }[] = [
+  {
+    mode: 'MANUAL',
+    title: 'ביקורת מהירה',
+    subtitle: 'הרכזים מסמנים ידנית את כיתתם — ~3 דקות',
+    Icon: Zap,
+    bg: 'bg-amber-50 dark:bg-amber-950',
+    border: 'border-amber-500',
+  },
+  {
+    mode: 'LOCATION',
+    title: 'ביקורת מיקום',
+    subtitle: 'הסלולרים שולחים GPS אוטומטית — ~5 דקות',
+    Icon: MapPin,
+    bg: 'bg-blue-50 dark:bg-blue-950',
+    border: 'border-blue-500',
+  },
+]
+
+export function AuditModeSelector({ value, onChange }: Props) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {OPTIONS.map(o => (
+        <button
+          key={o.mode}
+          onClick={() => onChange(o.mode)}
+          className={cn(
+            'rounded-3xl border-2 p-6 text-start transition-all',
+            value === o.mode ? `${o.bg} ${o.border} ring-4 ring-offset-2 ring-blue-300` : 'border-gray-200 hover:border-gray-400',
+          )}
+        >
+          <o.Icon size={36} className="mb-3" />
+          <div className="text-xl font-bold mb-1">{o.title}</div>
+          <div className="text-sm text-muted-foreground">{o.subtitle}</div>
+        </button>
+      ))}
+    </div>
+  )
+}
+```
+
+## 19.11 `src/components/audit/StudentAuditSheet.tsx`
+
+```tsx
+// src/components/audit/StudentAuditSheet.tsx
+// Bottom sheet shown to a student when an active LOCATION audit
+// is in progress AND their response is still PENDING.
+
+import { useAuditLocationCollector } from '@/hooks/useAuditLocationCollector'
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { MapPin, Check, X, Loader2 } from 'lucide-react'
+
+export function StudentAuditSheet() {
+  const { phase, shouldAct, confirm, refuse, error } = useAuditLocationCollector()
+
+  return (
+    <Sheet open={shouldAct && phase !== 'done' && phase !== 'denied'}>
+      <SheetContent side="bottom" className="rounded-t-3xl">
+        <SheetHeader>
+          <SheetTitle className="flex items-center gap-2">
+            <MapPin className="text-blue-600" />
+            בקרת מיקום מהירה
+          </SheetTitle>
+          <SheetDescription>
+            ההנהלה מבקשת לוודא שאתה בישיבה. האפליקציה תשלח את מיקומך הנוכחי
+            ולא תאחסן אותו לאחר תום הביקורת.
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="space-y-3 mt-6">
+          {phase === 'awaiting_consent' && (
+            <>
+              <Button onClick={confirm} className="w-full h-14 bg-emerald-600 hover:bg-emerald-700 text-lg">
+                <Check className="me-2" /> אשר ושלח מיקום
+              </Button>
+              <Button onClick={refuse} variant="outline" className="w-full h-12">
+                <X className="me-2" /> אני לא יכול / לא בישיבה
+              </Button>
+            </>
+          )}
+
+          {(phase === 'collecting' || phase === 'submitting') && (
+            <div className="flex flex-col items-center gap-3 py-6">
+              <Loader2 className="animate-spin text-blue-600" size={36} />
+              <div className="text-sm text-muted-foreground">
+                {phase === 'collecting' ? 'מתבצע איסוף מיקום…' : 'שולח לשרת…'}
+              </div>
+            </div>
+          )}
+
+          {phase === 'error' && (
+            <div className="rounded-xl bg-red-50 p-3 text-red-700 text-sm">
+              שגיאה: {error ?? 'נכשל'}
+              <Button onClick={confirm} variant="outline" className="mt-3 w-full">
+                נסה שוב
+              </Button>
+            </div>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+```
+
+---
+
+# חלק כ' — Edge Functions (קוד מלא)
+
+## 20.1 `supabase/functions/send-audit-push/index.ts`
+
+```ts
+// supabase/functions/send-audit-push/index.ts
+// Edge Function: send Web Push to all students/supervisors
+// for a given audit session.
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+// VAPID helpers (reused from existing send-push)
+import { sendWebPush } from './webPush.ts'
+
+interface Payload {
+  session_id: string
+  target: 'STUDENTS' | 'SUPERVISORS' | 'BOTH'
+  class_ids?: string[]
+}
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  try {
+    const body = (await req.json()) as Payload
+    if (!body.session_id || !body.target) {
+      return json({ error: 'invalid_payload' }, 400)
+    }
+
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    )
+
+    // Look up session
+    const { data: session, error: sErr } = await supabase
+      .from('audit_sessions').select('*').eq('id', body.session_id).single()
+    if (sErr || !session) return json({ error: 'session_not_found' }, 404)
+
+    if (session.status !== 'ACTIVE') {
+      return json({ error: 'session_not_active' }, 400)
+    }
+
+    // Resolve targets to push_tokens
+    let tokens: { studentId: string; pushToken: string }[] = []
+    if (body.target === 'STUDENTS' || body.target === 'BOTH') {
+      const { data: students } = await supabase
+        .from('students').select('id, push_token')
+        .in('classId', body.class_ids ?? session.class_ids)
+        .not('push_token', 'is', null)
+      for (const s of students ?? []) {
+        tokens.push({ studentId: s.id, pushToken: s.push_token })
+      }
+    }
+
+    // (Future: supervisors come from app_settings; not in this snippet)
+
+    let sent = 0, failed = 0, removed = 0
+    for (const t of tokens) {
+      const payload = JSON.stringify({
+        kind: 'AUDIT_LOCATION',
+        sessionId: body.session_id,
+        deadlineTs: Date.now() + (session.settings?.timeoutSec ?? 120) * 1000,
+        mode: session.mode,
+        title: 'בקרת מיקום מהירה',
+        body: 'ההנהלה מבקשת לוודא שאתה בישיבה — אנא לחץ כאן.',
+      })
+      try {
+        const ok = await sendWebPush(t.pushToken, payload)
+        if (ok.statusCode >= 200 && ok.statusCode < 300) sent++
+        else if (ok.statusCode === 410 || ok.statusCode === 404) {
+          await supabase.from('students').update({ push_token: null }).eq('id', t.studentId)
+          removed++
+        } else failed++
+
+        await supabase.from('audit_push_log').insert({
+          session_id: body.session_id, target_kind: 'STUDENT',
+          target_id: t.studentId, success: ok.statusCode < 300,
+          error_message: ok.statusCode >= 300 ? `HTTP ${ok.statusCode}` : null,
+        })
+      } catch (e: any) {
+        failed++
+        await supabase.from('audit_push_log').insert({
+          session_id: body.session_id, target_kind: 'STUDENT',
+          target_id: t.studentId, success: false, error_message: e?.message ?? 'unknown',
+        })
+      }
+    }
+
+    return json({ sent, failed, removed, total: tokens.length })
+  } catch (e: any) {
+    return json({ error: e?.message ?? 'unknown' }, 500)
+  }
+})
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  })
+}
+```
+
+---
+
+# חלק כ"א — Service Worker Update
+
+## 21.1 הוספה ל־`public/sw.js`
+
+```js
+// public/sw.js — additions for audit
+self.addEventListener('push', (event) => {
+  if (!event.data) return
+  let payload
+  try { payload = event.data.json() } catch { return }
+
+  if (payload.kind === 'AUDIT_LOCATION') {
+    const promise = self.registration.showNotification(
+      payload.title ?? 'בקרת מיקום',
+      {
+        body: payload.body ?? 'לחץ כדי לפתוח את האפליקציה',
+        icon: '/icons/audit-192.png',
+        badge: '/icons/audit-72.png',
+        tag: 'audit-' + payload.sessionId,
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [200, 100, 200],
+        data: { sessionId: payload.sessionId, kind: 'AUDIT_LOCATION' },
+        actions: [
+          { action: 'open', title: 'פתח אפליקציה' },
+          { action: 'dismiss', title: 'דחה' },
+        ],
+      },
+    )
+    event.waitUntil(promise)
+    return
+  }
+  // ... existing handlers
+})
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  if (event.notification.data?.kind === 'AUDIT_LOCATION') {
+    const url = `/student?audit=${event.notification.data.sessionId}`
+    event.waitUntil(
+      clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+        for (const c of list) {
+          if (c.url.includes('/student')) { c.focus(); c.postMessage({ kind: 'AUDIT_OPEN', sessionId: event.notification.data.sessionId }); return }
+        }
+        return clients.openWindow(url)
+      })
+    )
+  }
+})
+```
+
+---
+
+# חלק כ"ב — CSS + Tailwind extensions
+
+## 22.1 `src/index.css` additions
+
+```css
+:root {
+  --audit-green:        #10b981;
+  --audit-green-bg:     #d1fae5;
+  --audit-blue:         #3b82f6;
+  --audit-blue-bg:      #dbeafe;
+  --audit-orange:       #f59e0b;
+  --audit-orange-bg:    #fef3c7;
+  --audit-red:          #ef4444;
+  --audit-red-bg:       #fee2e2;
+  --audit-gray:         #6b7280;
+  --audit-gray-bg:      #f3f4f6;
+
+  --audit-proj-bg:      #000;
+  --audit-proj-text:    #fff;
+  --audit-proj-accent:  #fbbf24;
+}
+
+@keyframes audit-marker-pulse {
+  0%   { transform: scale(1);   opacity: 1; }
+  70%  { transform: scale(2.5); opacity: 0; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+
+@keyframes flash {
+  0%, 100% { background-color: var(--audit-red-bg); }
+  50%      { background-color: #fff; }
+}
+
+.audit-projection-mode {
+  background: var(--audit-proj-bg);
+  color: var(--audit-proj-text);
+  font-size: 1.5rem;
+}
+
+.audit-projection-mode .kpi-number { font-size: 5rem; font-weight: 900; }
+.audit-projection-mode h1 { font-size: 4rem; }
+```
+
+## 22.2 `tailwind.config.ts` additions
+
+```ts
+// tailwind.config.ts
+export default {
+  // ...existing
+  theme: {
+    extend: {
+      colors: {
+        'audit-green':   'var(--audit-green)',
+        'audit-blue':    'var(--audit-blue)',
+        'audit-orange':  'var(--audit-orange)',
+        'audit-red':     'var(--audit-red)',
+        'audit-gray':    'var(--audit-gray)',
+      },
+      animation: {
+        'audit-pulse': 'audit-marker-pulse 1.4s ease-in-out infinite',
+        'audit-flash': 'flash 1s ease-in-out 3',
+      },
+    },
+  },
+}
+```
+
+---
+
+# חלק כ"ג — API Client (קוד מלא של supabaseClient extension)
+
+## 23.1 `src/lib/api/supabaseClient.ts` — additions
+
+```ts
+// extension to existing supabaseClient.ts
+
+import type {
+  AuditSession, AuditResponse, AuditAlert, AuditKpis,
+  OpenAuditPayload, SubmitAuditResponsePayload, CloseAuditPayload,
+  AuditMode,
+} from '@/types/audit'
+import { supabase } from './supabase'
+
+// snake_case → camelCase (one helper per shape to be explicit)
+function toSession(row: any): AuditSession {
+  return {
+    id: row.id, mode: row.mode, status: row.status,
+    classIds: row.class_ids, totalStudents: row.total_students,
+    startedBy: row.started_by, startedAt: row.started_at,
+    closedAt: row.closed_at, closedBy: row.closed_by,
+    notes: row.notes, settings: row.settings ?? {},
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }
+}
+
+function toResponse(row: any): AuditResponse {
+  return {
+    id: row.id, sessionId: row.session_id, studentId: row.student_id,
+    classId: row.class_id, category: row.category,
+    markedBy: row.marked_by, markedAt: row.marked_at,
+    gpsLat: row.gps_lat, gpsLng: row.gps_lng,
+    gpsAccuracyM: row.gps_accuracy_m,
+    distanceFromCampusM: row.distance_from_campus_m,
+    distanceBucket: row.distance_bucket, gpsStatus: row.gps_status,
+    departureId: row.departure_id, note: row.note,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }
+}
+
+function toAlert(row: any): AuditAlert {
+  return {
+    id: row.id, sessionId: row.session_id, studentId: row.student_id,
+    triggeredAt: row.triggered_at, distanceM: row.distance_m,
+    gpsLat: row.gps_lat, gpsLng: row.gps_lng,
+    severity: row.severity,
+    acknowledgedBy: row.acknowledged_by, acknowledgedAt: row.acknowledged_at,
+    note: row.note,
+  }
+}
+
+export const auditApi = {
+  async openAudit(p: OpenAuditPayload) {
+    const { data, error } = await supabase.rpc('open_audit', {
+      p_mode: p.mode, p_class_ids: p.classIds,
+      p_started_by: p.startedBy,
+      p_settings: p.settings ?? {}, p_notes: p.notes ?? null,
+    })
+    if (error) throw error
+    return data as { session_id: string; total_students: number; mode: AuditMode } | { error: string }
+  },
+
+  async submitAuditResponse(p: SubmitAuditResponsePayload) {
+    const { data, error } = await supabase.rpc('submit_audit_response', {
+      p_session_id: p.sessionId,
+      p_student_id: p.studentId,
+      p_category: p.category ?? null,
+      p_gps_lat: p.gpsLat ?? null,
+      p_gps_lng: p.gpsLng ?? null,
+      p_gps_accuracy_m: p.gpsAccuracyM ?? null,
+      p_gps_status: p.gpsStatus ?? null,
+      p_marked_by: p.markedBy ?? null,
+      p_note: p.note ?? null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async closeAudit(p: CloseAuditPayload) {
+    const { data, error } = await supabase.rpc('close_audit', {
+      p_session_id: p.sessionId, p_closed_by: p.closedBy, p_notes: p.notes ?? null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async abortAudit(id: string, actor: string, reason?: string) {
+    const { data, error } = await supabase.rpc('abort_audit', {
+      p_session_id: id, p_actor: actor, p_reason: reason ?? null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async getActiveAudit() {
+    const { data, error } = await supabase.rpc('get_active_audit')
+    if (error) throw error
+    if (!data?.session) return null
+    return {
+      session: toSession(data.session),
+      responses: (data.responses ?? []).map(toResponse),
+      alerts: (data.alerts ?? []).map(toAlert),
+      kpis: data.kpis as AuditKpis,
+    }
+  },
+
+  async getAuditFull(sessionId: string) {
+    const { data, error } = await supabase.rpc('get_audit_full', { p_session_id: sessionId })
+    if (error) throw error
+    return {
+      session: toSession(data.session),
+      responses: (data.responses ?? []).map(toResponse),
+      alerts: (data.alerts ?? []).map(toAlert),
+      kpis: data.kpis as AuditKpis,
+    }
+  },
+
+  async acknowledgeAuditAlert(alertId: string, actor: string, note?: string) {
+    const { data, error } = await supabase.rpc('acknowledge_audit_alert', {
+      p_alert_id: alertId, p_actor: actor, p_note: note ?? null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async listPastAudits(filters?: { mode?: AuditMode; since?: string; until?: string }) {
+    const { data, error } = await supabase.rpc('list_past_audits', {
+      p_mode: filters?.mode ?? null,
+      p_since: filters?.since ?? null,
+      p_until: filters?.until ?? null,
+      p_limit: 100,
+    })
+    if (error) throw error
+    return (data ?? []).map(toSession)
+  },
+}
+```
+
+---
+
+# חלק כ"ד — מטריצת שגיאות מלאה
+
+| קוד | מקור | משמעות | UI behaviour | מעורבות מנהל |
+|-----|------|---------|---------------|----------------|
+| `AUDIT_ACTIVE` | `open_audit` | יש כבר סשן פעיל | מציע "המשך את הסשן הקיים" | אופציה לבטל ולפתוח חדש |
+| `INVALID_MODE` | `open_audit` | mode שגוי | toast שגיאה, חזרה לטופס | כן |
+| `NO_CLASSES_SELECTED` | `open_audit` | רשימת class_ids ריקה | UI חוסם submit | — |
+| `SESSION_NOT_FOUND` | כל RPC | session_id לא קיים | redirect ל־landing | — |
+| `SESSION_NOT_ACTIVE` | `submit_audit_response` / `close_audit` | סשן כבר נסגר | toast "הסשן נסגר", החדל ניסיון | — |
+| `RESPONSE_NOT_FOUND` | `submit_audit_response` | תלמיד לא בכיתות הנבחרות | toast "התלמיד לא בביקורת" | אזעקת שגיאה |
+| `ALERT_ALREADY_ACKNOWLEDGED_OR_MISSING` | `acknowledge_audit_alert` | אזעקה כבר נצפתה | toast info | — |
+| `LOW_ACCURACY` | client GPS | accuracy > 1000m | סימן ⚠ ליד התלמיד | רכז יחליט ידנית |
+| `DENIED` | client GPS | משתמש דחה | UNKNOWN, sheet סגור | רכז יחליט |
+| `TIMEOUT` | client GPS | חרגה מ־15s | UNKNOWN + הצעה לנסות שוב | רכז יחליט |
+| `UNAVAILABLE` | client GPS | אין מכשיר GPS | UNKNOWN | רכז יחליט |
+| `OFFLINE` | client GPS | navigator.onLine=false | נשמר ב־queue, ישלח כשיחזור | — |
+| `PUSH_INVALID_SUBSCRIPTION` | Edge Func | HTTP 410/404 | מוחק את ה־push_token | log בלבד |
+| `PUSH_RATE_LIMITED` | Edge Func | HTTP 429 | retry עם backoff | — |
+| `RPC_NETWORK_ERROR` | Supabase | fetch failed | retry x3 + toast | אם נכשל סופי |
+| `REALTIME_DISCONNECTED` | Supabase | ws closed | UI מציג banner "לא מחובר", polling fallback | — |
+
+---
+
+# חלק כ"ה — תרחישי בדיקה (Test Cases) מפורטים
+
+## 25.1 Manual mode happy path
+**שלב | פעולה | תוצאה צפויה**
+1. Admin login → `/admin/audit` | רשימת ביקורות מוצגת
+2. Click "ביקורת חדשה" | navigation ל-`/admin/audit/new`
+3. בחר MANUAL, סמן כל הכיתות | submit מופעל
+4. Click "פתח ביקורת" | RPC `open_audit` נקרא; session.id מוחזר
+5. Navigation ל-`/admin/audit/:id/live` | KPIs מציגים PENDING=381
+6. Supervisor1 פותח את האפליקציה | רואה רשימת תלמידיו
+7. Supervisor1 לוחץ "נוכח" על תלמיד #1 | RPC `submit_audit_response`. רכז רואה toast. מנהל רואה count IN_YESHIVA++
+8. אחרי סימון כל ה־381 | progress=100%, מנהל לוחץ "סיים"
+9. RPC `close_audit` | session.status='CLOSED'. SummaryModal צץ
+
+## 25.2 Location mode happy path
+1. Admin בוחר LOCATION, settings={timeoutSec:120, sensitivity:'MEDIUM'} | submit
+2. Edge func `send-audit-push` נקרא | push נשלח ל־381 push_tokens
+3. תלמיד 1 פותח את האפליקציה ע"י push tap | SW פוסט message → React מציג Sheet
+4. תלמיד 1 לוחץ "אשר" | gpsCollector קולט (50m, accuracy=12m)
+5. Submit ל־RPC | category='IN_YESHIVA', bucket='GREEN'
+6. Manager UI: KPI IN_YESHIVA++, מפה מציגה נקודה ירוקה | אנימציית pulse
+7. תלמיד 5 ב־5.2km | category='OUT_NO_PERMIT', bucket='RED', trigger insert ל־audit_alerts | מנהל רואה Modal אזעקה + sound
+8. Admin acks alert | UI מסיר את הקובייה
+
+## 25.3 Refresh persistence
+1. Admin פותח ביקורת. רואה 5/381 marked
+2. Admin מרענן את הדף (F5) | Page reload
+3. `useActiveAudit` mount → `get_active_audit` | מחזיר sessionId + 5 responses
+4. UI מציג בדיוק את אותו state | KPIs נכונים, Grid נכון, Feed מתאחה
+
+## 25.4 Refresh by supervisor mid-audit
+1. Supervisor1 סימן 12 תלמידים. רענן.
+2. `get_active_audit` מחזיר session
+3. UI מסנן רק לכיתת הרכז. 12 הסימונים נשמרו.
+
+## 25.5 Concurrent admin attempts
+1. Admin A פותח ביקורת
+2. Admin B מנסה לפתוח ביקורת חדשה
+3. RPC `open_audit` מחזיר `{error:'AUDIT_ACTIVE', existing_session_id: X}`
+4. Admin B מקבל choice: "המשך את X" או "ביטל את X ופתח חדש"
+
+## 25.6 GPS denied
+1. תלמיד דוחה הרשאה ב־browser
+2. Hook מחזיר `{status:'DENIED'}`
+3. RPC submit עם `gps_status='DENIED'`
+4. category='UNKNOWN'
+5. Supervisor רואה אותו ברשימת UNKNOWN, יכול לסמן ידנית
+
+---
+
+# חלק כ"ו — Deployment Runbook
+
+## 26.1 לפני deploy
+- [ ] backup snapshot של Supabase DB
+- [ ] git tag (`v2-pre-audit-deploy`)
+- [ ] ודא ש־VAPID keys זהים בין secrets לל־.env
+
+## 26.2 רצף ההפעלה
+1. **בדיקה ב־staging:**
+   - hardcode SUPABASE_URL=staging
+   - run e2e suite
+2. **deploy migration ל־staging:**
+   - `supabase migration apply 20260516000000_internal_audit_v2`
+   - בדוק `\d audit_sessions` ב־psql
+3. **deploy edge funcs ל־staging:**
+   - `supabase functions deploy send-audit-push`
+4. **deploy frontend ל־staging:**
+   - `vercel --prod=false`
+5. **smoke test staging** (ראה test cases 25.1-25.3)
+6. **חזור על 2-4 בproduction**
+7. **monitor 30 דק** — Vercel logs + Supabase logs
+
+## 26.3 Rollback
+אם משהו נשבר:
+- **frontend:** Vercel rollback (לחיצה אחת)
+- **edge funcs:** redeploy גרסה קודמת מ־git
+- **DB migration:** **לא ניתן roll back פשוט** — צריך מיגרציה ידנית הופכית. אזהרה: אסור לאבד audit_sessions data.
+
+---
+
+# חלק כ"ז — Monitoring & Observability
+
+## 27.1 מטריקות חיוניות
+
+| מטריקה | מקור | סף התראה |
+|---------|------|------------|
+| כמות ביקורות פעילות | DB query | > 1 → bug |
+| ממוצע משך ביקורת | DB | > 30 דק → tweak UX |
+| אחוז responses קיבלו GPS | DB | < 70% → permission issue |
+| RPC latency (open_audit) | Supabase logs | p95 > 500ms |
+| Realtime disconnects | Vercel logs | > 5/min |
+| Push success rate | audit_push_log | < 80% → VAPID/token issue |
+| Alerts created | DB | spike = real event or bug |
+
+## 27.2 Dashboards
+- Supabase Dashboard → SQL Editor → saved queries
+- Vercel Analytics → custom events: `audit.open`, `audit.submit`, `audit.close`
+
+---
+
+# חלק כ"ח — User Training Scripts (עברית)
+
+## 28.1 מנהל — סקריפט הדרכה (5 דקות)
+
+```
+שלום. נראה לך איך לפתוח ביקורת בשני מצבים.
+
+1. כניסה למסך ביקורת
+   - כנס לפאנל מנהל → "ביקורת"
+   - תראה ביקורות עבר
+
+2. פתיחת ביקורת מהירה (Manual)
+   - לחץ "פתח ביקורת חדשה"
+   - בחר "ביקורת מהירה"
+   - סמן את הכיתות שאתה רוצה לבדוק
+   - לחץ "פתח ביקורת"
+   - הרכזים יקבלו push ויתחילו לסמן
+   - אתה תראה את ההתקדמות בזמן אמת
+
+3. פתיחת ביקורת מיקום
+   - כמו לעיל אבל בחר "ביקורת מיקום"
+   - הגדר sensitivity (MEDIUM מומלץ)
+   - הסלולרים של התלמידים יקבלו push
+   - הם יאשרו ויישלחו GPS אוטומטית
+   - תראה אזעקות (אדום מהבהב) אם מישהו רחוק
+
+4. סיום
+   - לחץ "סיים ביקורת"
+   - תראה סיכום מיידי
+   - תוכל לפתוח דוח מלא
+
+5. הקרנה
+   - לחץ על אייקון "📺" למצב מסך מלא
+   - אופציה לרוטציה אוטומטית בין תצוגות
+```
+
+## 28.2 רכז כיתה — סקריפט הדרכה (3 דקות)
+
+```
+1. כשמנהל פותח ביקורת, אתה תקבל push (אם הסלולרי לא פתוח) או
+   תראה התראה אדומה בפינה (אם פתוח).
+
+2. לחץ על ההתראה — תיכנס למסך ביקורת.
+
+3. תראה את כל תלמידי כיתתך. תלמידים שיש להם יציאה מאושרת כבר
+   מסומנים אוטומטית בכחול — לא צריך לעשות שום דבר.
+
+4. לכל תלמיד אחר, לחץ אחד מ-3 כפתורים:
+   ✅ נוכח | 🔵 בחוץ עם אישור | 🔴 בחוץ ללא אישור
+
+5. כשתסמן את כל התלמידים, יהיה כתוב "0 ממתינים".
+   אם יש "מקצה לקצה" — חזור ולחץ.
+
+6. במצב ביקורת מיקום, חלק מהתלמידים יסומנו אוטומטית.
+   אתה תראה רק את אלו שלא הגיבו או שלא נתנו הרשאה לדחות.
+
+7. אסור לך לפתוח/לסיים ביקורת — רק המנהל.
+```
+
+## 28.3 תלמיד — סקריפט הדרכה (60 שניות)
+
+```
+לפעמים תופיע התראה: "בקרת מיקום מהירה"
+- זה אומר שההנהלה רוצה לוודא שאתה בישיבה.
+- לחץ "אשר ושלח מיקום".
+- אם אתה לא בישיבה (לדוגמה לסידור) — לחץ "אני לא יכול".
+- המיקום נשמר רק במהלך הביקורת ויימחק אחרי 30 ימים.
+```
+
+---
+
+# חלק כ"ט — FAQ מורחב
+
+**ש: מה קורה אם המנהל סוגר את הדפדפן בזמן ביקורת?**
+ת: הסשן ממשיך לחיות ב־DB. הוא יכול להיכנס מהסלולרי שלו או ממחשב אחר — לראות את אותו state.
+
+**ש: מה אם הרכז עזב באמצע?**
+ת: הסימונים שעשה נשמרו. רכז אחר (או המנהל) יכול להמשיך. אם איש לא ממשיך, אחרי 24 שעות הסשן יתפוס TIMED_OUT.
+
+**ש: מה אם 50 תלמידים שולחים GPS באותה שנייה?**
+ת: Postgres יכול לטפל בקלות. Realtime יתבטל אנימציות אם > 30fps; הנתון יבוא, רק אנימציה תהיה quieter.
+
+**ש: מה אם תלמיד פותח 2 מכשירים?**
+ת: UPSERT לפי `(session_id, student_id)` — האחרון מנצח. שני הסימונים נשמרים ב־audit_response_log.
+
+**ש: מי יכול לסמן EXCUSED?**
+ת: אין EXCUSED כקטגוריה. אם תלמיד חולה — הרכז יסמן "בחוץ עם אישור" ויכתוב בהערה "חולה" / "בהלוויה".
+
+**ש: מה אם תלמיד אכן בישיבה אבל GPS מראה 5km?**
+ת: אזעקה אדומה. מנהל יכול override ל-IN_YESHIVA. כל override נרשם.
+
+**ש: מה אם המכשיר של תלמיד ב-airplane mode?**
+ת: הוא לא יקבל push. נשאר PENDING. הרכז יסמן ידנית.
+
+**ש: האם זה עובד ב-iOS?**
+ת: Web Push ב-iOS עובד מ-iOS 16.4+ ורק אם התלמיד הוסיף את האפליקציה ל-Home Screen. אם לא — fallback ל-Realtime broadcast (עובד רק אם האפליקציה פתוחה).
+
+**ש: כמה זמן נשמרים מיקומי GPS?**
+ת: ב-`audit_responses` — לתמיד. אם תרצה למחוק — יש למחוק ידנית או להוסיף cron.
+
+**ש: מה צבעי המרחק?**
+ת: ירוק ≤300m, כחול 300m-1km, כתום 1-5km, אדום >5km.
+
+**ש: האם רכז יכול להתחיל ביקורת רק לכיתה שלו?**
+ת: לא. רק admin פותח ביקורת.
+
+**ש: האם אפשר לסגור ביקורת אוטומטית?**
+ת: לא במצב המתוכנן. רק admin לוחץ "סיים". אם נשכח — cron אחרי 24h מסגיר אוטומטית כ-TIMED_OUT.
+
+**ש: מה קורה כשמשנים את class_id של תלמיד באמצע ביקורת (sync מ-Sheets)?**
+ת: ה-class_id ב-audit_responses מוקפא בעת פתיחת הסשן. שינוי ב-students לא משפיע על הביקורת הפעילה.
+
+**ש: האם אפשר לערוך ביקורת אחרי שנסגרה?**
+ת: לא. אבל יש override (manager יכול לעדכן category). השינוי נרשם ב-audit_response_log.
+
+**ש: איך מייצאים ל-Excel?**
+ת: מסך "ביקורות קודמות" → לחץ על ביקורת → "ייצא Excel" → קובץ .xlsx.
+
+---
+
+# חלק ל' — אבני דרך לקבלת המוצר (Acceptance Criteria)
+
+המוצר נחשב "מוכן ל-production" רק כש:
+
+**א. פונקציונליות**
+- [ ] Admin פותח MANUAL audit, רכז מסמן, admin סוגר — הכל עובד end-to-end
+- [ ] Admin פותח LOCATION audit, תלמידים שולחים GPS, alerts נוצרים
+- [ ] Refresh במנהל באמצע — state נשמר ומוצג נכון
+- [ ] Refresh ברכז — state נשמר
+- [ ] Refresh בתלמיד — Sheet GPS חוזר אם PENDING
+
+**ב. ביצועים**
+- [ ] open_audit p95 < 500ms
+- [ ] submit_audit_response p95 < 200ms
+- [ ] Realtime latency < 800ms (DB → UI)
+- [ ] First Contentful Paint ב-Live page < 1.5s
+
+**ג. UX**
+- [ ] כל הטקסטים בעברית
+- [ ] עובד גם ב-RTL
+- [ ] עובד גם בדארק מוד
+- [ ] Mobile (375px width) עובד
+- [ ] projection mode עובד על צג 4K
+
+**ד. אבטחה**
+- [ ] רכז יכול לראות רק את כיתתו (אכיפה ב-UI)
+- [ ] תלמיד יכול לראות רק את עצמו
+- [ ] RPCs דורשים auth.uid או admin PIN
+- [ ] push_tokens לא חשופים ב-client
+
+**ה. תיעוד**
+- [ ] CLAUDE.md מעודכן
+- [ ] הדרכת מנהל בעברית מוכנה
+- [ ] הדרכת רכזים מוכנה
+- [ ] FAQ מלא
+
+**ו. ניטור**
+- [ ] Vercel logs נצבעו
+- [ ] Supabase logs פעילים
+- [ ] התראת Slack ל-RPC errors
+
+---
+
+# חלק ל"א — תוספות ושיפורים עתידיים
+
+מה לא נכנס לגרסה הראשונה אבל שווה לתכנן:
+
+1. **AI Anomaly detection** — זיהוי דפוסים של תלמידים שתמיד "במרחק כתום".
+2. **Geo-fencing** — הגדרת polygon מדויק של מתחם הישיבה במקום מעגל.
+3. **Reports אוטומטיים** — PDF שבועי למנהל עם תקציר ביקורות.
+4. **Multi-language** — אם בעתיד תהיה שפה אחרת.
+5. **Audit Templates** — שמירת preset של "ביקורת בוקר" עם class_ids מוגדרים מראש.
+6. **In-app Notification Center** — היסטוריית התראות לרכז.
+7. **OAuth login** — אם RLS יופעל.
+8. **2FA למנהל** — בטחון יתר.
+9. **WebSocket fallback ל-Polling** — באזורים עם רשת חלשה.
+10. **Offline-first PWA במלא** — שמירת responses ב-IndexedDB, sync אחר כך.
+
+---
+
+# נספח E — Glossary (מילון מונחים)
+
+| מונח | משמעות |
+|------|---------|
+| **Audit Session** | שורה ב־`audit_sessions`. סשן יחיד של ביקורת. |
+| **Audit Response** | שורה ב־`audit_responses`. תגובת תלמיד אחד בסשן אחד. |
+| **Audit Alert** | אזעקה. תלמיד שמרחקו הוא ORANGE/RED. |
+| **Manual mode** | רכז מסמן ידנית. אין GPS. |
+| **Location mode** | תלמידים שולחים GPS אוטומטית. |
+| **PENDING** | מצב התחלתי. עוד לא הוחלט. |
+| **IN_YESHIVA** | נוכח. ב-Manual = רכז סימן. ב-Location = GPS < 300m. |
+| **OUT_PERMIT** | בחוץ עם אישור. departure ACTIVE או רכז סימן. |
+| **OUT_NO_PERMIT** | בחוץ ללא אישור. |
+| **UNKNOWN** | לא ידוע. רק אחרי close_audit או GPS denied. |
+| **Distance Bucket** | GREEN/BLUE/ORANGE/RED, מחושב מ-distance_from_campus_m. |
+| **Projection Mode** | מצב הקרנה מסך מלא לחדר ישיבות. |
+| **Activity Feed** | רשימת אירועים בזמן אמת. |
+| **Heatmap** | תצוגת חום של כיתות לפי אחוז סימון. |
+| **Cron tick** | `tick_audit_timeout` שרץ כל 5 דק'. |
+| **RLS** | Row Level Security של Supabase. עוד לא מופעל. |
+| **VAPID** | Voluntary Application Server Identification — תקן Web Push. |
+| **PII** | Personally Identifiable Information. |
+
+---
+
+# חלק ל"ב — דפים מלאים (React Pages)
+
+## 32.1 `src/pages/admin/AuditLandingPage.tsx`
+
+```tsx
+// src/pages/admin/AuditLandingPage.tsx
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { Plus, FileText, Calendar, ChevronLeft, Filter } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Input } from '@/components/ui/input'
+import { auditApi } from '@/lib/api/auditApi'
+import { useActiveAudit } from '@/hooks/useActiveAudit'
+import type { AuditSession, AuditMode } from '@/types/audit'
+
+export default function AuditLandingPage() {
+  const { session } = useActiveAudit()
+  const [past, setPast] = useState<AuditSession[]>([])
+  const [filterMode, setFilterMode] = useState<AuditMode | 'ALL'>('ALL')
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    auditApi
+      .listPastAudits({ mode: filterMode === 'ALL' ? undefined : filterMode })
+      .then(setPast)
+      .finally(() => setLoading(false))
+  }, [filterMode])
+
+  const filtered = past.filter(s => {
+    if (!search) return true
+    return (
+      s.notes?.includes(search) ||
+      s.startedBy.includes(search) ||
+      s.classIds.some(c => c.includes(search))
+    )
+  })
+
+  const byDay = filtered.reduce<Record<string, AuditSession[]>>((acc, s) => {
+    const day = new Date(s.startedAt).toLocaleDateString('he-IL')
+    ;(acc[day] ??= []).push(s)
+    return acc
+  }, {})
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-3xl font-bold">ביקורת פנימית</h1>
+        <Link to="/admin/audit/new">
+          <Button size="lg" className="gap-2">
+            <Plus size={20} />
+            פתח ביקורת חדשה
+          </Button>
+        </Link>
+      </div>
+
+      {session && session.status === 'ACTIVE' && (
+        <Card className="bg-amber-50 dark:bg-amber-950 border-amber-500 border-2 p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-semibold">ביקורת פעילה כעת</div>
+              <div className="text-sm text-muted-foreground">
+                {session.mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} •
+                החלה ב-{new Date(session.startedAt).toLocaleTimeString('he-IL')}
+              </div>
+            </div>
+            <Link to={`/admin/audit/${session.id}/live`}>
+              <Button>חזור לסשן <ChevronLeft size={18} /></Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+
+      <div className="flex gap-3 mb-4">
+        <Select value={filterMode} onValueChange={(v: any) => setFilterMode(v)}>
+          <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">כל המצבים</SelectItem>
+            <SelectItem value="MANUAL">מהירה</SelectItem>
+            <SelectItem value="LOCATION">מיקום</SelectItem>
+          </SelectContent>
+        </Select>
+        <Input
+          placeholder="חפש..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="max-w-sm"
+        />
+      </div>
+
+      {loading && <div className="text-center py-12">טוען...</div>}
+
+      {Object.entries(byDay).map(([day, list]) => (
+        <div key={day} className="mb-6">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-muted-foreground mb-3">
+            <Calendar size={16} /> {day}
+          </h2>
+          <div className="grid gap-3">
+            {list.map(s => <PastAuditRow key={s.id} s={s} />)}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function PastAuditRow({ s }: { s: AuditSession }) {
+  const duration = s.closedAt
+    ? ((new Date(s.closedAt).getTime() - new Date(s.startedAt).getTime()) / 60000).toFixed(1) + ' דק'
+    : '—'
+  return (
+    <Link to={`/admin/audit/${s.id}/summary`}>
+      <Card className="p-4 hover:bg-accent transition-colors">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-medium">
+              {s.mode === 'MANUAL' ? '⚡ מהירה' : '📍 מיקום'} • {new Date(s.startedAt).toLocaleTimeString('he-IL')}
+            </div>
+            <div className="text-sm text-muted-foreground">
+              {s.totalStudents} תלמידים • {s.classIds.length} כיתות • משך: {duration}
+            </div>
+            {s.notes && <div className="text-xs text-muted-foreground mt-1">"{s.notes}"</div>}
+          </div>
+          <div className="text-end">
+            <span className={`text-xs px-2 py-1 rounded-full ${
+              s.status === 'CLOSED' ? 'bg-emerald-100 text-emerald-800' :
+              s.status === 'TIMED_OUT' ? 'bg-amber-100 text-amber-800' :
+              s.status === 'ABORTED' ? 'bg-red-100 text-red-800' :
+              'bg-blue-100 text-blue-800'
+            }`}>
+              {s.status}
+            </span>
+          </div>
+        </div>
+      </Card>
+    </Link>
+  )
+}
+```
+
+## 32.2 `src/pages/admin/AuditNewPage.tsx`
+
+```tsx
+// src/pages/admin/AuditNewPage.tsx
+import { useState } from 'react'
+import { useNavigate, Link } from 'react-router-dom'
+import { ChevronRight, ChevronLeft, AlertCircle } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Textarea } from '@/components/ui/textarea'
+import { AuditModeSelector } from '@/components/audit/AuditModeSelector'
+import { AuditClassSelector } from '@/components/audit/AuditClassSelector'
+import { AuditLocationSettings } from '@/components/audit/AuditLocationSettings'
+import { useAuditStore } from '@/store/auditStore'
+import { useStudentsStore } from '@/store/studentsStore'
+import type { AuditMode, AuditSessionSettings } from '@/types/audit'
+import { toast } from 'sonner'
+
+type Step = 'mode' | 'classes' | 'settings' | 'confirm'
+
+export default function AuditNewPage() {
+  const navigate = useNavigate()
+  const [step, setStep] = useState<Step>('mode')
+  const [mode, setMode] = useState<AuditMode | null>(null)
+  const [classIds, setClassIds] = useState<string[]>([])
+  const [settings, setSettings] = useState<AuditSessionSettings>({
+    timeoutSec: 120,
+    sensitivity: 'MEDIUM',
+    pushTarget: 'STUDENTS',
+    showMap: true,
+  })
+  const [notes, setNotes] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const allClasses = useStudentsStore(s => s.allClassIds)
+  const openAudit = useAuditStore(s => s.open)
+
+  const totalStudents = useStudentsStore(s => s.students)
+    .filter(st => classIds.includes(st.classId)).length
+
+  async function handleSubmit() {
+    if (!mode || classIds.length === 0) return
+    setSubmitting(true)
+    try {
+      const sid = await openAudit(mode, classIds, 'ADMIN', settings, notes)
+      toast.success('ביקורת נפתחה!')
+      navigate(`/admin/audit/${sid}/live`)
+    } catch (e: any) {
+      toast.error(e?.message ?? 'נכשל בפתיחה')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto">
+      <div className="flex items-center gap-3 mb-6">
+        <Link to="/admin/audit"><ChevronRight size={20} /></Link>
+        <h1 className="text-2xl font-bold">פתיחת ביקורת חדשה</h1>
+      </div>
+
+      <Stepper step={step} />
+
+      <Card className="mt-6 p-6">
+        {step === 'mode' && (
+          <>
+            <h2 className="text-xl font-semibold mb-4">בחר מצב</h2>
+            <AuditModeSelector value={mode} onChange={setMode} />
+            <div className="flex justify-end mt-6">
+              <Button disabled={!mode} onClick={() => setStep('classes')}>
+                המשך <ChevronLeft size={18} />
+              </Button>
+            </div>
+          </>
+        )}
+
+        {step === 'classes' && (
+          <>
+            <h2 className="text-xl font-semibold mb-4">בחר כיתות</h2>
+            <AuditClassSelector
+              allClassIds={allClasses}
+              selected={classIds}
+              onChange={setClassIds}
+            />
+            <div className="text-sm text-muted-foreground mt-3">
+              סה"כ: {totalStudents} תלמידים ב-{classIds.length} כיתות
+            </div>
+            <div className="flex justify-between mt-6">
+              <Button variant="outline" onClick={() => setStep('mode')}>חזור</Button>
+              <Button
+                disabled={classIds.length === 0}
+                onClick={() => setStep(mode === 'LOCATION' ? 'settings' : 'confirm')}
+              >
+                המשך <ChevronLeft size={18} />
+              </Button>
+            </div>
+          </>
+        )}
+
+        {step === 'settings' && mode === 'LOCATION' && (
+          <>
+            <h2 className="text-xl font-semibold mb-4">הגדרות איסוף מיקום</h2>
+            <AuditLocationSettings value={settings} onChange={setSettings} />
+            <div className="flex justify-between mt-6">
+              <Button variant="outline" onClick={() => setStep('classes')}>חזור</Button>
+              <Button onClick={() => setStep('confirm')}>
+                המשך <ChevronLeft size={18} />
+              </Button>
+            </div>
+          </>
+        )}
+
+        {step === 'confirm' && (
+          <>
+            <h2 className="text-xl font-semibold mb-4">סיכום ופתיחה</h2>
+            <div className="space-y-3 mb-4">
+              <SummaryRow label="מצב" value={mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} />
+              <SummaryRow label="כיתות" value={classIds.length.toString()} />
+              <SummaryRow label="תלמידים" value={totalStudents.toString()} />
+              {mode === 'LOCATION' && (
+                <>
+                  <SummaryRow label="זמן המתנה" value={`${settings.timeoutSec} שניות`} />
+                  <SummaryRow label="רגישות אזעקות" value={settings.sensitivity ?? 'MEDIUM'} />
+                  <SummaryRow label="מטרת push" value={settings.pushTarget ?? 'STUDENTS'} />
+                </>
+              )}
+            </div>
+            <Textarea
+              placeholder="הערה (אופציונלי)"
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              maxLength={500}
+            />
+            <div className="bg-amber-50 dark:bg-amber-950 border-2 border-amber-300 rounded-lg p-3 mt-4 flex gap-2">
+              <AlertCircle size={18} className="text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-sm">
+                לאחר פתיחת הביקורת, הרכזים יקבלו push מיידי.
+                {mode === 'LOCATION' && ' כל התלמידים יקבלו בקשת מיקום.'}
+                לא ניתן לבטל אחרי הפתיחה — רק לסגור.
+              </div>
+            </div>
+            <div className="flex justify-between mt-6">
+              <Button variant="outline" onClick={() => setStep(mode === 'LOCATION' ? 'settings' : 'classes')}>
+                חזור
+              </Button>
+              <Button
+                onClick={handleSubmit}
+                disabled={submitting}
+                className="bg-emerald-600 hover:bg-emerald-700"
+              >
+                {submitting ? 'פותח...' : 'פתח ביקורת ⚡'}
+              </Button>
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
+  )
+}
+
+function Stepper({ step }: { step: Step }) {
+  const steps: Step[] = ['mode', 'classes', 'settings', 'confirm']
+  const labels: Record<Step, string> = {
+    mode: 'מצב', classes: 'כיתות', settings: 'הגדרות', confirm: 'אישור',
+  }
+  const idx = steps.indexOf(step)
+  return (
+    <div className="flex items-center gap-2">
+      {steps.map((s, i) => (
+        <div key={s} className="flex items-center gap-2 flex-1">
+          <div className={`flex items-center justify-center w-8 h-8 rounded-full font-semibold ${
+            i < idx ? 'bg-emerald-500 text-white' :
+            i === idx ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-600'
+          }`}>
+            {i + 1}
+          </div>
+          <div className={i === idx ? 'font-semibold' : 'text-muted-foreground'}>
+            {labels[s]}
+          </div>
+          {i < steps.length - 1 && <div className="flex-1 h-px bg-gray-300" />}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SummaryRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between items-baseline">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-semibold">{value}</span>
+    </div>
+  )
+}
+```
+
+## 32.3 `src/pages/admin/AuditLivePage.tsx`
+
+```tsx
+// src/pages/admin/AuditLivePage.tsx
+import { useEffect, useState } from 'react'
+import { useParams, useNavigate, Navigate } from 'react-router-dom'
+import { Monitor, X, Volume2, VolumeX } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuditUiStore } from '@/store/auditUiStore'
+import { useActiveAudit } from '@/hooks/useActiveAudit'
+import { useProjectionRotation } from '@/hooks/useProjectionRotation'
+import { AuditKpiRow } from '@/components/audit/AuditKpiRow'
+import { AuditMap } from '@/components/audit/AuditMap'
+import { AuditHeatmap } from '@/components/audit/AuditHeatmap'
+import { AuditClassGrid } from '@/components/audit/AuditClassGrid'
+import { AuditActivityFeed } from '@/components/audit/AuditActivityFeed'
+import { AuditAlertList } from '@/components/audit/AuditAlertList'
+import { AuditCloseModal } from '@/components/audit/AuditCloseModal'
+import { AuditProjectionMode } from '@/components/audit/AuditProjectionMode'
+import { AuditHeader } from '@/components/audit/AuditHeader'
+import { setGlobalMute, isMuted, preloadAll } from '@/lib/audit/soundManager'
+
+export default function AuditLivePage() {
+  const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const { session } = useActiveAudit()
+  const activeTab = useAuditUiStore(s => s.activeTab)
+  const setTab = useAuditUiStore(s => s.setTab)
+  const projection = useAuditUiStore(s => s.projectionMode)
+  const enterProj = useAuditUiStore(s => s.enterProjection)
+  const exitProj = useAuditUiStore(s => s.exitProjection)
+  const soundOn = useAuditUiStore(s => s.soundEnabled)
+  const setSoundOn = useAuditUiStore(s => s.setSoundEnabled)
+  const [closeOpen, setCloseOpen] = useState(false)
+
+  useProjectionRotation()
+
+  useEffect(() => { preloadAll() }, [])
+  useEffect(() => { setGlobalMute(!soundOn) }, [soundOn])
+
+  if (!session) return <div className="p-8 text-center">טוען ביקורת...</div>
+  if (id !== session.id) return <Navigate to={`/admin/audit/${session.id}/live`} replace />
+  if (session.status !== 'ACTIVE') return <Navigate to={`/admin/audit/${session.id}/summary`} replace />
+
+  return (
+    <div className={projection ? 'audit-projection-mode min-h-screen p-8' : 'p-6 max-w-7xl mx-auto'}>
+      {projection && (
+        <Button
+          className="fixed top-4 end-4 z-50"
+          variant="outline"
+          onClick={() => { exitProj(); document.exitFullscreen?.() }}
+        >
+          <X size={20} /> יציאה מהקרנה
+        </Button>
+      )}
+
+      <AuditHeader session={session} />
+
+      <div className="my-6">
+        <AuditKpiRow />
+      </div>
+
+      <div className="flex items-center justify-between mb-4">
+        <Tabs value={activeTab} onValueChange={(v: any) => setTab(v)} className="flex-1">
+          <TabsList>
+            <TabsTrigger value="grid">🟢 Grid</TabsTrigger>
+            <TabsTrigger value="heatmap">🔥 Heatmap</TabsTrigger>
+            {session.mode === 'LOCATION' && <TabsTrigger value="map">🗺 מפה</TabsTrigger>}
+            <TabsTrigger value="feed">📜 פיד</TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        <div className="flex gap-2">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setSoundOn(!soundOn)}
+            title={soundOn ? 'השתק' : 'הפעל סאונד'}
+          >
+            {soundOn ? <Volume2 /> : <VolumeX />}
+          </Button>
+
+          <Button
+            variant="outline"
+            onClick={() => {
+              document.documentElement.requestFullscreen?.()
+              enterProj()
+            }}
+          >
+            <Monitor size={18} className="me-2" /> הקרנה
+          </Button>
+
+          <Button
+            variant="destructive"
+            onClick={() => setCloseOpen(true)}
+          >
+            סיים ביקורת
+          </Button>
+        </div>
+      </div>
+
+      <Tabs value={activeTab} onValueChange={(v: any) => setTab(v)}>
+        <TabsContent value="grid"><AuditClassGrid /></TabsContent>
+        <TabsContent value="heatmap"><AuditHeatmap /></TabsContent>
+        <TabsContent value="map">
+          {session.mode === 'LOCATION' ? <AuditMap /> : <div>מצב MANUAL — אין מפה</div>}
+        </TabsContent>
+        <TabsContent value="feed"><AuditActivityFeed /></TabsContent>
+      </Tabs>
+
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div>
+          <h3 className="font-semibold mb-2">אזעקות</h3>
+          <AuditAlertList />
+        </div>
+        <div>
+          <h3 className="font-semibold mb-2">פעילות</h3>
+          <AuditActivityFeed />
+        </div>
+      </div>
+
+      <AuditCloseModal
+        open={closeOpen}
+        onClose={() => setCloseOpen(false)}
+        onConfirm={async (notes) => {
+          await useAuditStore.getState().close('ADMIN', notes)
+          navigate(`/admin/audit/${session.id}/summary`)
+        }}
+        sessionId={session.id}
+      />
+
+      {projection && <AuditProjectionMode />}
+    </div>
+  )
+}
+```
+
+## 32.4 `src/pages/admin/AuditSummaryPage.tsx`
+
+```tsx
+// src/pages/admin/AuditSummaryPage.tsx
+import { useEffect, useState } from 'react'
+import { useParams, Link } from 'react-router-dom'
+import { ChevronRight, Download, FileText, BarChart3 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { auditApi } from '@/lib/api/auditApi'
+import { AuditCategoryChip } from '@/components/audit/AuditCategoryChip'
+import { AuditDistanceBadge } from '@/components/audit/AuditDistanceBadge'
+import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
+import { exportAuditPdf } from '@/lib/audit/exportPdf'
+import { exportAuditExcel } from '@/lib/audit/exportExcel'
+
+export default function AuditSummaryPage() {
+  const { id } = useParams<{ id: string }>()
+  const [data, setData] = useState<{
+    session: AuditSession
+    responses: AuditResponse[]
+    alerts: AuditAlert[]
+    kpis: AuditKpis
+  } | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!id) return
+    auditApi.getAuditFull(id).then(setData).finally(() => setLoading(false))
+  }, [id])
+
+  if (loading) return <div className="p-8 text-center">טוען...</div>
+  if (!data) return <div className="p-8 text-center">לא נמצאה ביקורת</div>
+
+  const { session, responses, alerts, kpis } = data
+  const duration = session.closedAt
+    ? Math.round((new Date(session.closedAt).getTime() - new Date(session.startedAt).getTime()) / 60000)
+    : null
+
+  const inYeshiva = kpis.byCategory.IN_YESHIVA ?? 0
+  const outPermit = kpis.byCategory.OUT_PERMIT ?? 0
+  const outNoPermit = kpis.byCategory.OUT_NO_PERMIT ?? 0
+  const unknown = kpis.byCategory.UNKNOWN ?? 0
+  const total = session.totalStudents
+  const presentPct = total > 0 ? Math.round((inYeshiva / total) * 100) : 0
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <Link to="/admin/audit"><ChevronRight size={20} /></Link>
+          <h1 className="text-2xl font-bold">סיכום ביקורת</h1>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => exportAuditPdf(data)}>
+            <FileText size={18} className="me-2" /> ייצא PDF
+          </Button>
+          <Button variant="outline" onClick={() => exportAuditExcel(data)}>
+            <Download size={18} className="me-2" /> ייצא Excel
+          </Button>
+        </div>
+      </div>
+
+      <Card className="p-6 mb-6 bg-emerald-50 dark:bg-emerald-950 border-emerald-500 border-2">
+        <div className="text-center">
+          <div className="text-7xl font-black tabular-nums">{presentPct}%</div>
+          <div className="text-2xl mt-2">בישיבה ({inYeshiva}/{total})</div>
+          {duration && <div className="text-sm text-muted-foreground mt-1">משך: {duration} דקות</div>}
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <Card className="p-4 text-center">
+          <div className="text-3xl font-bold text-emerald-600">{inYeshiva}</div>
+          <AuditCategoryChip category="IN_YESHIVA" size="sm" />
+        </Card>
+        <Card className="p-4 text-center">
+          <div className="text-3xl font-bold text-blue-600">{outPermit}</div>
+          <AuditCategoryChip category="OUT_PERMIT" size="sm" />
+        </Card>
+        <Card className="p-4 text-center">
+          <div className="text-3xl font-bold text-red-600">{outNoPermit}</div>
+          <AuditCategoryChip category="OUT_NO_PERMIT" size="sm" />
+        </Card>
+        <Card className="p-4 text-center">
+          <div className="text-3xl font-bold text-amber-600">{unknown}</div>
+          <AuditCategoryChip category="UNKNOWN" size="sm" />
+        </Card>
+      </div>
+
+      {alerts.length > 0 && (
+        <Card className="p-4 mb-6 border-red-500 border-2 bg-red-50 dark:bg-red-950">
+          <h2 className="font-semibold text-red-700 mb-3">🚨 אזעקות ({alerts.length})</h2>
+          <div className="space-y-2">
+            {alerts.map(a => (
+              <div key={a.id} className="flex items-center gap-3 text-sm">
+                <span className="font-mono">{new Date(a.triggeredAt).toLocaleTimeString('he-IL')}</span>
+                <span>{a.studentId.slice(0, 8)}</span>
+                <AuditDistanceBadge bucket={a.distanceM > 5000 ? 'RED' : 'ORANGE'} distanceM={a.distanceM} />
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card className="p-4">
+        <h2 className="font-semibold mb-3 flex items-center gap-2">
+          <BarChart3 size={20} /> פירוט לפי כיתה
+        </h2>
+        <table className="w-full text-sm">
+          <thead className="text-start">
+            <tr className="border-b">
+              <th className="text-start py-2">כיתה</th>
+              <th className="text-end">סה"כ</th>
+              <th className="text-end">נוכח</th>
+              <th className="text-end">עם אישור</th>
+              <th className="text-end">ללא אישור</th>
+              <th className="text-end">לא ידוע</th>
+              <th className="text-end">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(kpis.byClass).map(([cid, s]) => {
+              const pct = s.total > 0 ? Math.round((s.in_yeshiva / s.total) * 100) : 0
+              return (
+                <tr key={cid} className="border-b">
+                  <td className="py-2">{cid}</td>
+                  <td className="text-end tabular-nums">{s.total}</td>
+                  <td className="text-end tabular-nums text-emerald-700">{s.in_yeshiva}</td>
+                  <td className="text-end tabular-nums text-blue-700">{s.out_permit}</td>
+                  <td className="text-end tabular-nums text-red-700">{s.out_no_permit}</td>
+                  <td className="text-end tabular-nums text-amber-700">{s.unknown}</td>
+                  <td className="text-end tabular-nums font-bold">{pct}%</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+```
+
+## 32.5 `src/pages/admin/AuditComparePage.tsx`
+
+```tsx
+// src/pages/admin/AuditComparePage.tsx
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { Card } from '@/components/ui/card'
+import { auditApi } from '@/lib/api/auditApi'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import type { AuditSession, AuditKpis } from '@/types/audit'
+
+interface AuditEntry {
+  session: AuditSession
+  kpis: AuditKpis
+}
+
+export default function AuditComparePage() {
+  const [params] = useSearchParams()
+  const ids = (params.get('ids') ?? '').split(',').filter(Boolean)
+  const [entries, setEntries] = useState<AuditEntry[]>([])
+
+  useEffect(() => {
+    Promise.all(ids.map(id => auditApi.getAuditFull(id))).then(rs => {
+      setEntries(rs.map(r => ({ session: r.session, kpis: r.kpis })))
+    })
+  }, [ids.join(',')])
+
+  if (entries.length === 0) {
+    return <div className="p-8 text-center">בחר 2-5 ביקורות להשוואה</div>
+  }
+
+  const chartData = entries.map(e => ({
+    label: new Date(e.session.startedAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }),
+    inYeshiva: e.kpis.byCategory.IN_YESHIVA ?? 0,
+    outPermit: e.kpis.byCategory.OUT_PERMIT ?? 0,
+    outNoPermit: e.kpis.byCategory.OUT_NO_PERMIT ?? 0,
+  }))
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+      <h1 className="text-2xl font-bold mb-6">השוואה בין ביקורות</h1>
+
+      <Card className="p-4 mb-6">
+        <h2 className="font-semibold mb-3">נוכחות לפי זמן</h2>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={chartData}>
+            <XAxis dataKey="label" />
+            <YAxis />
+            <Tooltip />
+            <Line type="monotone" dataKey="inYeshiva" stroke="#10b981" name="נוכח" />
+            <Line type="monotone" dataKey="outPermit" stroke="#3b82f6" name="עם אישור" />
+            <Line type="monotone" dataKey="outNoPermit" stroke="#ef4444" name="ללא אישור" />
+          </LineChart>
+        </ResponsiveContainer>
+      </Card>
+
+      <Card className="p-4">
+        <h2 className="font-semibold mb-3">טבלת השוואה</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b">
+                <th className="text-start py-2">KPI</th>
+                {entries.map(e => (
+                  <th key={e.session.id} className="text-end p-2">
+                    {new Date(e.session.startedAt).toLocaleString('he-IL', {
+                      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                    })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <CompareRow label="מצב" entries={entries}
+                value={e => e.session.mode === 'MANUAL' ? 'מהירה' : 'מיקום'} />
+              <CompareRow label="כיתות" entries={entries}
+                value={e => e.session.classIds.length.toString()} />
+              <CompareRow label="תלמידים" entries={entries}
+                value={e => e.session.totalStudents.toString()} />
+              <CompareRow label="נוכח" entries={entries} color="emerald"
+                value={e => (e.kpis.byCategory.IN_YESHIVA ?? 0).toString()} />
+              <CompareRow label="עם אישור" entries={entries} color="blue"
+                value={e => (e.kpis.byCategory.OUT_PERMIT ?? 0).toString()} />
+              <CompareRow label="ללא אישור" entries={entries} color="red"
+                value={e => (e.kpis.byCategory.OUT_NO_PERMIT ?? 0).toString()} />
+              <CompareRow label="לא ידוע" entries={entries} color="amber"
+                value={e => (e.kpis.byCategory.UNKNOWN ?? 0).toString()} />
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function CompareRow({
+  label, entries, value, color,
+}: {
+  label: string
+  entries: AuditEntry[]
+  value: (e: AuditEntry) => string
+  color?: 'emerald' | 'blue' | 'red' | 'amber'
+}) {
+  const colorClass = color ? `text-${color}-700 dark:text-${color}-400` : ''
+  return (
+    <tr className="border-b">
+      <td className="py-2 font-medium">{label}</td>
+      {entries.map(e => (
+        <td key={e.session.id} className={`text-end p-2 tabular-nums ${colorClass}`}>
+          {value(e)}
+        </td>
+      ))}
+    </tr>
+  )
+}
+```
+
+---
+
+# חלק ל"ג — Supervisor & Student components (קוד מלא)
+
+## 33.1 `src/components/audit/SupervisorAuditPanel.tsx`
+
+```tsx
+// src/components/audit/SupervisorAuditPanel.tsx
+import { useMemo, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Bell } from 'lucide-react'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuthStore } from '@/store/authStore'
+import { useStudentsStore } from '@/store/studentsStore'
+import { SupervisorStudentRow } from './SupervisorStudentRow'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+
+export function SupervisorAuditPanel() {
+  const session = useAuditStore(s => s.session)
+  const responses = useAuditStore(s => s.responses)
+  const classId = useAuthStore(s => s.classId)
+  const students = useStudentsStore(s => s.students)
+  const [search, setSearch] = useState('')
+
+  if (!session || session.status !== 'ACTIVE' || !classId) return null
+  if (!session.classIds.includes(classId)) return null
+
+  const classStudents = useMemo(
+    () => students.filter(s => s.classId === classId),
+    [students, classId],
+  )
+
+  const studentRows = useMemo(() => {
+    const list = classStudents.map(s => ({
+      student: s,
+      response: responses.get(s.id),
+    }))
+    if (search) {
+      return list.filter(r => r.student.fullName.includes(search))
+    }
+    // Sort: PENDING first, then UNKNOWN, then by name
+    return list.sort((a, b) => {
+      const ac = a.response?.category ?? 'PENDING'
+      const bc = b.response?.category ?? 'PENDING'
+      const rank = (c: string) => c === 'PENDING' ? 0 : c === 'UNKNOWN' ? 1 : 2
+      const r = rank(ac) - rank(bc)
+      if (r !== 0) return r
+      return a.student.fullName.localeCompare(b.student.fullName, 'he')
+    })
+  }, [classStudents, responses, search])
+
+  const stats = useMemo(() => {
+    const total = classStudents.length
+    let marked = 0, inYeshiva = 0, outPermit = 0, outNoPermit = 0, unknown = 0
+    for (const { response } of studentRows) {
+      const c = response?.category ?? 'PENDING'
+      if (c !== 'PENDING') marked++
+      if (c === 'IN_YESHIVA') inYeshiva++
+      if (c === 'OUT_PERMIT') outPermit++
+      if (c === 'OUT_NO_PERMIT') outNoPermit++
+      if (c === 'UNKNOWN') unknown++
+    }
+    return { total, marked, inYeshiva, outPermit, outNoPermit, unknown, pending: total - marked }
+  }, [classStudents, studentRows])
+
+  return (
+    <Card className="border-4 border-amber-400 bg-amber-50 dark:bg-amber-950 p-4 mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Bell className="text-amber-600 animate-bounce" />
+          <h2 className="font-bold text-lg">
+            {session.mode === 'MANUAL' ? 'ביקורת מהירה פעילה' : 'ביקורת מיקום פעילה'}
+          </h2>
+        </div>
+        <div className="text-sm font-semibold">
+          סומן {stats.marked} / {stats.total}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-xs mb-3">
+        <Pill bg="bg-emerald-100" text="text-emerald-800" count={stats.inYeshiva} label="נוכח" />
+        <Pill bg="bg-blue-100" text="text-blue-800" count={stats.outPermit} label="עם אישור" />
+        <Pill bg="bg-red-100" text="text-red-800" count={stats.outNoPermit} label="ללא אישור" />
+        <Pill bg="bg-amber-100" text="text-amber-800" count={stats.unknown} label="לא ידוע" />
+      </div>
+
+      <Input
+        placeholder="חפש תלמיד..."
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        className="mb-3"
+      />
+
+      <div className="space-y-2 max-h-[600px] overflow-y-auto">
+        <AnimatePresence>
+          {studentRows.map(({ student, response }) => (
+            <motion.div
+              key={student.id}
+              layout
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+            >
+              <SupervisorStudentRow student={student} response={response} />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {stats.pending === 0 && (
+        <div className="mt-3 text-center text-emerald-700 font-semibold">
+          ✓ סימנת את כל התלמידים. ההנהלה תסיים את הביקורת.
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function Pill({ bg, text, count, label }: { bg: string; text: string; count: number; label: string }) {
+  return (
+    <div className={`rounded-lg ${bg} ${text} p-2 text-center`}>
+      <div className="text-xl font-bold tabular-nums">{count}</div>
+      <div className="text-[10px]">{label}</div>
+    </div>
+  )
+}
+```
+
+## 33.2 `src/components/audit/SupervisorStudentRow.tsx`
+
+```tsx
+// src/components/audit/SupervisorStudentRow.tsx
+import { useState } from 'react'
+import { Check, LogOut, AlertOctagon, MessageSquare, MapPin } from 'lucide-react'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuthStore } from '@/store/authStore'
+import { AuditCategoryChip } from './AuditCategoryChip'
+import { AuditDistanceBadge } from './AuditDistanceBadge'
+import type { AuditResponse, AuditCategory } from '@/types/audit'
+import type { Student } from '@/types'
+import { Button } from '@/components/ui/button'
+import { toast } from 'sonner'
+
+interface Props {
+  student: Student
+  response?: AuditResponse
+}
+
+export function SupervisorStudentRow({ student, response }: Props) {
+  const submit = useAuditStore(s => s.submitResponse)
+  const supervisorPin = useAuthStore(s => s.supervisorPin)
+  const [submitting, setSubmitting] = useState<AuditCategory | null>(null)
+  const [showNote, setShowNote] = useState(false)
+  const [note, setNote] = useState(response?.note ?? '')
+
+  const category = response?.category ?? 'PENDING'
+  const isAuto = response?.markedBy === 'AUTO_DEPARTURE' || response?.markedBy === 'AUTO_GPS'
+
+  async function pick(c: AuditCategory) {
+    setSubmitting(c)
+    try {
+      await submit(student.id, {
+        category: c,
+        markedBy: `SUPERVISOR:${supervisorPin ?? '?'}`,
+      } as any)
+    } catch (e: any) {
+      toast.error(e?.message ?? 'נכשל')
+    } finally {
+      setSubmitting(null)
+    }
+  }
+
+  async function saveNote() {
+    try {
+      await submit(student.id, { note } as any)
+      setShowNote(false)
+      toast.success('הערה נשמרה')
+    } catch (e) {
+      toast.error('נכשל')
+    }
+  }
+
+  const bgClass =
+    category === 'IN_YESHIVA' ? 'bg-emerald-50 dark:bg-emerald-950 border-emerald-300' :
+    category === 'OUT_PERMIT' ? 'bg-blue-50 dark:bg-blue-950 border-blue-300' :
+    category === 'OUT_NO_PERMIT' ? 'bg-red-50 dark:bg-red-950 border-red-300' :
+    category === 'UNKNOWN' ? 'bg-amber-50 dark:bg-amber-950 border-amber-300' :
+    'bg-white dark:bg-gray-900 border-gray-200'
+
+  return (
+    <div className={`rounded-xl border-2 p-3 ${bgClass}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">{student.fullName}</div>
+        <div className="flex items-center gap-2">
+          {response?.distanceBucket && (
+            <AuditDistanceBadge
+              bucket={response.distanceBucket}
+              distanceM={response.distanceFromCampusM}
+              size="sm"
+            />
+          )}
+          {category !== 'PENDING' && <AuditCategoryChip category={category} size="sm" />}
+        </div>
+      </div>
+
+      {isAuto && response && (
+        <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+          <MapPin size={12} />
+          {response.markedBy === 'AUTO_DEPARTURE'
+            ? 'אוטומטית: יציאה מאושרת'
+            : response.markedBy === 'AUTO_GPS'
+              ? 'אוטומטית: GPS'
+              : ''}
+        </div>
+      )}
+
+      {category === 'PENDING' && (
+        <div className="grid grid-cols-3 gap-2">
+          <ActionBtn
+            icon={Check}
+            label="נוכח"
+            color="emerald"
+            onClick={() => pick('IN_YESHIVA')}
+            loading={submitting === 'IN_YESHIVA'}
+          />
+          <ActionBtn
+            icon={LogOut}
+            label="עם אישור"
+            color="blue"
+            onClick={() => pick('OUT_PERMIT')}
+            loading={submitting === 'OUT_PERMIT'}
+          />
+          <ActionBtn
+            icon={AlertOctagon}
+            label="ללא אישור"
+            color="red"
+            onClick={() => pick('OUT_NO_PERMIT')}
+            loading={submitting === 'OUT_NO_PERMIT'}
+          />
+        </div>
+      )}
+
+      {category !== 'PENDING' && !showNote && (
+        <div className="flex justify-between mt-1">
+          <Button size="sm" variant="ghost" onClick={() => setShowNote(true)}>
+            <MessageSquare size={12} className="me-1" />
+            {response?.note ? 'ערוך הערה' : 'הוסף הערה'}
+          </Button>
+          <div className="flex gap-1">
+            {(['IN_YESHIVA', 'OUT_PERMIT', 'OUT_NO_PERMIT'] as AuditCategory[]).map(c =>
+              c !== category && (
+                <button
+                  key={c}
+                  onClick={() => pick(c)}
+                  className="text-xs text-muted-foreground hover:underline"
+                >
+                  שנה ל-{c === 'IN_YESHIVA' ? 'נוכח' : c === 'OUT_PERMIT' ? 'עם אישור' : 'ללא אישור'}
+                </button>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {showNote && (
+        <div className="mt-2">
+          <textarea
+            value={note}
+            onChange={e => setNote(e.target.value)}
+            maxLength={200}
+            rows={2}
+            placeholder="הערה (למשל: חולה, הלוויה)"
+            className="w-full rounded-lg border p-2 text-sm"
+          />
+          <div className="flex gap-2 mt-2">
+            <Button size="sm" onClick={saveNote}>שמור</Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowNote(false)}>ביטול</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActionBtn({ icon: Icon, label, color, onClick, loading }: any) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      className={`flex flex-col items-center gap-1 rounded-lg p-2 text-sm font-medium
+        bg-${color}-100 text-${color}-800 border-2 border-${color}-300 hover:bg-${color}-200
+        disabled:opacity-50 active:scale-95 transition-all`}
+    >
+      <Icon size={20} />
+      <span>{label}</span>
+    </button>
+  )
+}
+```
+
+---
+
+# חלק ל"ד — Class Drawer / Detail View
+
+## 34.1 `src/components/audit/AuditClassDrawer.tsx`
+
+```tsx
+// src/components/audit/AuditClassDrawer.tsx
+import { useMemo } from 'react'
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { useAuditStore } from '@/store/auditStore'
+import { useStudentsStore } from '@/store/studentsStore'
+import { AuditCategoryChip } from './AuditCategoryChip'
+import { AuditDistanceBadge } from './AuditDistanceBadge'
+import { Clock } from 'lucide-react'
+
+interface Props {
+  classId: string
+  open: boolean
+  onClose: () => void
+}
+
+export function AuditClassDrawer({ classId, open, onClose }: Props) {
+  const responses = useAuditStore(s => s.responses)
+  const students = useStudentsStore(s => s.students)
+
+  const items = useMemo(() => {
+    const classStudents = students.filter(s => s.classId === classId)
+    return classStudents.map(s => ({ student: s, response: responses.get(s.id) }))
+  }, [students, responses, classId])
+
+  return (
+    <Sheet open={open} onOpenChange={v => !v && onClose()}>
+      <SheetContent side="end" className="w-[400px] sm:w-[500px]">
+        <SheetHeader>
+          <SheetTitle>{classId}</SheetTitle>
+        </SheetHeader>
+
+        <div className="mt-4 space-y-2 overflow-y-auto max-h-[calc(100vh-120px)]">
+          {items.map(({ student, response }) => (
+            <div key={student.id} className="border rounded-xl p-3">
+              <div className="flex justify-between items-center mb-1">
+                <div className="font-semibold">{student.fullName}</div>
+                <AuditCategoryChip category={response?.category ?? 'PENDING'} size="sm" />
+              </div>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                {response?.markedAt && (
+                  <span className="flex items-center gap-1">
+                    <Clock size={12} />
+                    {new Date(response.markedAt).toLocaleTimeString('he-IL')}
+                  </span>
+                )}
+                {response?.markedBy && <span>{response.markedBy}</span>}
+                {response?.distanceBucket && (
+                  <AuditDistanceBadge
+                    bucket={response.distanceBucket}
+                    distanceM={response.distanceFromCampusM}
+                    size="sm"
+                  />
+                )}
+              </div>
+              {response?.note && (
+                <div className="text-xs mt-1 text-muted-foreground italic">"{response.note}"</div>
+              )}
+            </div>
+          ))}
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+```
+
+---
+
+# חלק ל"ה — Projection Mode (קוד מלא)
+
+## 35.1 `src/components/audit/AuditProjectionMode.tsx`
+
+```tsx
+// src/components/audit/AuditProjectionMode.tsx
+import { useAuditUiStore } from '@/store/auditUiStore'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuditStats } from '@/hooks/useAuditStats'
+import { motion, AnimatePresence } from 'framer-motion'
+import CountUp from 'react-countup'
+import { AuditMap } from './AuditMap'
+import { AuditHeatmap } from './AuditHeatmap'
+import { AuditClassGrid } from './AuditClassGrid'
+import { AuditActivityFeed } from './AuditActivityFeed'
+
+export function AuditProjectionMode() {
+  const activeTab = useAuditUiStore(s => s.activeTab)
+  const session = useAuditStore(s => s.session)
+  const stats = useAuditStats()
+
+  if (!session) return null
+
+  return (
+    <div className="fixed inset-0 bg-black text-white z-50 p-12 audit-projection-mode overflow-hidden">
+      <div className="grid grid-cols-12 gap-8 h-full">
+        {/* Left: massive KPI numbers */}
+        <div className="col-span-3 flex flex-col justify-center gap-6">
+          <ProjKpi label="נוכח" value={stats.byCategory.IN_YESHIVA} color="text-emerald-400" />
+          <ProjKpi label="עם אישור" value={stats.byCategory.OUT_PERMIT} color="text-blue-400" />
+          <ProjKpi label="ללא אישור" value={stats.byCategory.OUT_NO_PERMIT} color="text-red-400 animate-pulse" />
+          <ProjKpi label="לא ידוע" value={stats.byCategory.UNKNOWN} color="text-amber-400" />
+        </div>
+
+        {/* Right: rotating tab content */}
+        <div className="col-span-9 rounded-3xl bg-gray-900 p-6 overflow-hidden">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.4 }}
+              className="h-full"
+            >
+              {activeTab === 'grid' && <AuditClassGrid />}
+              {activeTab === 'heatmap' && <AuditHeatmap />}
+              {activeTab === 'map' && session.mode === 'LOCATION' && <AuditMap />}
+              {activeTab === 'feed' && <AuditActivityFeed />}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+      </div>
+
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-center text-sm opacity-50">
+        ביקורת {session.mode === 'MANUAL' ? 'מהירה' : 'מיקום'} • החלה ב-{new Date(session.startedAt).toLocaleTimeString('he-IL')}
+      </div>
+    </div>
+  )
+}
+
+function ProjKpi({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div>
+      <div className={`text-[8rem] font-black leading-none tabular-nums ${color}`}>
+        <CountUp end={value} duration={0.6} preserveValue />
+      </div>
+      <div className="text-2xl uppercase tracking-wide text-gray-400 mt-2">{label}</div>
+    </div>
+  )
+}
+```
+
+---
+
+# חלק ל"ו — Export PDF / Excel (קוד מלא)
+
+## 36.1 `src/lib/audit/exportPdf.ts`
+
+```ts
+// src/lib/audit/exportPdf.ts
+import jsPDF from 'jspdf'
+import autoTable from 'jspdf-autotable'
+import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
+
+const HEBREW_HELLO = 'עברית' // placeholder
+
+export function exportAuditPdf(data: {
+  session: AuditSession
+  responses: AuditResponse[]
+  alerts: AuditAlert[]
+  kpis: AuditKpis
+}) {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' })
+
+  // RTL via 'rtl' flag in autotable
+  doc.setLanguage('he-IL')
+  doc.setFontSize(18)
+  doc.text('דוח ביקורת פנימית', 300, 50, { align: 'center' })
+
+  doc.setFontSize(10)
+  doc.text(
+    `מצב: ${data.session.mode === 'MANUAL' ? 'מהיר' : 'מיקום'} | החלה: ${new Date(data.session.startedAt).toLocaleString('he-IL')}`,
+    300, 70, { align: 'center' }
+  )
+
+  // KPIs
+  autoTable(doc, {
+    startY: 90,
+    head: [['קטגוריה', 'מספר']],
+    body: [
+      ['נוכח',          (data.kpis.byCategory.IN_YESHIVA ?? 0).toString()],
+      ['בחוץ עם אישור', (data.kpis.byCategory.OUT_PERMIT ?? 0).toString()],
+      ['בחוץ ללא אישור',(data.kpis.byCategory.OUT_NO_PERMIT ?? 0).toString()],
+      ['לא ידוע',       (data.kpis.byCategory.UNKNOWN ?? 0).toString()],
+      ['ממתין',         (data.kpis.byCategory.PENDING ?? 0).toString()],
+    ],
+    theme: 'striped',
+  })
+
+  // By class
+  autoTable(doc, {
+    head: [['כיתה', 'סה"כ', 'נוכח', 'עם אישור', 'ללא אישור', 'לא ידוע']],
+    body: Object.entries(data.kpis.byClass).map(([cid, s]) => [
+      cid, String(s.total), String(s.in_yeshiva), String(s.out_permit),
+      String(s.out_no_permit), String(s.unknown),
+    ]),
+    theme: 'grid',
+  })
+
+  // Alerts
+  if (data.alerts.length > 0) {
+    doc.addPage()
+    doc.setFontSize(14)
+    doc.text('אזעקות', 300, 50, { align: 'center' })
+    autoTable(doc, {
+      startY: 70,
+      head: [['זמן', 'תלמיד', 'מרחק', 'סטטוס']],
+      body: data.alerts.map(a => [
+        new Date(a.triggeredAt).toLocaleTimeString('he-IL'),
+        a.studentId.slice(0, 8),
+        `${Math.round(a.distanceM)}m`,
+        a.acknowledgedAt ? 'טופלה' : 'פתוחה',
+      ]),
+    })
+  }
+
+  doc.save(`audit-${data.session.id.slice(0, 8)}-${new Date(data.session.startedAt).toISOString().slice(0, 10)}.pdf`)
+}
+```
+
+## 36.2 `src/lib/audit/exportExcel.ts`
+
+```ts
+// src/lib/audit/exportExcel.ts
+import * as XLSX from 'xlsx'
+import type { AuditSession, AuditResponse, AuditAlert, AuditKpis } from '@/types/audit'
+
+export function exportAuditExcel(data: {
+  session: AuditSession
+  responses: AuditResponse[]
+  alerts: AuditAlert[]
+  kpis: AuditKpis
+}) {
+  const wb = XLSX.utils.book_new()
+
+  // Sheet: Summary
+  const summary = [
+    ['ID', data.session.id],
+    ['מצב', data.session.mode],
+    ['החלה', data.session.startedAt],
+    ['הסתיימה', data.session.closedAt ?? '—'],
+    ['כיתות', data.session.classIds.join(', ')],
+    ['סה"כ תלמידים', data.session.totalStudents],
+    [],
+    ['קטגוריה', 'מספר'],
+    ['נוכח',          data.kpis.byCategory.IN_YESHIVA ?? 0],
+    ['בחוץ עם אישור', data.kpis.byCategory.OUT_PERMIT ?? 0],
+    ['בחוץ ללא אישור',data.kpis.byCategory.OUT_NO_PERMIT ?? 0],
+    ['לא ידוע',       data.kpis.byCategory.UNKNOWN ?? 0],
+  ]
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), 'סיכום')
+
+  // Sheet: By class
+  const byClass = [
+    ['כיתה', 'סה"כ', 'נוכח', 'עם אישור', 'ללא אישור', 'לא ידוע', 'ממתין'],
+    ...Object.entries(data.kpis.byClass).map(([cid, s]) =>
+      [cid, s.total, s.in_yeshiva, s.out_permit, s.out_no_permit, s.unknown, s.pending]
+    ),
+  ]
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(byClass), 'לפי כיתה')
+
+  // Sheet: Responses (raw)
+  const respRows = [
+    ['תלמיד ID', 'כיתה', 'קטגוריה', 'סומן ע"י', 'זמן סימון', 'מרחק (m)', 'GPS status'],
+    ...data.responses.map(r => [
+      r.studentId, r.classId, r.category, r.markedBy ?? '',
+      r.markedAt ?? '', r.distanceFromCampusM ?? '', r.gpsStatus ?? '',
+    ]),
+  ]
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(respRows), 'תגובות מלאות')
+
+  // Sheet: Alerts
+  if (data.alerts.length > 0) {
+    const alertRows = [
+      ['זמן', 'תלמיד ID', 'מרחק (m)', 'חומרה', 'נצפה ע"י', 'זמן צפייה'],
+      ...data.alerts.map(a => [
+        a.triggeredAt, a.studentId, a.distanceM, a.severity,
+        a.acknowledgedBy ?? '', a.acknowledgedAt ?? '',
+      ]),
+    ]
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(alertRows), 'אזעקות')
+  }
+
+  XLSX.writeFile(wb, `audit-${data.session.id.slice(0, 8)}.xlsx`)
+}
+```
+
+---
+
+# חלק ל"ז — Vitest Test Files (קוד מלא)
+
+## 37.1 `src/lib/audit/__tests__/haversine.test.ts`
+
+```ts
+// src/lib/audit/__tests__/haversine.test.ts
+import { describe, test, expect } from 'vitest'
+import { haversineMeters, distanceFromCampus, CAMPUS_LAT, CAMPUS_LNG } from '../haversine'
+
+describe('haversine', () => {
+  test('returns 0 for same point', () => {
+    expect(haversineMeters(31.5, 35.1, 31.5, 35.1)).toBe(0)
+  })
+
+  test('returns positive for different points', () => {
+    expect(haversineMeters(CAMPUS_LAT, CAMPUS_LNG, 31.5, 35.0)).toBeGreaterThan(0)
+  })
+
+  test('symmetric', () => {
+    const a = haversineMeters(31.5, 35.1, 32.0, 34.8)
+    const b = haversineMeters(32.0, 34.8, 31.5, 35.1)
+    expect(a).toBeCloseTo(b, 0)
+  })
+
+  test('distanceFromCampus returns 0 for campus coords', () => {
+    expect(distanceFromCampus(CAMPUS_LAT, CAMPUS_LNG)).toBe(0)
+  })
+
+  test('returns NaN for invalid inputs', () => {
+    expect(haversineMeters(NaN, 0, 0, 0)).toBeNaN()
+  })
+
+  test('matches expected distance Hebron→Jerusalem (~30km)', () => {
+    const d = haversineMeters(CAMPUS_LAT, CAMPUS_LNG, 31.7833, 35.2167)
+    expect(d).toBeGreaterThan(25000)
+    expect(d).toBeLessThan(40000)
+  })
+})
+```
+
+## 37.2 `src/lib/audit/__tests__/distanceBuckets.test.ts`
+
+```ts
+// src/lib/audit/__tests__/distanceBuckets.test.ts
+import { describe, test, expect } from 'vitest'
+import { bucketFromMeters, formatDistance, getBucketMeta } from '../distanceBuckets'
+
+describe('distanceBuckets', () => {
+  test.each([
+    [0,    'GREEN'],
+    [100,  'GREEN'],
+    [300,  'GREEN'],
+    [301,  'BLUE'],
+    [500,  'BLUE'],
+    [1000, 'BLUE'],
+    [1001, 'ORANGE'],
+    [3000, 'ORANGE'],
+    [5000, 'ORANGE'],
+    [5001, 'RED'],
+    [50000,'RED'],
+  ])('%i m → %s', (m, expected) => {
+    expect(bucketFromMeters(m)).toBe(expected)
+  })
+
+  test('null/undefined → null', () => {
+    expect(bucketFromMeters(null)).toBeNull()
+    expect(bucketFromMeters(undefined)).toBeNull()
+    expect(bucketFromMeters(-5)).toBeNull()
+    expect(bucketFromMeters(NaN)).toBeNull()
+  })
+
+  test('formatDistance', () => {
+    expect(formatDistance(null)).toBe('—')
+    expect(formatDistance(99)).toBe('99m')
+    expect(formatDistance(1234)).toBe('1.2 ק"מ')
+  })
+
+  test('getBucketMeta returns correct color', () => {
+    expect(getBucketMeta('GREEN').color).toBe('#10b981')
+    expect(getBucketMeta('RED').color).toBe('#ef4444')
+  })
+})
+```
+
+## 37.3 `src/lib/audit/__tests__/gpsCollector.test.ts`
+
+```ts
+// src/lib/audit/__tests__/gpsCollector.test.ts
+import { describe, test, expect, beforeEach, vi } from 'vitest'
+import { collectGps } from '../gpsCollector'
+
+beforeEach(() => {
+  // @ts-ignore
+  global.navigator = { geolocation: undefined, onLine: true, permissions: undefined }
+})
+
+describe('collectGps', () => {
+  test('returns UNAVAILABLE if no geolocation', async () => {
+    const r = await collectGps()
+    expect(r.status).toBe('UNAVAILABLE')
+  })
+
+  test('returns OFFLINE when navigator.onLine = false', async () => {
+    // @ts-ignore
+    global.navigator = {
+      geolocation: { getCurrentPosition: vi.fn() },
+      onLine: false,
+    }
+    const r = await collectGps()
+    expect(r.status).toBe('OFFLINE')
+  })
+
+  test('returns OK on success', async () => {
+    // @ts-ignore
+    global.navigator = {
+      onLine: true,
+      geolocation: {
+        getCurrentPosition: (success: any) =>
+          success({ coords: { latitude: 31.5, longitude: 35.1, accuracy: 10 }, timestamp: 1 }),
+      },
+    }
+    const r = await collectGps()
+    expect(r.status).toBe('OK')
+    if (r.status === 'OK') {
+      expect(r.lat).toBe(31.5)
+      expect(r.lng).toBe(35.1)
+      expect(r.accuracyM).toBe(10)
+    }
+  })
+
+  test('returns LOW_ACCURACY when accuracy > threshold', async () => {
+    // @ts-ignore
+    global.navigator = {
+      onLine: true,
+      geolocation: {
+        getCurrentPosition: (success: any) =>
+          success({ coords: { latitude: 31.5, longitude: 35.1, accuracy: 5000 }, timestamp: 1 }),
+      },
+    }
+    const r = await collectGps({ maxAccuracyM: 1000 })
+    expect(r.status).toBe('LOW_ACCURACY')
+  })
+
+  test('returns DENIED on PERMISSION_DENIED', async () => {
+    // @ts-ignore
+    global.navigator = {
+      onLine: true,
+      geolocation: {
+        getCurrentPosition: (_s: any, fail: any) => fail({ code: 1, message: 'denied' }),
+      },
+    }
+    const r = await collectGps()
+    expect(r.status).toBe('DENIED')
+  })
+})
+```
+
+## 37.4 `src/store/__tests__/auditStore.test.ts`
+
+```ts
+// src/store/__tests__/auditStore.test.ts
+import { describe, test, expect, beforeEach, vi } from 'vitest'
+import { useAuditStore } from '../auditStore'
+import type { AuditSession, AuditResponse } from '@/types/audit'
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    openAudit: vi.fn(),
+    getActiveAudit: vi.fn(),
+    getAuditFull: vi.fn(),
+    closeAudit: vi.fn(),
+    abortAudit: vi.fn(),
+    submitAuditResponse: vi.fn(),
+    acknowledgeAuditAlert: vi.fn(),
+  },
+}))
+
+const sampleSession = (overrides?: Partial<AuditSession>): AuditSession => ({
+  id: 's1', mode: 'MANUAL', status: 'ACTIVE',
+  classIds: ['א'], totalStudents: 10, startedBy: 'admin',
+  startedAt: new Date().toISOString(),
+  closedAt: null, closedBy: null, notes: null, settings: {},
+  createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  ...overrides,
+})
+
+describe('auditStore', () => {
+  beforeEach(() => {
+    useAuditStore.getState().reset()
+  })
+
+  test('initial state', () => {
+    const s = useAuditStore.getState()
+    expect(s.session).toBeNull()
+    expect(s.responses.size).toBe(0)
+    expect(s.alerts).toEqual([])
+  })
+
+  test('upsertResponse adds and updates by studentId', () => {
+    const r: AuditResponse = {
+      id: 'r1', sessionId: 's1', studentId: 'stu1', classId: 'א',
+      category: 'PENDING', markedBy: null, markedAt: null,
+      gpsLat: null, gpsLng: null, gpsAccuracyM: null,
+      distanceFromCampusM: null, distanceBucket: null, gpsStatus: null,
+      departureId: null, note: null,
+      createdAt: '', updatedAt: '',
+    }
+    useAuditStore.getState().upsertResponse(r)
+    expect(useAuditStore.getState().responses.get('stu1')?.category).toBe('PENDING')
+
+    useAuditStore.getState().upsertResponse({ ...r, category: 'IN_YESHIVA' })
+    expect(useAuditStore.getState().responses.get('stu1')?.category).toBe('IN_YESHIVA')
+    expect(useAuditStore.getState().responses.size).toBe(1)
+  })
+
+  test('insertAlert prepends', () => {
+    const a = { id: 'a1', sessionId: 's1', studentId: 'st1', triggeredAt: 't',
+                distanceM: 6000, gpsLat: null, gpsLng: null, severity: 'CRITICAL' as const,
+                acknowledgedBy: null, acknowledgedAt: null, note: null }
+    useAuditStore.getState().insertAlert(a)
+    expect(useAuditStore.getState().alerts).toHaveLength(1)
+  })
+})
+```
+
+---
+
+# חלק ל"ח — Wireframes נוספים (ASCII art מפורט)
+
+## 38.1 דף Landing — Past Audits
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║  ← אדמין › ביקורת פנימית                              [+ פתח חדשה]  ║
+║                                                                      ║
+║  ┌────────────────────────────────────────────────────────────────┐ ║
+║  │ ⚡ ביקורת פעילה כעת — ביקורת מהירה                              │ ║
+║  │ החלה ב-09:15. 8 דקות עברו. [חזור לסשן →]                       │ ║
+║  └────────────────────────────────────────────────────────────────┘ ║
+║                                                                      ║
+║  [סנן: כל המצבים ▼]   [חפש...                       ]                ║
+║                                                                      ║
+║  ─────────────── 15/05/2026 (שני) ───────────────                    ║
+║  ┌────────────────────────────────────────────────────────────────┐ ║
+║  │ 📍 ביקורת מיקום   13:30   16 כיתות   381 תלמידים   [CLOSED ✓]  │ ║
+║  │ "ביקורת אחר צהריים"                                            │ ║
+║  └────────────────────────────────────────────────────────────────┘ ║
+║  ┌────────────────────────────────────────────────────────────────┐ ║
+║  │ ⚡ ביקורת מהירה   09:15   16 כיתות   381 תלמידים   [ACTIVE]    │ ║
+║  └────────────────────────────────────────────────────────────────┘ ║
+║                                                                      ║
+║  ─────────────── 14/05/2026 (ראשון) ───────────────                  ║
+║  ┌────────────────────────────────────────────────────────────────┐ ║
+║  │ 📍 ביקורת מיקום   16:00   16 כיתות   381 תלמידים   [CLOSED ✓]  │ ║
+║  └────────────────────────────────────────────────────────────────┘ ║
+║                                                                      ║
+║  ─────────────── 13/05/2026 (ש') ───────────────                     ║
+║   (אין ביקורות)                                                      ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+```
+
+## 38.2 דף Live — מסך מלא במצב LOCATION
+
+```
+╔════════════════════════════════════════════════════════════════════════════╗
+║ ← אדמין › ביקורת › פעילה                                                   ║
+║                                                                            ║
+║ 📍 ביקורת מיקום                       ⏱ 02:34 / 02:00       🔊 📺 [סיים]  ║
+║ החלה: 09:15  |  סוג: LOCATION  |  16 כיתות  |  381 תלמידים                ║
+║                                                                            ║
+║ ╔═════════ KPIs ═════════════════════════════════════════════════════════╗ ║
+║ ║ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                       ║ ║
+║ ║ │ 312 │ │  18 │ │  11 │ │   3 │ │  37 │ │  3⚠ │                       ║ ║
+║ ║ │נוכח │ │עם א'│ │קרוב │ │רחוק │ │ ??? │ │אזעקה│                       ║ ║
+║ ║ └─────┘ └─────┘ └─────┘ └─────┘ └─────┘ └─────┘                       ║ ║
+║ ╚════════════════════════════════════════════════════════════════════════╝ ║
+║                                                                            ║
+║ [🟢 Grid] [🔥 Heatmap] [🗺 מפה] [📜 פיד]                                  ║
+║                                                                            ║
+║ ╔══════════════════════════════════════════════════════════════════════╗  ║
+║ ║                                                                      ║  ║
+║ ║                    🗺  Map View                                       ║  ║
+║ ║                                                                      ║  ║
+║ ║       ┌────────────────────────────────────────┐  ┌──────────────┐  ║  ║
+║ ║       │                                        │  │  מקרא        │  ║  ║
+║ ║       │       🟢                               │  │  🟢 בישיבה   │  ║  ║
+║ ║       │      🟢🟢   🟢                          │  │  🔵 קרוב     │  ║  ║
+║ ║       │      🟢🏫🟢                            │  │  🟠 חברון    │  ║  ║
+║ ║       │     🟢🟢🟢🟢                            │  │  🔴 רחוק     │  ║  ║
+║ ║       │      🟢🔵                              │  └──────────────┘  ║  ║
+║ ║       │         🟠                             │                    ║  ║
+║ ║       │                              🔴 (פולס)│                    ║  ║
+║ ║       └────────────────────────────────────────┘                    ║  ║
+║ ║                                                                      ║  ║
+║ ╚══════════════════════════════════════════════════════════════════════╝  ║
+║                                                                            ║
+║ ┌─── אזעקות ──────────┐  ┌─── פעילות חי ────────────────────────────────┐ ║
+║ │ ⚠ יהושע — 38km     │  │ 🟢 09:17:42 הרב יעקב סימן את דוד — נוכח      │ ║
+║ │   09:17 [סמן כנצפה]│  │ 🟢 09:17:40 GPS: יוסף — בישיבה (218m)         │ ║
+║ │                    │  │ 🔴 09:17:38 GPS: יהושע — מחוץ לטווח! (38km)   │ ║
+║ │ ✓ 0 אזעקות נצפו    │  │ 🔵 09:17:35 AUTO: נחמן — יציאה מאושרת          │ ║
+║ └────────────────────┘  └────────────────────────────────────────────────┘ ║
+╚════════════════════════════════════════════════════════════════════════════╝
+```
+
+## 38.3 דף Live — Tab Grid
+
+```
+╔════════════════════════════════════════════════════════════════════════╗
+║ [🟢 Grid] [🔥 Heatmap] [🗺 מפה] [📜 פיד]                              ║
+║                                                                        ║
+║  ┌─────────────────────────────────────────────────────────────────┐  ║
+║  │ 🔴 כיתה הרב יעקב                                                 │  ║
+║  │ 21/25 (84%)        ───────────────────████░░░                   │  ║
+║  │ ✅ 19  🔵 1  🔴 1  ⚪ 0                                          │  ║
+║  │ ⚠ אזעקה: 1 תלמיד מחוץ לטווח                                     │  ║
+║  └─────────────────────────────────────────────────────────────────┘  ║
+║  ┌─────────────────────────────────────────────────────────────────┐  ║
+║  │ ⏳ כיתה הרב משה                                                  │  ║
+║  │ 0/20 (0%)           ░░░░░░░░░░░░░░░░░░░░░░                      │  ║
+║  │ הרכז עוד לא הגיב — [שלח push חוזר]                              │  ║
+║  └─────────────────────────────────────────────────────────────────┘  ║
+║  ┌─────────────────────────────────────────────────────────────────┐  ║
+║  │ ✓ כיתה הרב הלל                                                   │  ║
+║  │ 16/16 (100%)        ████████████████████████                    │  ║
+║  │ ✅ 14  🔵 2  🔴 0  ⚪ 0                                          │  ║
+║  └─────────────────────────────────────────────────────────────────┘  ║
+║                                                                        ║
+║  ... עוד 13 כיתות                                                      ║
+║                                                                        ║
+╚════════════════════════════════════════════════════════════════════════╝
+```
+
+## 38.4 מסך תלמיד — Sheet GPS
+
+```
+═══════════════════════════════════════
+                                       
+              📍                       
+                                       
+       בקרת מיקום מהירה                
+                                       
+   ההנהלה מבקשת לוודא שאתה            
+   בישיבה.                            
+                                       
+   האפליקציה תשלח את מיקומך הנוכחי.   
+                                       
+   ┌─────────────────────────────────┐ 
+   │                                 │ 
+   │      ✓ אשר ושלח מיקום           │ 
+   │                                 │ 
+   └─────────────────────────────────┘ 
+                                       
+   ┌─────────────────────────────────┐ 
+   │      ✗ אני לא יכול / לא בישיבה  │ 
+   └─────────────────────────────────┘ 
+                                       
+   המיקום ישמר רק במהלך הביקורת.      
+                                       
+═══════════════════════════════════════
+```
+
+---
+
+# חלק ל"ט — Accessibility Audit Checklist
+
+| בדיקה | מצב נדרש | רכיב |
+|--------|------------|------|
+| כפתורים עם `aria-label` בעברית | ✓ | כל הכפתורים |
+| Sufficient color contrast (WCAG AA ≥ 4.5:1) | ✓ | כל הטקסטים |
+| גודל target ≥ 44px | ✓ | כפתורי "נוכח" / "עם אישור" / "ללא אישור" |
+| תמיכה ב-screen reader | ✓ | אזעקות יקראו "התראה: תלמיד X במרחק Y" |
+| Focus indicator ברור | ✓ | כל הרכיבים האינטראקטיביים |
+| Keyboard navigation | ✓ | Tab, Enter, ESC עובדים |
+| `role="alert"` על אזעקות | ✓ | AuditAlertList |
+| `aria-live="polite"` על KPIs | ✓ | AuditKpiRow |
+| `prefers-reduced-motion` מכובד | ✓ | אנימציות נמוכות אם נדרש |
+| RTL נכון בכל הטקסטים | ✓ | dir="rtl" על html |
+| Numbers ב-LTR enclave | ✓ | `<span dir="ltr">` סביב מספרים |
+| Skip links | ✓ | "דלג לתוכן" |
+| Color != only signal | ✓ | תמיד יש גם אייקון / טקסט |
+
+---
+
+# חלק מ' — Performance Budget
+
+| מדד | יעד | מימוש |
+|------|-----|--------|
+| Largest Contentful Paint (LCP) | < 2.5s | code splitting + lazy load של Leaflet |
+| First Input Delay (FID) | < 100ms | Zustand בלי middleware כבד |
+| Cumulative Layout Shift (CLS) | < 0.1 | קומפוננטים עם min-height |
+| Total JS bundle gzip | < 350KB | code splitting per route |
+| Time to Interactive | < 3s | preload critical fonts |
+| Realtime → UI update | < 800ms | direct postgres_changes filter |
+| RPC open_audit | p95 < 500ms | index on status, JSONB GIN |
+| RPC submit_audit_response | p95 < 200ms | UPDATE WHERE PK |
+| Map render (50 markers) | < 200ms | MarkerCluster |
+| Map render (300 markers) | < 600ms | MarkerCluster + canvas |
+| Memory consumption (live) | < 100MB | proper cleanup of subscriptions |
+
+---
+
+# חלק מ"א — Migration Sequence ו-Rollback
+
+## 41.1 סדר מיגרציה (forward)
+
+```
+ORDER 1: pgcrypto, pg_cron, pg_trgm extensions
+ORDER 2: audit_sessions table
+ORDER 3: audit_responses table (depends on audit_sessions, students)
+ORDER 4: audit_response_log table
+ORDER 5: audit_alerts table
+ORDER 6: audit_push_log table
+ORDER 7: indices
+ORDER 8: triggers (tg_audit_sessions_updated_at, tg_audit_responses_log_change, tg_audit_responses_alert)
+ORDER 9: helper functions (fn_haversine_m, fn_distance_bucket)
+ORDER 10: RPCs (8 functions)
+ORDER 11: cron schedule
+ORDER 12: publication setup
+```
+
+## 41.2 Rollback SQL (DANGEROUS — לא להשתמש אלא אם בטוח)
+
+```sql
+-- ⚠ זה ימחק את כל היסטוריית הביקורות. אסור להריץ ב-production
+-- בלי backup מוכן.
+BEGIN;
+
+-- Remove cron
+SELECT cron.unschedule('tick_audit_timeout');
+
+-- Drop publication members
+ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_sessions;
+ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_responses;
+ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.audit_alerts;
+
+-- Drop RPCs
+DROP FUNCTION IF EXISTS public.open_audit(TEXT, TEXT[], TEXT, JSONB, TEXT);
+DROP FUNCTION IF EXISTS public.submit_audit_response(UUID, UUID, TEXT, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.close_audit(UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.abort_audit(UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.get_active_audit();
+DROP FUNCTION IF EXISTS public.get_audit_full(UUID);
+DROP FUNCTION IF EXISTS public.compute_audit_kpis(UUID);
+DROP FUNCTION IF EXISTS public.acknowledge_audit_alert(UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.list_past_audits(TEXT, TIMESTAMPTZ, TIMESTAMPTZ, INT);
+DROP FUNCTION IF EXISTS public.tick_audit_timeout();
+DROP FUNCTION IF EXISTS public.fn_distance_bucket(DOUBLE PRECISION);
+DROP FUNCTION IF EXISTS public.fn_haversine_m(DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION);
+
+-- Drop triggers (auto-dropped with tables, but explicit for safety)
+DROP TRIGGER IF EXISTS tr_audit_responses_alert ON public.audit_responses;
+DROP TRIGGER IF EXISTS tr_audit_responses_log_change ON public.audit_responses;
+DROP TRIGGER IF EXISTS tr_audit_sessions_updated_at ON public.audit_sessions;
+
+-- Drop tables
+DROP TABLE IF EXISTS public.audit_push_log;
+DROP TABLE IF EXISTS public.audit_alerts;
+DROP TABLE IF EXISTS public.audit_response_log;
+DROP TABLE IF EXISTS public.audit_responses;
+DROP TABLE IF EXISTS public.audit_sessions;
+
+COMMIT;
+```
+
+---
+
+# חלק מ"ב — RLS Policies (תוכנית עתידית)
+
+לאחר שתוכרז RLS לכלל הפרויקט (TODO ב־CLAUDE.md):
+
+```sql
+-- Sessions: readable by all authenticated; writable only by admin role
+ALTER TABLE public.audit_sessions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY audit_sessions_read
+  ON public.audit_sessions FOR SELECT
+  USING (true);
+
+CREATE POLICY audit_sessions_write_admin
+  ON public.audit_sessions FOR ALL
+  USING (auth.jwt() ->> 'role' = 'admin')
+  WITH CHECK (auth.jwt() ->> 'role' = 'admin');
+
+-- Responses: read by all authenticated; write own (student) OR same-class (supervisor) OR admin
+ALTER TABLE public.audit_responses ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY audit_responses_read
+  ON public.audit_responses FOR SELECT
+  USING (true);
+
+CREATE POLICY audit_responses_write_own_student
+  ON public.audit_responses FOR UPDATE
+  USING (
+    student_id::text = auth.jwt() ->> 'student_id'
+    OR auth.jwt() ->> 'role' IN ('admin', 'supervisor')
+  );
+
+-- Alerts: admin-only acknowledge
+ALTER TABLE public.audit_alerts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY audit_alerts_admin
+  ON public.audit_alerts FOR ALL
+  USING (auth.jwt() ->> 'role' IN ('admin','supervisor'));
+```
+
+---
+
+# חלק מ"ג — CI / GitHub Actions
+
+```yaml
+# .github/workflows/audit-tests.yml
+name: Audit Module Tests
+
+on:
+  pull_request:
+    paths:
+      - 'src/lib/audit/**'
+      - 'src/components/audit/**'
+      - 'src/store/audit*.ts'
+      - 'src/hooks/useAudit*.ts'
+      - 'src/pages/admin/Audit*.tsx'
+      - 'src/types/audit.ts'
+      - 'supabase/migrations/*audit*.sql'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint -- src/{lib,components,store,hooks,pages,types}/audit*
+      - run: npm run test -- src/lib/audit
+      - run: npm run build
+      - name: Bundle size check
+        run: |
+          test $(stat -c%s dist/assets/*.js | sort -n | tail -1) -lt 400000
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - run: npm run e2e -- audit
+```
+
+---
+
+# חלק מ"ד — Playwright E2E Tests (קוד מלא)
+
+## 44.1 `e2e/audit/manual-mode.spec.ts`
+
+```ts
+// e2e/audit/manual-mode.spec.ts
+import { test, expect } from '@playwright/test'
+
+test.describe('Manual audit happy path', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/admin/login')
+    await page.fill('input[type="password"]', process.env.E2E_ADMIN_PIN ?? '1234')
+    await page.click('text=כניסה')
+  })
+
+  test('admin opens manual audit, marks students, closes', async ({ page }) => {
+    await page.goto('/admin/audit')
+    await page.click('text=פתח ביקורת חדשה')
+
+    // Step 1: mode
+    await page.click('text=ביקורת מהירה')
+    await page.click('text=המשך')
+
+    // Step 2: classes
+    await page.check('input[id="select-all-classes"]')
+    await page.click('text=המשך')
+
+    // Step 3: confirm
+    await page.click('text=פתח ביקורת ⚡')
+
+    await expect(page).toHaveURL(/\/admin\/audit\/[a-f0-9-]+\/live/)
+    await expect(page.locator('text=ביקורת פעילה')).toBeVisible()
+
+    // KPIs should show
+    await expect(page.getByTestId('kpi-pending')).toContainText(/\d+/)
+
+    // Open class drawer
+    await page.locator('[data-testid="class-card"]').first().click()
+    await expect(page.locator('text=כיתה')).toBeVisible()
+
+    // Close session
+    await page.click('text=סיים ביקורת')
+    await page.click('text=אישור')
+    await expect(page).toHaveURL(/\/summary/)
+    await expect(page.locator('text=סיכום ביקורת')).toBeVisible()
+  })
+
+  test('refresh during active session preserves state', async ({ page }) => {
+    await page.goto('/admin/audit/new')
+    await page.click('text=ביקורת מהירה')
+    await page.click('text=המשך')
+    await page.check('input[id="select-all-classes"]')
+    await page.click('text=המשך')
+    await page.click('text=פתח ביקורת')
+
+    const url = page.url()
+    await page.reload()
+    expect(page.url()).toBe(url)
+    await expect(page.locator('text=ביקורת פעילה')).toBeVisible()
+  })
+
+  test('two admins cannot open concurrently', async ({ browser }) => {
+    const ctx1 = await browser.newContext()
+    const ctx2 = await browser.newContext()
+    const p1 = await ctx1.newPage()
+    const p2 = await ctx2.newPage()
+
+    // both login
+    for (const p of [p1, p2]) {
+      await p.goto('/admin/login')
+      await p.fill('input[type="password"]', '1234')
+      await p.click('text=כניסה')
+    }
+
+    // p1 opens audit
+    await p1.goto('/admin/audit/new')
+    await p1.click('text=ביקורת מהירה')
+    await p1.click('text=המשך')
+    await p1.check('input[id="select-all-classes"]')
+    await p1.click('text=המשך')
+    await p1.click('text=פתח ביקורת')
+    await expect(p1).toHaveURL(/\/live/)
+
+    // p2 tries to open another
+    await p2.goto('/admin/audit/new')
+    await p2.click('text=ביקורת מהירה')
+    await p2.click('text=המשך')
+    await p2.check('input[id="select-all-classes"]')
+    await p2.click('text=המשך')
+    await p2.click('text=פתח ביקורת')
+
+    await expect(p2.locator('text=AUDIT_ACTIVE').or(p2.locator('text=ביקורת פעילה כעת'))).toBeVisible()
+  })
+})
+```
+
+---
+
+# חלק מ"ה — Slack/Discord Notifications (אופציונלי)
+
+```ts
+// supabase/functions/notify-audit-alert/index.ts
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+const SLACK_WEBHOOK = Deno.env.get('SLACK_AUDIT_WEBHOOK')!
+
+interface AlertEvent {
+  alert_id: string
+  session_id: string
+  student_id: string
+  distance_m: number
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+}
+
+Deno.serve(async (req) => {
+  const evt = (await req.json()) as AlertEvent
+  if (evt.severity !== 'CRITICAL') return new Response('ok')
+
+  const message = {
+    text: `🚨 Critical audit alert`,
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Critical:* Student \`${evt.student_id}\` is *${(evt.distance_m / 1000).toFixed(1)} km* from campus.`,
+        },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Open dashboard' },
+            url: `https://shavey-hevron.vercel.app/admin/audit/${evt.session_id}/live`,
+          },
+        ],
+      },
+    ],
+  }
+
+  await fetch(SLACK_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message),
+  })
+
+  return new Response('sent')
+})
+```
+
+---
+
+# חלק מ"ו — Disaster Recovery Plan
+
+## 46.1 תרחישים
+
+| תרחיש | RTO | RPO | פעולה |
+|--------|-----|-----|--------|
+| Vercel down | 5 min | 0 | DNS switch ל-backup deployment |
+| Supabase DB down | 30 min | 5 min | Restore from latest backup |
+| מיגרציה הרסה data | 1h | 1h | Restore from snapshot |
+| VAPID key compromised | 1h | 0 | rotate keys, all students re-subscribe |
+| 50% מהתלמידים לא בקשה | 5 min | 0 | check push_token validity, run manual mode |
+
+## 46.2 גיבויים
+
+- **Supabase auto-backup:** daily snapshot, kept 7 days
+- **Manual snapshot:** לפני כל מיגרציה major
+- **Code:** git on GitHub
+- **Environment vars:** sealed in 1Password vault
+- **VAPID keys:** export to encrypted file in safe place
+
+---
+
+# חלק מ"ז — Capacity Planning
+
+| מטריקה | היום | שנה הבאה | 3 שנים |
+|---------|------|-----------|---------|
+| תלמידים | 381 | ~450 | ~600 |
+| ביקורות / שבוע | 0 (חדש) | ~20 | ~30 |
+| Push notifications / חודש | 0 | ~20K | ~40K |
+| DB size (audit tables) | 0 | ~50MB | ~200MB |
+| Concurrent realtime users | 0 | 30 | 60 |
+| Edge function invocations / חודש | 0 | ~20K | ~40K |
+
+**Supabase free tier:** 500MB DB, 2GB egress. עד 600 תלמידים — סבבה. אחרי — Pro plan ($25/mo).
+
+---
+
+# חלק מ"ח — Migration from current RollCall (Cleanup Tasks)
+
+הקוד הישן של RollCall שצריך להסיר אחרי deploy של החדש:
+
+| קובץ / function | פעולה |
+|------------------|---------|
+| `src/pages/admin/RollCallPage.tsx` | DELETE |
+| Route `/admin/rollcall` ב-App.tsx | REPLACE → redirect to `/admin/audit` |
+| Realtime channel `location-requests` | DELETE listener בכל לקוח |
+| Realtime channel `audit-control` | DELETE listener |
+| HomePage hook listener `location-requests` | DELETE |
+| `ClassSupervisorDashboard.tsx` audit panel | REPLACE with new `SupervisorAuditPanel` |
+| `updateStudentLocation` RPC | KEEP (אחרים משתמשים), אבל לא בשימוש ל-audit |
+| `students.lastLocation` column | KEEP (תאימות לאחור) |
+
+---
+
+# חלק מ"ט — Internationalization Considerations
+
+המערכת כיום עברית בלבד. אם בעתיד תוסיף אנגלית:
+
+```ts
+// src/lib/audit/i18n.ts
+export const STRINGS = {
+  he: {
+    audit_title: 'ביקורת פנימית',
+    audit_open_new: 'פתח ביקורת חדשה',
+    mode_manual: 'ביקורת מהירה',
+    mode_location: 'ביקורת מיקום',
+    category_in_yeshiva: 'נוכח',
+    category_out_permit: 'בחוץ עם אישור',
+    category_out_no_permit: 'בחוץ ללא אישור',
+    category_unknown: 'לא ידוע',
+    // ... ~50 keys
+  },
+  en: {
+    audit_title: 'Internal Audit',
+    // ...
+  },
+}
+```
+
+---
+
+# חלק נ' — תוכנית פיתוח של 30 ימים (gantt)
+
+```
+Day 1-2:   DB schema + RPC stubs
+Day 3-4:   RPC full implementations + tests
+Day 5:     Edge function send-audit-push
+Day 6-7:   TypeScript types + lib modules + tests
+Day 8-9:   Zustand stores + hooks + tests
+Day 10-12: Components: KPI, Class card/grid, Heatmap
+Day 13-14: Components: Map, Activity feed, Alerts
+Day 15-16: Pages: New + Live
+Day 17:    Pages: Summary + Compare + Landing
+Day 18:    Supervisor panel + Student sheet
+Day 19:    Projection mode + sounds
+Day 20:    Service worker integration
+Day 21:    Export PDF / Excel
+Day 22:    Design polish (colors, animations)
+Day 23:    Accessibility audit + fixes
+Day 24:    Performance optimization
+Day 25:    E2E tests
+Day 26:    Manual QA all flows
+Day 27:    Staging deploy + smoke test
+Day 28:    Production deploy
+Day 29:    Monitor + fix critical bugs
+Day 30:    User training + handoff
+```
+
+---
+
+# חלק נ"א — Pitfalls נפוצים (וכיצד להימנע)
+
+1. **לא לשמור session_id ב-localStorage** — תמיד מ-DB.
+2. **לא לסמוך על Realtime לבד** — תמיד יש polling fallback של 30s.
+3. **לא לקרוא ל-RPC ב-loop** — Batch UPDATEs במקום.
+4. **לא להשתמש ב-`maximumAge` ב-getCurrentPosition** — תמיד `0`, אחרת ה-GPS חוזר מקאש.
+5. **לא לשמור GPS coords ב-clientside־only** — תמיד שלח ל-RPC, לא תרצה אחר כך לחפש את זה.
+6. **לא להריץ מיגרציה בלי backup** — חובה.
+7. **לא להוסיף indices כשהטבלה גדולה** — תמיד יוצר ל-CREATE INDEX CONCURRENTLY ב-production.
+8. **לא לשכוח לעדכן CLAUDE.md** — הקוד נוטה ל-rot ללא תיעוד.
+9. **לא להריץ test session ב-production** — תמיד staging.
+10. **לא לשכוח של pg_cron schedule** — יש מקרים בהם הוא נמחק.
+
+---
+
+# חלק נ"ב — Code Review Checklist
+
+לפני merge:
+- [ ] כל המיגרציה idempotent (`IF NOT EXISTS`)
+- [ ] כל RPC עם `SECURITY DEFINER` + `GRANT EXECUTE`
+- [ ] כל hook עם cleanup ב־unmount
+- [ ] כל Zustand store תקין (לא mutating)
+- [ ] כל component עם `data-testid` למקומות קריטיים
+- [ ] כל באג מ-QA יש לו test
+- [ ] CLAUDE.md מעודכן
+- [ ] PR description ברור עם screenshots
+- [ ] No console.log / TODO
+- [ ] עברית בכל המלים בUI
+- [ ] dark mode עובד
+- [ ] ב-mobile עובד
+
+---
+
+# חלק נ"ג — מסקנה
+
+**זהו מסמך תכנון מקיף.** כשנהיה מוכן להתחיל לכתוב קוד, הצעדים הם:
+
+1. **שלב 0:** branch חדש (`claude/internal-audit-v2`).
+2. **שלב 1:** הרץ את ה-SQL ב-staging Supabase.
+3. **שלב 2:** ודא טבלאות + RPCs עובדים ב-psql.
+4. **שלב 3:** הוסף Edge function + deploy.
+5. **שלב 4:** הוסף types + lib modules + tests.
+6. **שלב 5:** הוסף stores + hooks + tests.
+7. **שלב 6:** בנה components מלמטה למעלה (KPI → Card → Grid → Pages).
+8. **שלב 7:** הוסף pages + routing.
+9. **שלב 8:** הוסף SW integration.
+10. **שלב 9:** סיכומים + export.
+11. **שלב 10:** Polish (animations, sounds, projection).
+12. **שלב 11:** Tests E2E.
+13. **שלב 12:** Deploy ל-staging → QA → Production.
+
+---
+
+**מסמך זה מקיף ~9,000+ שורות**, כולל קוד מלא של:
+- 4 טבלאות SQL
+- 8 RPCs PL/pgSQL
+- 6+ Edge Functions
+- 10+ TypeScript modules
+- 2 Zustand stores
+- 5+ React hooks
+- 15+ React components
+- 5 Pages
+- Service worker
+- CSS / Tailwind
+- E2E tests
+- Unit tests
+- ASCII wireframes
+- API contracts
+- Migration scripts
+- Rollback scripts
+- Deployment runbook
+- Monitoring plan
+- Training scripts
+- FAQ
+- Glossary
+
+**זה מסמך אחד שלם שמספיק כדי לתת לכל developer לבנות את הפיצ'ר שלם בלי שום context אחר.**
+
+# חלק נ"ד — רכיבי UI נוספים (קוד מלא)
+
+## 54.1 `src/components/audit/AuditHeader.tsx`
+
+```tsx
+// src/components/audit/AuditHeader.tsx
+// Persistent header for the live audit page. Shows elapsed time,
+// mode, started-by, and a quick visual progress bar.
+
+import { useEffect, useState } from 'react'
+import { motion } from 'framer-motion'
+import { Clock, User, Zap, MapPin, AlertCircle } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { useAuditStats } from '@/hooks/useAuditStats'
+import type { AuditSession } from '@/types/audit'
+import { cn } from '@/lib/utils'
+
+interface Props {
+  session: AuditSession
+}
+
+export function AuditHeader({ session }: Props) {
+  const { progressPct, alertsOpen, total } = useAuditStats()
+  const [elapsed, setElapsed] = useState(elapsedSec(session.startedAt))
+
+  useEffect(() => {
+    const id = window.setInterval(() => setElapsed(elapsedSec(session.startedAt)), 1000)
+    return () => window.clearInterval(id)
+  }, [session.startedAt])
+
+  const minutes = Math.floor(elapsed / 60)
+  const seconds = elapsed % 60
+  const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+
+  const ModeIcon = session.mode === 'MANUAL' ? Zap : MapPin
+
+  return (
+    <div className="rounded-2xl border-2 p-4 bg-gradient-to-r from-blue-50 to-emerald-50 dark:from-blue-950 dark:to-emerald-950">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <div className={cn(
+            'rounded-full p-3',
+            session.mode === 'MANUAL' ? 'bg-amber-200 dark:bg-amber-900' : 'bg-blue-200 dark:bg-blue-900'
+          )}>
+            <ModeIcon size={24} />
+          </div>
+          <div>
+            <div className="font-bold text-xl">
+              {session.mode === 'MANUAL' ? 'ביקורת מהירה' : 'ביקורת מיקום'} — פעיל
+            </div>
+            <div className="text-sm text-muted-foreground flex items-center gap-3 mt-1">
+              <span className="flex items-center gap-1">
+                <Clock size={14} /> <span dir="ltr">{timeStr}</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <User size={14} /> {session.startedBy}
+              </span>
+              <span>{session.classIds.length} כיתות</span>
+              <span>{total} תלמידים</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {alertsOpen > 0 && (
+            <Badge variant="destructive" className="text-base px-3 py-1 animate-pulse">
+              <AlertCircle size={14} className="me-1" />
+              {alertsOpen} אזעקות
+            </Badge>
+          )}
+          <Badge variant="outline" className="text-base px-3 py-1">
+            {progressPct}% הושלם
+          </Badge>
+        </div>
+      </div>
+
+      <div className="mt-3 h-2 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${progressPct}%` }}
+          transition={{ duration: 0.6 }}
+          className="h-full bg-gradient-to-r from-blue-500 to-emerald-500"
+        />
+      </div>
+    </div>
+  )
+}
+
+function elapsedSec(startIso: string): number {
+  return Math.max(0, Math.floor((Date.now() - new Date(startIso).getTime()) / 1000))
+}
+```
+
+## 54.2 `src/components/audit/AuditClassSelector.tsx`
+
+```tsx
+// src/components/audit/AuditClassSelector.tsx
+// A grouped class selector with select-all-per-grade and select-all-global.
+
+import { useMemo, useState } from 'react'
+import { Check, ChevronDown } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { useStudentsStore } from '@/store/studentsStore'
+import { GRADE_LEVELS, getClasses } from '@/lib/constants/grades'
+
+interface Props {
+  allClassIds: string[]
+  selected: string[]
+  onChange: (ids: string[]) => void
+}
+
+export function AuditClassSelector({ allClassIds, selected, onChange }: Props) {
+  const students = useStudentsStore(s => s.students)
+
+  const grouped = useMemo(() => {
+    const map: Record<string, { id: string; count: number }[]> = {}
+    for (const grade of GRADE_LEVELS) {
+      map[grade] = getClasses(grade).map(cid => ({
+        id: cid,
+        count: students.filter(s => s.classId === cid).length,
+      }))
+    }
+    return map
+  }, [students])
+
+  function toggle(id: string) {
+    onChange(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id])
+  }
+
+  function toggleGrade(ids: string[], checkAll: boolean) {
+    if (checkAll) {
+      const merged = new Set([...selected, ...ids])
+      onChange([...merged])
+    } else {
+      onChange(selected.filter(x => !ids.includes(x)))
+    }
+  }
+
+  const allSelected = allClassIds.every(id => selected.includes(id))
+
+  return (
+    <div className="space-y-3">
+      <Button
+        variant="outline"
+        onClick={() => onChange(allSelected ? [] : allClassIds)}
+        className="w-full justify-between"
+        id="select-all-classes"
+      >
+        <span>{allSelected ? 'בטל הכל' : 'בחר הכל'}</span>
+        <Checkbox checked={allSelected} />
+      </Button>
+
+      {Object.entries(grouped).map(([grade, classes]) => {
+        const ids = classes.map(c => c.id)
+        const selectedInGrade = ids.filter(id => selected.includes(id))
+        const allInGrade = selectedInGrade.length === ids.length && ids.length > 0
+        const someInGrade = selectedInGrade.length > 0 && !allInGrade
+
+        return (
+          <Collapsible key={grade} defaultOpen>
+            <div className="border rounded-xl">
+              <div className="flex items-center justify-between p-3">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={allInGrade ? true : someInGrade ? 'indeterminate' : false}
+                    onCheckedChange={(v) => toggleGrade(ids, !!v)}
+                  />
+                  <span className="font-semibold">{grade}</span>
+                  <span className="text-xs text-muted-foreground">
+                    ({selectedInGrade.length}/{ids.length})
+                  </span>
+                </div>
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="sm">
+                    <ChevronDown size={16} />
+                  </Button>
+                </CollapsibleTrigger>
+              </div>
+              <CollapsibleContent>
+                <div className="border-t p-3 grid grid-cols-2 md:grid-cols-3 gap-2">
+                  {classes.map(c => (
+                    <label
+                      key={c.id}
+                      className="flex items-center gap-2 cursor-pointer hover:bg-accent rounded-lg p-2"
+                    >
+                      <Checkbox
+                        checked={selected.includes(c.id)}
+                        onCheckedChange={() => toggle(c.id)}
+                      />
+                      <div className="flex-1">
+                        <div className="text-sm">{c.id}</div>
+                        <div className="text-xs text-muted-foreground">{c.count} תלמידים</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </div>
+          </Collapsible>
+        )
+      })}
+    </div>
+  )
+}
+```
+
+## 54.3 `src/components/audit/AuditLocationSettings.tsx`
+
+```tsx
+// src/components/audit/AuditLocationSettings.tsx
+// Settings panel for LOCATION-mode audits.
+
+import { Label } from '@/components/ui/label'
+import { Slider } from '@/components/ui/slider'
+import { Switch } from '@/components/ui/switch'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import type { AuditSessionSettings, PushTarget, Sensitivity } from '@/types/audit'
+
+interface Props {
+  value: AuditSessionSettings
+  onChange: (v: AuditSessionSettings) => void
+}
+
+export function AuditLocationSettings({ value, onChange }: Props) {
+  function set<K extends keyof AuditSessionSettings>(k: K, v: AuditSessionSettings[K]) {
+    onChange({ ...value, [k]: v })
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <Label className="font-semibold mb-2 block">זמן המתנה לתגובה (שניות)</Label>
+        <Slider
+          min={60}
+          max={300}
+          step={30}
+          value={[value.timeoutSec ?? 120]}
+          onValueChange={(v) => set('timeoutSec', v[0])}
+        />
+        <div className="flex justify-between text-xs text-muted-foreground mt-1">
+          <span>60s</span>
+          <span className="font-semibold">{value.timeoutSec ?? 120}s</span>
+          <span>5 דק</span>
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          אחרי זמן זה, תלמידים שלא הגיבו יסומנו "לא ידוע" והרכז יקבל push.
+        </p>
+      </div>
+
+      <div>
+        <Label className="font-semibold mb-2 block">רגישות אזעקות</Label>
+        <RadioGroup
+          value={value.sensitivity ?? 'MEDIUM'}
+          onValueChange={(v) => set('sensitivity', v as Sensitivity)}
+          className="grid grid-cols-3 gap-2"
+        >
+          <SensitivityCard value="LOW" label="נמוכה" desc="רק > 5km מקבל אזעקה" />
+          <SensitivityCard value="MEDIUM" label="בינונית" desc="> 1km כתום, > 5km אדום" />
+          <SensitivityCard value="HIGH" label="גבוהה" desc="> 300m כבר אזעקה" />
+        </RadioGroup>
+      </div>
+
+      <div>
+        <Label className="font-semibold mb-2 block">למי לשלוח push</Label>
+        <RadioGroup
+          value={value.pushTarget ?? 'STUDENTS'}
+          onValueChange={(v) => set('pushTarget', v as PushTarget)}
+          className="space-y-2"
+        >
+          <div className="flex items-center gap-2"><RadioGroupItem value="STUDENTS" /> תלמידים בלבד (שולחים GPS אוטומטית)</div>
+          <div className="flex items-center gap-2"><RadioGroupItem value="SUPERVISORS" /> רכזים בלבד (סמנים ידנית את הכיתה)</div>
+          <div className="flex items-center gap-2"><RadioGroupItem value="BOTH" /> שניהם</div>
+        </RadioGroup>
+      </div>
+
+      <div className="flex items-center justify-between border rounded-xl p-3">
+        <div>
+          <div className="font-semibold">הצג מפה כברירת מחדל</div>
+          <p className="text-xs text-muted-foreground">פתח tab "מפה" אוטומטית במצב Live</p>
+        </div>
+        <Switch
+          checked={value.showMap ?? true}
+          onCheckedChange={(v) => set('showMap', v)}
+        />
+      </div>
+    </div>
+  )
+}
+
+function SensitivityCard({ value, label, desc }: { value: string; label: string; desc: string }) {
+  return (
+    <label className="border rounded-xl p-3 cursor-pointer hover:bg-accent has-[:checked]:bg-blue-50 has-[:checked]:border-blue-500 dark:has-[:checked]:bg-blue-950">
+      <div className="flex items-center gap-2 mb-1">
+        <RadioGroupItem value={value} />
+        <span className="font-semibold">{label}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">{desc}</p>
+    </label>
+  )
+}
+```
+
+## 54.4 `src/components/audit/AuditCloseModal.tsx`
+
+```tsx
+// src/components/audit/AuditCloseModal.tsx
+// Confirmation modal shown before closing an audit session.
+
+import { useEffect, useState } from 'react'
+import { AlertTriangle } from 'lucide-react'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+  DialogDescription, DialogFooter,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { useAuditStore } from '@/store/auditStore'
+import { useAuditStats } from '@/hooks/useAuditStats'
+
+interface Props {
+  open: boolean
+  sessionId: string
+  onClose: () => void
+  onConfirm: (notes?: string) => Promise<void>
+}
+
+export function AuditCloseModal({ open, sessionId, onClose, onConfirm }: Props) {
+  const stats = useAuditStats()
+  const [notes, setNotes] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const pending = stats.byCategory.PENDING ?? 0
+
+  useEffect(() => { if (open) setNotes('') }, [open])
+
+  async function handleConfirm() {
+    setSubmitting(true)
+    try {
+      await onConfirm(notes || undefined)
+    } finally {
+      setSubmitting(false)
+      onClose()
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>סיום ביקורת</DialogTitle>
+          <DialogDescription>האם אתה בטוח שברצונך לסיים את הביקורת כעת?</DialogDescription>
+        </DialogHeader>
+
+        {pending > 0 && (
+          <div className="bg-amber-50 dark:bg-amber-950 border-2 border-amber-400 rounded-xl p-3 flex gap-2">
+            <AlertTriangle className="text-amber-600 shrink-0" />
+            <div>
+              <div className="font-semibold">יש עדיין {pending} תלמידים לא סומנו</div>
+              <div className="text-sm text-muted-foreground">
+                בסגירת הביקורת הם יסומנו אוטומטית "לא ידוע".
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-1">
+          <label className="text-sm font-medium">הערה (אופציונלי)</label>
+          <Textarea
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            placeholder="למשל: 'ביקורת אחר ערבית' / 'הרבה לא הגיבו כי לא הביאו פלאפון'"
+            maxLength={500}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={submitting}>ביטול</Button>
+          <Button
+            onClick={handleConfirm}
+            disabled={submitting}
+            className="bg-emerald-600 hover:bg-emerald-700"
+          >
+            {submitting ? 'מסיים...' : 'אישור — סיים ביקורת'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+```
+
+## 54.5 `src/components/audit/AuditAlertModal.tsx`
+
+```tsx
+// src/components/audit/AuditAlertModal.tsx
+// Pop-up modal when a CRITICAL alert is triggered. Shown to admin only.
+// Plays sound, flashes red, requires acknowledgement.
+
+import { useEffect, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { AlertTriangle, MapPin, Phone } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { useAuditStore } from '@/store/auditStore'
+import { useStudentsStore } from '@/store/studentsStore'
+import { formatDistance, getBucketMeta } from '@/lib/audit/distanceBuckets'
+import * as sound from '@/lib/audit/soundManager'
+
+export function AuditAlertModal() {
+  const alerts = useAuditStore(s => s.alerts)
+  const acknowledge = useAuditStore(s => s.acknowledgeAlert)
+  const students = useStudentsStore(s => s.students)
+  const [shownIds, setShownIds] = useState<Set<string>>(new Set())
+
+  const unshownCritical = alerts.find(
+    a => a.severity === 'CRITICAL' && !a.acknowledgedAt && !shownIds.has(a.id)
+  )
+
+  useEffect(() => {
+    if (unshownCritical) sound.play('alert')
+  }, [unshownCritical?.id])
+
+  if (!unshownCritical) return null
+  const student = students.find(s => s.id === unshownCritical.studentId)
+  const bucketMeta = getBucketMeta(unshownCritical.distanceM > 5000 ? 'RED' : 'ORANGE')
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-6"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+      >
+        <motion.div
+          className="bg-white dark:bg-gray-900 rounded-3xl border-4 border-red-500 shadow-2xl p-8 max-w-md w-full"
+          initial={{ scale: 0.7, y: -50 }}
+          animate={{
+            scale: 1, y: 0,
+            boxShadow: ['0 0 0 0 rgba(239,68,68,0.4)', '0 0 0 20px rgba(239,68,68,0)'],
+          }}
+          transition={{ duration: 0.4 }}
+        >
+          <div className="flex items-center gap-3 mb-4">
+            <AlertTriangle className="text-red-500" size={48} />
+            <div>
+              <div className="text-3xl font-black">אזעקה!</div>
+              <div className="text-muted-foreground">תלמיד מחוץ לטווח קריטי</div>
+            </div>
+          </div>
+
+          <div className="space-y-3 my-6">
+            <div>
+              <div className="text-xs text-muted-foreground">תלמיד</div>
+              <div className="text-2xl font-bold">{student?.fullName ?? unshownCritical.studentId.slice(0, 8)}</div>
+              <div className="text-sm">{student?.classId}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">מרחק מהישיבה</div>
+              <div className="text-3xl font-bold tabular-nums" style={{ color: bucketMeta.color }}>
+                <MapPin className="inline" size={28} />
+                <span dir="ltr">{formatDistance(unshownCritical.distanceM)}</span>
+              </div>
+            </div>
+            {student?.phone && (
+              <div>
+                <div className="text-xs text-muted-foreground">טלפון</div>
+                <a href={`tel:${student.phone}`} className="text-blue-600 underline text-lg">
+                  <Phone className="inline" size={18} /> {student.phone}
+                </a>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setShownIds(new Set([...shownIds, unshownCritical.id]))}
+            >
+              דחיה
+            </Button>
+            <Button
+              className="flex-1 bg-red-600 hover:bg-red-700"
+              onClick={async () => {
+                await acknowledge(unshownCritical.id, 'ADMIN')
+                setShownIds(new Set([...shownIds, unshownCritical.id]))
+              }}
+            >
+              סמן כנצפה
+            </Button>
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  )
+}
+```
+
+---
+
+# חלק נ"ה — Realtime Channel Manager (קוד מלא)
+
+```ts
+// src/lib/audit/realtimeManager.ts
+// Single connection, multiple subscribers. Reconnects with exponential backoff.
+
+import { supabase } from '@/lib/api/supabase'
+import type { RealtimeChannel } from '@supabase/supabase-js'
+import type { AuditResponse, AuditAlert, AuditSession } from '@/types/audit'
+
+type Handler<T> = (event: 'INSERT' | 'UPDATE' | 'DELETE', row: T, old?: T) => void
+
+class AuditRealtimeManager {
+  private channel: RealtimeChannel | null = null
+  private currentSessionId: string | null = null
+  private responseHandlers = new Set<Handler<AuditResponse>>()
+  private alertHandlers = new Set<Handler<AuditAlert>>()
+  private sessionHandlers = new Set<Handler<AuditSession>>()
+  private reconnectAttempt = 0
+  private reconnectTimer: number | null = null
+
+  attach(sessionId: string) {
+    if (this.currentSessionId === sessionId && this.channel) return
+    this.detach()
+    this.currentSessionId = sessionId
+    this.connect()
+  }
+
+  detach() {
+    if (this.channel) {
+      supabase.removeChannel(this.channel)
+      this.channel = null
+    }
+    if (this.reconnectTimer) {
+      window.clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.currentSessionId = null
+    this.reconnectAttempt = 0
+  }
+
+  private connect() {
+    if (!this.currentSessionId) return
+    const sid = this.currentSessionId
+
+    this.channel = supabase
+      .channel(`audit_v2:${sid}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'audit_responses', filter: `session_id=eq.${sid}` },
+        (payload) => this.broadcastResponse(payload.eventType as any, payload.new, payload.old))
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'audit_alerts', filter: `session_id=eq.${sid}` },
+        (payload) => this.broadcastAlert(payload.eventType as any, payload.new, payload.old))
+      .on('postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'audit_sessions', filter: `id=eq.${sid}` },
+        (payload) => this.broadcastSession('UPDATE', payload.new, payload.old))
+      .subscribe(status => {
+        if (status === 'SUBSCRIBED') {
+          this.reconnectAttempt = 0
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          this.scheduleReconnect()
+        }
+      })
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) return
+    const delay = Math.min(30000, 1000 * Math.pow(2, this.reconnectAttempt))
+    this.reconnectAttempt++
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null
+      if (this.channel) {
+        supabase.removeChannel(this.channel)
+        this.channel = null
+      }
+      this.connect()
+    }, delay)
+  }
+
+  private broadcastResponse(evt: any, row: any, old?: any) {
+    for (const h of this.responseHandlers) h(evt, row, old)
+  }
+  private broadcastAlert(evt: any, row: any, old?: any) {
+    for (const h of this.alertHandlers) h(evt, row, old)
+  }
+  private broadcastSession(evt: any, row: any, old?: any) {
+    for (const h of this.sessionHandlers) h(evt, row, old)
+  }
+
+  onResponse(h: Handler<AuditResponse>): () => void {
+    this.responseHandlers.add(h)
+    return () => { this.responseHandlers.delete(h) }
+  }
+  onAlert(h: Handler<AuditAlert>): () => void {
+    this.alertHandlers.add(h)
+    return () => { this.alertHandlers.delete(h) }
+  }
+  onSession(h: Handler<AuditSession>): () => void {
+    this.sessionHandlers.add(h)
+    return () => { this.sessionHandlers.delete(h) }
+  }
+}
+
+export const auditRealtimeManager = new AuditRealtimeManager()
+```
+
+---
+
+# חלק נ"ו — Loading, Empty, Error States
+
+## 56.1 `src/components/audit/AuditEmptyState.tsx`
+
+```tsx
+// src/components/audit/AuditEmptyState.tsx
+import { ClipboardList } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Link } from 'react-router-dom'
+
+export function AuditEmptyState() {
+  return (
+    <div className="text-center py-16 px-6">
+      <div className="inline-flex w-24 h-24 rounded-full bg-blue-100 dark:bg-blue-950 items-center justify-center mb-6">
+        <ClipboardList size={48} className="text-blue-600" />
+      </div>
+      <h2 className="text-2xl font-bold mb-2">עדיין אין ביקורת פעילה</h2>
+      <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+        פתח ביקורת חדשה כדי לדעת בזמן אמת מי בישיבה, מי בחוץ, ומי במצב לא ידוע.
+      </p>
+      <Link to="/admin/audit/new">
+        <Button size="lg" className="bg-blue-600 hover:bg-blue-700">
+          פתח ביקורת ראשונה
+        </Button>
+      </Link>
+    </div>
+  )
+}
+```
+
+## 56.2 `src/components/audit/AuditLoadingSkeleton.tsx`
+
+```tsx
+// src/components/audit/AuditLoadingSkeleton.tsx
+import { Skeleton } from '@/components/ui/skeleton'
+
+export function AuditLoadingSkeleton() {
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+      <Skeleton className="h-20 w-full rounded-2xl" />
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        {[...Array(6)].map((_, i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        {[...Array(8)].map((_, i) => <Skeleton key={i} className="h-44 rounded-2xl" />)}
+      </div>
+    </div>
+  )
+}
+```
+
+## 56.3 `src/components/audit/AuditErrorBoundary.tsx`
+
+```tsx
+// src/components/audit/AuditErrorBoundary.tsx
+import React from 'react'
+import { AlertCircle, RefreshCcw } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+
+interface State {
+  hasError: boolean
+  error: Error | null
+}
+
+export class AuditErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  State
+> {
+  state: State = { hasError: false, error: null }
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[AuditErrorBoundary]', error, info)
+    // Optional: send to error tracking service
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children
+
+    return (
+      <div className="p-8 text-center max-w-md mx-auto">
+        <AlertCircle size={48} className="text-red-500 mx-auto mb-4" />
+        <h2 className="text-xl font-bold mb-2">משהו השתבש</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          {this.state.error?.message ?? 'שגיאה לא ידועה'}
+        </p>
+        <Button
+          onClick={() => this.setState({ hasError: false, error: null })}
+        >
+          <RefreshCcw size={16} className="me-2" /> נסה שוב
+        </Button>
+      </div>
+    )
+  }
+}
+```
+
+---
+
+# חלק נ"ז — Mobile-specific Polish
+
+## 57.1 Pull-to-refresh
+
+```tsx
+// src/components/audit/PullToRefresh.tsx
+import { useState, useRef, ReactNode } from 'react'
+import { RefreshCw } from 'lucide-react'
+
+interface Props {
+  onRefresh: () => Promise<void>
+  children: ReactNode
+}
+
+export function PullToRefresh({ onRefresh, children }: Props) {
+  const [pulling, setPulling] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
+  const startY = useRef(0)
+
+  function handleTouchStart(e: React.TouchEvent) {
+    if (window.scrollY > 0) return
+    startY.current = e.touches[0].clientY
+  }
+
+  function handleTouchMove(e: React.TouchEvent) {
+    if (refreshing || window.scrollY > 0) return
+    const delta = e.touches[0].clientY - startY.current
+    if (delta > 0) setPulling(Math.min(120, delta))
+  }
+
+  async function handleTouchEnd() {
+    if (pulling > 80 && !refreshing) {
+      setRefreshing(true)
+      try { await onRefresh() } finally {
+        setRefreshing(false)
+        setPulling(0)
+      }
+    } else {
+      setPulling(0)
+    }
+  }
+
+  return (
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      <div
+        className="flex items-center justify-center transition-all"
+        style={{ height: pulling, overflow: 'hidden' }}
+      >
+        <RefreshCw
+          className={refreshing ? 'animate-spin' : ''}
+          style={{ transform: `rotate(${pulling * 3}deg)` }}
+        />
+      </div>
+      {children}
+    </div>
+  )
+}
+```
+
+## 57.2 Swipe gestures על תלמיד (Supervisor)
+
+```tsx
+// src/components/audit/SwipeableStudentRow.tsx
+import { useState, useRef, ReactNode } from 'react'
+import { motion, useMotionValue, useTransform } from 'framer-motion'
+import { Check, AlertOctagon } from 'lucide-react'
+
+interface Props {
+  children: ReactNode
+  onSwipeRight: () => void   // mark IN_YESHIVA
+  onSwipeLeft: () => void    // mark OUT_NO_PERMIT
+}
+
+export function SwipeableStudentRow({ children, onSwipeRight, onSwipeLeft }: Props) {
+  const x = useMotionValue(0)
+  const rightOpacity = useTransform(x, [0, 100], [0, 1])
+  const leftOpacity = useTransform(x, [-100, 0], [1, 0])
+  const bgColor = useTransform(x, [-150, 0, 150], ['#ef4444', '#fff', '#10b981'])
+
+  return (
+    <motion.div
+      className="relative overflow-hidden rounded-xl"
+      style={{ backgroundColor: bgColor }}
+    >
+      <motion.div
+        className="absolute inset-y-0 start-3 flex items-center"
+        style={{ opacity: rightOpacity }}
+      >
+        <Check className="text-white" size={32} />
+      </motion.div>
+      <motion.div
+        className="absolute inset-y-0 end-3 flex items-center"
+        style={{ opacity: leftOpacity }}
+      >
+        <AlertOctagon className="text-white" size={32} />
+      </motion.div>
+
+      <motion.div
+        drag="x"
+        dragConstraints={{ left: -200, right: 200 }}
+        style={{ x }}
+        onDragEnd={(_, info) => {
+          if (info.offset.x > 100) onSwipeRight()
+          else if (info.offset.x < -100) onSwipeLeft()
+          x.set(0)
+        }}
+        className="bg-white dark:bg-gray-900"
+      >
+        {children}
+      </motion.div>
+    </motion.div>
+  )
+}
+```
+
+---
+
+# חלק נ"ח — Optimistic Updates Pattern
+
+```ts
+// src/store/auditStore.ts — extension showing the full optimistic pattern
+
+// Inside submitResponse implementation:
+submitResponse: async (studentId, payload) => {
+  const s = get().session
+  if (!s) throw new Error('no_active_session')
+
+  // 1. Save previous state for rollback
+  const previous = get().responses.get(studentId)
+  if (!previous) throw new Error('response_missing')
+
+  // 2. Optimistic update
+  const optimistic = {
+    ...previous,
+    ...payload,
+    markedAt: new Date().toISOString(),
+    markedBy: payload.markedBy ?? previous.markedBy,
+  } as AuditResponse
+
+  const next = new Map(get().responses)
+  next.set(studentId, optimistic)
+  set({ responses: next })
+
+  // 3. Network call
+  try {
+    const result = await api.submitAuditResponse({
+      sessionId: s.id,
+      studentId,
+      ...payload,
+    })
+    // 4a. realtime will eventually push the canonical row; we don't need to do
+    //     anything here unless we want to confirm with the server's choice of
+    //     category (e.g. server chose UNKNOWN due to low accuracy).
+    if ('category' in result && result.category !== optimistic.category) {
+      const corrected = new Map(get().responses)
+      corrected.set(studentId, { ...optimistic, category: result.category })
+      set({ responses: corrected })
+    }
+  } catch (e) {
+    // 4b. Rollback on failure
+    const rolledBack = new Map(get().responses)
+    rolledBack.set(studentId, previous)
+    set({ responses: rolledBack, error: (e as Error).message })
+    throw e
+  }
+},
+```
+
+---
+
+# חלק נ"ט — Auth Integration
+
+```ts
+// src/lib/audit/auditAuth.ts
+// Permission checks for audit operations.
+
+import type { AuditSession } from '@/types/audit'
+import { useAuthStore } from '@/store/authStore'
+
+export type AuditAction = 'open' | 'close' | 'abort' | 'override' | 'view' | 'export'
+
+export function canPerformAuditAction(
+  action: AuditAction,
+  session: AuditSession | null,
+): { allowed: boolean; reason?: string } {
+  const auth = useAuthStore.getState()
+  const role = auth.role
+
+  if (role === 'admin') return { allowed: true }
+
+  if (role === 'supervisor') {
+    if (action === 'view') return { allowed: true }
+    if (action === 'override') {
+      if (!session) return { allowed: false, reason: 'NO_SESSION' }
+      if (!auth.classId) return { allowed: false, reason: 'NO_CLASS' }
+      if (!session.classIds.includes(auth.classId))
+        return { allowed: false, reason: 'CLASS_NOT_IN_AUDIT' }
+      return { allowed: true }
+    }
+    return { allowed: false, reason: 'ROLE_FORBIDDEN' }
+  }
+
+  if (role === 'student') {
+    if (action === 'view') return { allowed: true }
+    return { allowed: false, reason: 'STUDENTS_CANNOT_MANAGE' }
+  }
+
+  return { allowed: false, reason: 'UNAUTHENTICATED' }
+}
+
+export function assertCanPerform(
+  action: AuditAction,
+  session: AuditSession | null,
+): void {
+  const result = canPerformAuditAction(action, session)
+  if (!result.allowed) {
+    throw new Error(`Permission denied: ${result.reason}`)
+  }
+}
+```
+
+---
+
+# חלק ס' — Sync Engine Integration (offline support for supervisors)
+
+```ts
+// src/lib/sync/auditSync.ts
+// Queue audit responses when offline. Replay on reconnect.
+
+import { db } from '@/lib/db/schema'
+import { api } from '@/lib/api'
+import type { SubmitAuditResponsePayload } from '@/types/audit'
+
+interface QueuedSubmit {
+  id?: number
+  payload: SubmitAuditResponsePayload
+  attemptedAt: number
+  attempts: number
+}
+
+const STORE = 'audit_submit_queue'
+
+export async function queueAuditSubmit(payload: SubmitAuditResponsePayload) {
+  await db.table(STORE).add({
+    payload,
+    attemptedAt: Date.now(),
+    attempts: 0,
+  } as QueuedSubmit)
+}
+
+export async function flushAuditQueue(): Promise<{ sent: number; failed: number }> {
+  if (!navigator.onLine) return { sent: 0, failed: 0 }
+  const queue = await db.table<QueuedSubmit>(STORE).toArray()
+  let sent = 0, failed = 0
+  for (const item of queue) {
+    try {
+      await api.submitAuditResponse(item.payload)
+      await db.table(STORE).delete(item.id!)
+      sent++
+    } catch {
+      failed++
+      await db.table(STORE).update(item.id!, { attempts: item.attempts + 1 })
+    }
+  }
+  return { sent, failed }
+}
+
+// Auto-flush on reconnect
+window.addEventListener('online', () => {
+  flushAuditQueue().catch(console.error)
+})
+
+// Periodic retry every 30s
+setInterval(() => {
+  if (navigator.onLine) flushAuditQueue().catch(console.error)
+}, 30000)
+```
+
+---
+
+# חלק ס"א — Animation Library reference
+
+```ts
+// src/lib/audit/animations.ts
+// Reusable Framer Motion variants for the audit UI.
+
+import type { Variants } from 'framer-motion'
+
+export const cardEnter: Variants = {
+  initial: { opacity: 0, y: 10, scale: 0.95 },
+  animate: { opacity: 1, y: 0, scale: 1 },
+  exit:    { opacity: 0, y: -10, scale: 0.95 },
+}
+
+export const slideInFromRight: Variants = {
+  initial: { x: 100, opacity: 0 },
+  animate: { x: 0, opacity: 1 },
+  exit:    { x: -100, opacity: 0 },
+}
+
+export const fadeIn: Variants = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  exit:    { opacity: 0 },
+}
+
+export const popIn: Variants = {
+  initial: { scale: 0, opacity: 0 },
+  animate: { scale: 1, opacity: 1, transition: { type: 'spring', stiffness: 300, damping: 22 } },
+  exit:    { scale: 0, opacity: 0 },
+}
+
+export const pulseAlert: Variants = {
+  animate: {
+    scale: [1, 1.05, 1],
+    boxShadow: [
+      '0 0 0 0 rgba(239,68,68,0.6)',
+      '0 0 0 20px rgba(239,68,68,0)',
+      '0 0 0 0 rgba(239,68,68,0)',
+    ],
+    transition: { duration: 1.2, repeat: Infinity },
+  },
+}
+
+export const flashGreen: Variants = {
+  animate: {
+    backgroundColor: ['#fff', '#d1fae5', '#fff'],
+    transition: { duration: 0.5 },
+  },
+}
+```
+
+---
+
+# חלק ס"ב — Hebrew typography & RTL helpers
+
+```css
+/* src/styles/hebrew.css */
+:root {
+  /* Hebrew-friendly stacks */
+  --font-hebrew-sans: 'Heebo', 'Rubik', 'Assistant', system-ui, -apple-system, sans-serif;
+  --font-hebrew-display: 'Frank Ruhl Libre', 'David Libre', Georgia, serif;
+  --font-hebrew-mono: 'Cousine', ui-monospace, monospace;
+}
+
+html[dir="rtl"] {
+  font-family: var(--font-hebrew-sans);
+}
+
+/* Numbers should always render LTR */
+.num, [dir="ltr"] {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Mixed text helper */
+.he-en-mix {
+  unicode-bidi: plaintext;
+}
+
+/* Hebrew punctuation should sit on the left of numbers */
+.km::after {
+  content: ' ק"מ';
+}
+
+/* Heading spacing — Hebrew often needs less line-height */
+h1, h2, h3 { line-height: 1.25; }
+```
+
+```tsx
+// src/components/ui/Num.tsx
+// Small wrapper to force LTR rendering on numbers.
+
+import { cn } from '@/lib/utils'
+
+export function Num({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <span dir="ltr" className={cn('tabular-nums', className)}>{children}</span>
+}
+```
+
+---
+
+# חלק ס"ג — Configurable Feature Flags
+
+```ts
+// src/lib/audit/flags.ts
+// Allow turning features on/off without a redeploy.
+
+export interface AuditFlags {
+  enableLocationMode: boolean
+  enableProjectionMode: boolean
+  enableHeatmap: boolean
+  enableMap: boolean
+  enableExportPdf: boolean
+  enableExportExcel: boolean
+  enableSlackAlerts: boolean
+  enableAiAnomalyDetection: boolean
+  maxConcurrentSessions: number
+}
+
+const DEFAULT_FLAGS: AuditFlags = {
+  enableLocationMode: true,
+  enableProjectionMode: true,
+  enableHeatmap: true,
+  enableMap: true,
+  enableExportPdf: true,
+  enableExportExcel: true,
+  enableSlackAlerts: false,
+  enableAiAnomalyDetection: false,
+  maxConcurrentSessions: 1,
+}
+
+let cached: AuditFlags | null = null
+
+export async function loadFlags(): Promise<AuditFlags> {
+  if (cached) return cached
+  try {
+    const res = await fetch('/api/audit-flags', { credentials: 'include' })
+    if (res.ok) {
+      cached = { ...DEFAULT_FLAGS, ...(await res.json()) }
+      return cached
+    }
+  } catch {}
+  cached = DEFAULT_FLAGS
+  return cached
+}
+
+export function useFlag(k: keyof AuditFlags): boolean | number {
+  return (cached ?? DEFAULT_FLAGS)[k]
+}
+```
+
+---
+
+# חלק ס"ד — Routing diagram (full)
+
+```
+/                                                 [Home / Login]
+├── /admin                                        [Admin shell]
+│   ├── /admin/dashboard                          [Existing dashboard]
+│   ├── /admin/students                           [Existing]
+│   ├── /admin/audit                              [Landing]
+│   │   ├── /admin/audit/new                      [4-step wizard]
+│   │   ├── /admin/audit/:id/live                 [Active session]
+│   │   ├── /admin/audit/:id/summary              [Post-mortem]
+│   │   └── /admin/audit/compare?ids=A,B,C        [Comparison]
+│   ├── /admin/settings                           [Existing]
+│   └── /admin/audit-log                          [Existing]
+│
+├── /class-supervisor                             [Supervisor shell]
+│   ├── /class-supervisor/dashboard               [Existing + audit banner]
+│   └── /class-supervisor/audit                   [Supervisor audit panel (active session)]
+│
+└── /student                                      [Student shell]
+    ├── /student                                  [Home + audit sheet if active]
+    ├── /student/requests                         [Existing]
+    └── /student/history                          [Existing]
+```
+
+---
+
+# חלק ס"ה — App.tsx Routes Patch
+
+```tsx
+// src/App.tsx — Routes additions
+import { lazy } from 'react'
+
+const AuditLandingPage = lazy(() => import('./pages/admin/AuditLandingPage'))
+const AuditNewPage     = lazy(() => import('./pages/admin/AuditNewPage'))
+const AuditLivePage    = lazy(() => import('./pages/admin/AuditLivePage'))
+const AuditSummaryPage = lazy(() => import('./pages/admin/AuditSummaryPage'))
+const AuditComparePage = lazy(() => import('./pages/admin/AuditComparePage'))
+const SupervisorAuditPage = lazy(() => import('./pages/class-supervisor/AuditPage'))
+
+function AppRoutes() {
+  return (
+    <Routes>
+      {/* existing routes */}
+      <Route path="/admin" element={<AdminShell />}>
+        <Route path="audit" element={<AuditLandingPage />} />
+        <Route path="audit/new" element={<AuditNewPage />} />
+        <Route path="audit/:id/live" element={<AuditLivePage />} />
+        <Route path="audit/:id/summary" element={<AuditSummaryPage />} />
+        <Route path="audit/compare" element={<AuditComparePage />} />
+      </Route>
+      <Route path="/class-supervisor" element={<SupervisorShell />}>
+        <Route path="audit" element={<SupervisorAuditPage />} />
+      </Route>
+    </Routes>
+  )
+}
+```
+
+---
+
+# חלק ס"ו — Storybook stories (for design review)
+
+```tsx
+// src/components/audit/AuditClassCard.stories.tsx
+import type { Meta, StoryObj } from '@storybook/react'
+import { AuditClassCard } from './AuditClassCard'
+import { useAuditStore } from '@/store/auditStore'
+
+const meta: Meta<typeof AuditClassCard> = {
+  component: AuditClassCard,
+  title: 'Audit/ClassCard',
+  decorators: [(Story) => {
+    useAuditStore.setState({
+      responses: new Map([
+        ['s1', { id: 'r1', sessionId: 'sess1', studentId: 's1', classId: 'כיתה א', category: 'IN_YESHIVA' } as any],
+        ['s2', { id: 'r2', sessionId: 'sess1', studentId: 's2', classId: 'כיתה א', category: 'OUT_PERMIT' } as any],
+        ['s3', { id: 'r3', sessionId: 'sess1', studentId: 's3', classId: 'כיתה א', category: 'PENDING' } as any],
+      ]),
+    })
+    return <div className="p-4 max-w-sm"><Story /></div>
+  }],
+}
+export default meta
+
+type Story = StoryObj<typeof AuditClassCard>
+
+export const Default: Story = {
+  args: { classId: 'כיתה א' },
+}
+
+export const AlertActive: Story = {
+  args: { classId: 'כיתה א' },
+  decorators: [(Story) => {
+    useAuditStore.setState({
+      responses: new Map([
+        ['s1', { id: 'r1', sessionId: 'sess1', studentId: 's1', classId: 'כיתה א', category: 'OUT_NO_PERMIT' } as any],
+      ]),
+    })
+    return <Story />
+  }],
+}
+
+export const Complete: Story = {
+  args: { classId: 'כיתה א' },
+  decorators: [(Story) => {
+    useAuditStore.setState({
+      responses: new Map(
+        Array.from({ length: 25 }, (_, i) => [`s${i}`, {
+          id: `r${i}`, sessionId: 'sess1', studentId: `s${i}`,
+          classId: 'כיתה א', category: 'IN_YESHIVA',
+        } as any])
+      ),
+    })
+    return <Story />
+  }],
+}
+```
+
+---
+
+# חלק ס"ז — Browser support matrix
+
+| דפדפן | Min version | Notes |
+|--------|-------------|-------|
+| Chrome | 90+ | Full support (Realtime, Web Push, GPS) |
+| Firefox | 90+ | Full support; Push works with VAPID |
+| Edge | 90+ | Same as Chrome |
+| Safari (Mac) | 16+ | Web Push from 16.4 |
+| Safari (iOS) | 16.4+ | Push works only after "Add to Home Screen" |
+| Samsung Internet | 18+ | Full support |
+| Chrome Android | 90+ | Full support |
+| Firefox Android | 90+ | Full support |
+| Old Android Browser | — | Not supported. Fallback: poll every 30s instead of Realtime. |
+
+---
+
+# חלק ס"ח — Internationalization Strings (טבלה מלאה)
+
+```ts
+// src/lib/audit/strings.ts
+export const HEBREW_STRINGS = {
+  // Common actions
+  'audit.action.open':       'פתח ביקורת',
+  'audit.action.close':      'סגור ביקורת',
+  'audit.action.abort':      'בטל ביקורת',
+  'audit.action.refresh':    'רענן',
+  'audit.action.export':     'ייצא',
+  'audit.action.cancel':     'בטל',
+  'audit.action.confirm':    'אישור',
+  'audit.action.back':       'חזור',
+  'audit.action.next':       'הבא',
+
+  // Modes
+  'audit.mode.manual':       'ביקורת מהירה',
+  'audit.mode.location':     'ביקורת מיקום',
+  'audit.mode.manual.desc':  'הרכזים מסמנים ידנית את כיתתם',
+  'audit.mode.location.desc':'הסלולרים שולחים GPS אוטומטית',
+
+  // Categories
+  'audit.cat.pending':       'ממתין',
+  'audit.cat.in_yeshiva':    'נוכח',
+  'audit.cat.out_permit':    'בחוץ עם אישור',
+  'audit.cat.out_no_permit': 'בחוץ ללא אישור',
+  'audit.cat.unknown':       'לא ידוע',
+
+  // Distance buckets
+  'audit.bucket.green':      'בישיבה',
+  'audit.bucket.blue':       'באזור',
+  'audit.bucket.orange':     'אזור חברון',
+  'audit.bucket.red':        'מחוץ לטווח',
+
+  // Status messages
+  'audit.status.active':     'פעילה',
+  'audit.status.closed':     'הסתיימה',
+  'audit.status.aborted':    'בוטלה',
+  'audit.status.timed_out':  'פג תוקף',
+
+  // Alerts
+  'audit.alert.critical':    'אזעקה קריטית!',
+  'audit.alert.medium':      'התראה',
+  'audit.alert.acknowledge': 'סמן כנצפה',
+
+  // KPIs
+  'audit.kpi.total':         'סה"כ',
+  'audit.kpi.marked':        'סומנו',
+  'audit.kpi.pending':       'ממתין',
+  'audit.kpi.alerts_open':   'אזעקות פתוחות',
+  'audit.kpi.progress':      'התקדמות',
+
+  // Wizard steps
+  'audit.wizard.step1':      'בחר מצב',
+  'audit.wizard.step2':      'בחר כיתות',
+  'audit.wizard.step3':      'הגדרות',
+  'audit.wizard.step4':      'אישור',
+
+  // Errors
+  'audit.error.AUDIT_ACTIVE':              'יש כבר ביקורת פעילה',
+  'audit.error.INVALID_MODE':              'מצב לא חוקי',
+  'audit.error.NO_CLASSES_SELECTED':       'יש לבחור לפחות כיתה אחת',
+  'audit.error.SESSION_NOT_FOUND':         'הסשן לא נמצא',
+  'audit.error.SESSION_NOT_ACTIVE':        'הסשן כבר נסגר',
+  'audit.error.RESPONSE_NOT_FOUND':        'תלמיד לא נמצא בביקורת',
+  'audit.error.PERMISSION_DENIED':         'אין הרשאה',
+  'audit.error.NETWORK':                   'שגיאת רשת',
+  'audit.error.GPS_DENIED':                'הרשאת GPS נדחתה',
+  'audit.error.GPS_TIMEOUT':               'איסוף GPS לקח יותר מדי זמן',
+  'audit.error.GPS_UNAVAILABLE':           'GPS לא זמין במכשיר זה',
+
+  // Student-facing
+  'student.audit.title':     'בקרת מיקום מהירה',
+  'student.audit.desc':      'ההנהלה מבקשת לוודא שאתה בישיבה',
+  'student.audit.confirm':   'אשר ושלח מיקום',
+  'student.audit.refuse':    'אני לא יכול / לא בישיבה',
+  'student.audit.collecting':'מתבצע איסוף מיקום…',
+  'student.audit.submitting':'שולח לשרת…',
+  'student.audit.thanks':    'תודה! הנתון נשלח.',
+
+  // Supervisor-facing
+  'supervisor.audit.banner.active': 'ביקורת פעילה — סמן את התלמידים',
+  'supervisor.audit.button.in_yeshiva':    'נוכח',
+  'supervisor.audit.button.out_permit':    'עם אישור',
+  'supervisor.audit.button.out_no_permit': 'ללא אישור',
+  'supervisor.audit.note_placeholder':     'הערה (חולה, הלוויה...)',
+  'supervisor.audit.all_done':             'סימנת את כולם — תודה!',
+}
+
+export function t(key: keyof typeof HEBREW_STRINGS): string {
+  return HEBREW_STRINGS[key] ?? key
+}
+```
+
+---
+
+# חלק ס"ט — Analytics Events
+
+```ts
+// src/lib/audit/analytics.ts
+// Wrapper around analytics provider (Vercel Analytics / posthog).
+
+import { track } from '@vercel/analytics'
+
+export const auditEvents = {
+  openClicked(mode: 'MANUAL' | 'LOCATION') {
+    track('audit.open.clicked', { mode })
+  },
+  opened(sessionId: string, mode: string, classCount: number, studentCount: number) {
+    track('audit.opened', { sessionId, mode, classCount, studentCount })
+  },
+  responseSubmitted(sessionId: string, category: string, source: 'GPS' | 'MANUAL') {
+    track('audit.response.submitted', { sessionId, category, source })
+  },
+  alertTriggered(sessionId: string, severity: string, distanceM: number) {
+    track('audit.alert.triggered', { sessionId, severity, distanceM })
+  },
+  closed(sessionId: string, durationMin: number) {
+    track('audit.closed', { sessionId, durationMin })
+  },
+  projectionEntered() {
+    track('audit.projection.entered')
+  },
+  exportRequested(format: 'pdf' | 'excel') {
+    track('audit.export.requested', { format })
+  },
+}
+```
+
+---
+
+# חלק ע' — מבט סופי על מבנה הקבצים החדש
+
+```
+src/
+├── pages/
+│   ├── admin/
+│   │   ├── AuditLandingPage.tsx          ← NEW
+│   │   ├── AuditNewPage.tsx              ← NEW
+│   │   ├── AuditLivePage.tsx             ← NEW
+│   │   ├── AuditSummaryPage.tsx          ← NEW
+│   │   └── AuditComparePage.tsx          ← NEW
+│   └── class-supervisor/
+│       └── AuditPage.tsx                 ← NEW
+├── components/
+│   └── audit/                            ← NEW (whole folder)
+│       ├── AuditHeader.tsx
+│       ├── AuditKpiRow.tsx
+│       ├── AuditCategoryChip.tsx
+│       ├── AuditDistanceBadge.tsx
+│       ├── AuditClassCard.tsx
+│       ├── AuditClassGrid.tsx
+│       ├── AuditClassDrawer.tsx
+│       ├── AuditHeatmap.tsx
+│       ├── AuditMap.tsx
+│       ├── AuditActivityFeed.tsx
+│       ├── AuditAlertList.tsx
+│       ├── AuditAlertModal.tsx
+│       ├── AuditModeSelector.tsx
+│       ├── AuditClassSelector.tsx
+│       ├── AuditLocationSettings.tsx
+│       ├── AuditCloseModal.tsx
+│       ├── AuditProjectionMode.tsx
+│       ├── AuditEmptyState.tsx
+│       ├── AuditLoadingSkeleton.tsx
+│       ├── AuditErrorBoundary.tsx
+│       ├── StudentAuditSheet.tsx
+│       ├── SupervisorAuditPanel.tsx
+│       ├── SupervisorStudentRow.tsx
+│       ├── PullToRefresh.tsx
+│       └── SwipeableStudentRow.tsx
+├── store/
+│   ├── auditStore.ts                     ← NEW
+│   └── auditUiStore.ts                   ← NEW
+├── hooks/
+│   ├── useActiveAudit.ts                 ← NEW
+│   ├── useAuditStats.ts                  ← NEW
+│   ├── useAuditLocationCollector.ts      ← NEW
+│   └── useProjectionRotation.ts          ← NEW
+├── lib/
+│   ├── audit/                            ← NEW (whole folder)
+│   │   ├── categories.ts
+│   │   ├── distanceBuckets.ts
+│   │   ├── haversine.ts
+│   │   ├── gpsCollector.ts
+│   │   ├── soundManager.ts
+│   │   ├── exportPdf.ts
+│   │   ├── exportExcel.ts
+│   │   ├── animations.ts
+│   │   ├── auditAuth.ts
+│   │   ├── realtimeManager.ts
+│   │   ├── flags.ts
+│   │   ├── strings.ts
+│   │   ├── analytics.ts
+│   │   └── __tests__/
+│   │       ├── haversine.test.ts
+│   │       ├── distanceBuckets.test.ts
+│   │       └── gpsCollector.test.ts
+│   └── api/
+│       └── auditApi.ts                   ← NEW
+├── types/
+│   └── audit.ts                          ← NEW
+└── lib/sync/
+    └── auditSync.ts                      ← NEW
+supabase/
+├── migrations/
+│   └── 20260516000000_internal_audit_v2.sql  ← NEW
+└── functions/
+    ├── send-audit-push/                   ← NEW
+    │   ├── index.ts
+    │   └── webPush.ts
+    └── notify-audit-alert/                ← NEW
+        └── index.ts
+public/
+├── sw.js                                  ← MODIFIED
+└── sounds/                                ← NEW
+    ├── chime-soft.mp3
+    ├── ding.mp3
+    ├── alert.mp3
+    ├── notification.mp3
+    └── complete.mp3
+e2e/
+└── audit/                                 ← NEW
+    └── manual-mode.spec.ts
+```
+
+**סך הכל קבצים חדשים/משונים:** ~55
+
+---
+
+# חלק ע"א — לוח זמנים מפורט יום-יום
+
+| יום | משימה | קבצים | זמן (שעות) |
+|-----|--------|--------|-------------|
+| 1 | מיגרציית DB + RPCs (open, submit, get_active, close) | `20260516000000_internal_audit_v2.sql` | 8 |
+| 2 | RPCs (abort, kpis, alerts, list, tick) + triggers | אותו קובץ | 6 |
+| 3 | Edge function `send-audit-push` + VAPID config | `supabase/functions/send-audit-push/*` | 4 |
+| 4 | TypeScript types + lib/audit modules בסיסי | `types/audit.ts`, `lib/audit/{haversine,distanceBuckets,categories}.ts` | 5 |
+| 5 | lib/audit/gpsCollector.ts + soundManager + tests | `lib/audit/{gpsCollector,soundManager}.ts` + tests | 5 |
+| 6 | Zustand stores | `store/audit{Store,UiStore}.ts` | 5 |
+| 7 | Hooks | `hooks/useActiveAudit.ts`, `useAuditStats.ts`, etc. | 5 |
+| 8 | API client (auditApi.ts) | `lib/api/auditApi.ts` | 4 |
+| 9 | UI primitives (CategoryChip, DistanceBadge, KpiRow) | `components/audit/Audit{CategoryChip,DistanceBadge,KpiRow}.tsx` | 5 |
+| 10 | ClassCard, ClassGrid, ClassDrawer | אותם קבצים | 6 |
+| 11 | Heatmap | `components/audit/AuditHeatmap.tsx` | 4 |
+| 12 | Map (Leaflet integration) | `components/audit/AuditMap.tsx` | 7 |
+| 13 | Activity Feed | `components/audit/AuditActivityFeed.tsx` | 4 |
+| 14 | Alert List + Modal | `components/audit/AuditAlert{List,Modal}.tsx` | 5 |
+| 15 | Mode Selector + Class Selector + Settings | `Audit{Mode,Class}Selector.tsx`, `AuditLocationSettings.tsx` | 6 |
+| 16 | New Page (wizard) | `pages/admin/AuditNewPage.tsx` | 5 |
+| 17 | Landing Page | `pages/admin/AuditLandingPage.tsx` | 4 |
+| 18 | Live Page | `pages/admin/AuditLivePage.tsx` | 6 |
+| 19 | Summary Page + Compare Page | `pages/admin/Audit{Summary,Compare}Page.tsx` | 6 |
+| 20 | Projection Mode | `components/audit/AuditProjectionMode.tsx` | 4 |
+| 21 | Supervisor Panel + Student Row | `components/audit/Supervisor*.tsx` | 6 |
+| 22 | Student Sheet + audio chimes | `components/audit/StudentAuditSheet.tsx` | 4 |
+| 23 | Service Worker integration | `public/sw.js` | 3 |
+| 24 | Export PDF / Excel | `lib/audit/export*.ts` | 5 |
+| 25 | Offline queue (auditSync.ts) | `lib/sync/auditSync.ts` | 4 |
+| 26 | Pull-to-refresh + swipe gestures | `components/audit/{PullToRefresh,SwipeableStudentRow}.tsx` | 4 |
+| 27 | Polish: animations, sound effects, projection rotation | various | 5 |
+| 28 | Unit tests for all lib/audit | `__tests__/*` | 5 |
+| 29 | Storybook stories | `*.stories.tsx` | 4 |
+| 30 | E2E tests (Playwright) | `e2e/audit/*` | 6 |
+| 31 | Bug fixes from QA | various | 8 |
+| 32 | Accessibility audit + fixes | various | 4 |
+| 33 | Performance profiling + opts | various | 4 |
+| 34 | Documentation update (CLAUDE.md) | `CLAUDE.md` | 3 |
+| 35 | Staging deploy + smoke tests | infra | 4 |
+| 36 | Production deploy + monitor | infra | 8 |
+| **סה"כ** | | | **~180 שעות = ~23 ימי עבודה** |
+
+---
+
+# חלק ע"ב — Risk Register
+
+| סיכון | סבירות | השפעה | מיטיגציה |
+|--------|---------|---------|----------|
+| Web Push לא יעבוד ב-iOS Safari | בינונית | גבוהה | Fallback: Realtime listen. UI: notification banner. |
+| GPS accuracy גרועה בבניין | גבוהה | בינונית | maxAccuracyM=1000, marker `LOW_ACCURACY`, supervisor override |
+| Realtime disconnect | בינונית | בינונית | exponential backoff + polling fallback |
+| מנהל סגר טאב באמצע ביקורת | גבוהה | נמוכה | Session ב-DB; refresh כל מקום ימשיך מהמקום |
+| 50% מהתלמידים לא יסכימו GPS | נמוכה | גבוהה | אזעקת אדמין; אופציה ל-fallback ל-Manual |
+| pg_cron נופל ב-Supabase | נמוכה | נמוכה | Manual cleanup; 24h timeout ידני |
+| מיגרציה הרסה אובייקטים קיימים | נמוכה | קריטית | Backup לפני. הכל idempotent. |
+| Bundle size מתפוצץ עם Leaflet | בינונית | בינונית | lazy import; code split של dashboard |
+| Hebrew text מתרחק ב-PDF | בינונית | נמוכה | jspdf-autotable עם RTL; pre-test |
+| Push spam — 381 push בו זמנית = rate-limit | בינונית | בינונית | batch send בקבוצות של 50, throttle 100ms |
+| מנהל לוחץ "סיים" בטעות | בינונית | גבוהה | Confirm modal עם רשימת PENDING |
+| Two admins clash open | נמוכה | נמוכה | unique index on (status='ACTIVE') |
+
+---
+
+# חלק ע"ג — Quality Gates (CI passes required)
+
+לפני merge ל-`main`:
+
+1. **TypeScript** עובר `npm run typecheck` ללא שגיאות
+2. **ESLint** עובר `npm run lint` ללא warnings
+3. **Unit tests** עוברים 100%
+4. **E2E** at least the smoke suite עובר
+5. **Bundle size** total < 400KB gzipped
+6. **Lighthouse** Performance > 90, Accessibility > 95
+7. **PR description** מתאר מה השתנה, איזה תרחישים נבדקו
+8. **Reviewer approves** (1 minimum)
+9. **No `console.log` / `debugger` / `TODO` ב-diff**
+10. **DB migration sql** רץ מקומית ללא שגיאות
+
+---
+
+# חלק ע"ד — Open Questions to confirm before coding
+
+לפני שמתחילים לקודד, יש לוודא:
+
+1. **האם Supabase pg_cron מופעל ב-instance הנוכחי?** — אם לא, חלופה: GitHub Actions cron כל 5 דק.
+2. **כמה תלמידים יש להם push_token תקין כרגע?** — שאילתת DB: `SELECT COUNT(*) FROM students WHERE push_token IS NOT NULL`
+3. **האם יש Slack workspace לקבל webhook התראות?** — אם לא, נדלג.
+4. **מה ה-VAPID keys הנוכחיים?** — לבדוק שהם תואמים בין Edge func ל-frontend.
+5. **האם יש כפתור "fullscreen" שעובד ב-Safari?** — לבדוק. אם לא, projection mode עובד רק ב-Chrome/Edge.
+6. **האם ה-Geo permission ב-PWA נשמרת אחרי refresh?** — לבדוק; אם לא, נצטרך לבקש כל פעם.
+7. **מה ה-admin PIN כיום?** — לוודא שתואם ל-app_settings.
+8. **האם supervisors כבר משתמשים בקודי כיתה?** — אם כן, לוודא שהם ידועים לפני הדוקומנט הזה.
+
+---
+
+# חלק ע"ה — Migration Documentation Template
+
+```markdown
+# Migration: 20260516000000_internal_audit_v2
+
+**Date applied:** YYYY-MM-DD
+**Applied by:** _____________
+**Backup taken:** [YES/NO] — snapshot name: _____________
+**Pre-flight checks:**
+  - [ ] pg_cron extension installed
+  - [ ] pgcrypto extension installed
+  - [ ] supabase_realtime publication exists
+  - [ ] students table has rows (count: ___)
+  - [ ] departures table exists
+
+**Steps:**
+  - [ ] BEGIN
+  - [ ] Tables created
+  - [ ] Indices created
+  - [ ] Triggers created
+  - [ ] Helper functions created
+  - [ ] RPCs created
+  - [ ] cron schedule added
+  - [ ] Publication updated
+  - [ ] COMMIT
+
+**Post-flight verification:**
+  - [ ] `\d audit_sessions` returns expected schema
+  - [ ] `SELECT * FROM cron.job WHERE jobname='tick_audit_timeout'` returns 1 row
+  - [ ] `SELECT * FROM pg_publication_tables WHERE pubname='supabase_realtime'` includes all 3 audit tables
+  - [ ] Test call: `SELECT public.open_audit('MANUAL', ARRAY['כיתה הרב יעקב']::text[], 'TEST', '{}', NULL)` — returns session_id
+  - [ ] Test call: `SELECT public.close_audit(<id>, 'TEST', NULL)` — returns CLOSED
+  - [ ] Cleanup: `DELETE FROM public.audit_sessions WHERE notes='TEST'`
+
+**Issues encountered:** ______________
+
+**Rollback executed?** [YES/NO]
+```
+
+---
+
+# חלק ע"ו — DB Maintenance Queries (אחרי deploy)
+
+```sql
+-- 1. כמה סשנים הסתיימו בהצלחה (CLOSED) ב-30 הימים האחרונים
+SELECT mode, COUNT(*) FROM audit_sessions
+WHERE status='CLOSED' AND started_at > NOW() - INTERVAL '30 days'
+GROUP BY mode;
+
+-- 2. ממוצע משך ביקורת (דקות) לפי מצב
+SELECT mode, AVG(EXTRACT(EPOCH FROM (closed_at - started_at))/60) AS avg_min
+FROM audit_sessions
+WHERE status='CLOSED'
+GROUP BY mode;
+
+-- 3. כמה אזעקות נוצרו בשבוע האחרון
+SELECT severity, COUNT(*) FROM audit_alerts
+WHERE triggered_at > NOW() - INTERVAL '7 days'
+GROUP BY severity;
+
+-- 4. אחוז תלמידים שהגיבו ב-LOCATION mode
+SELECT s.id,
+  COUNT(*) FILTER (WHERE r.category <> 'UNKNOWN' AND r.gps_status = 'OK')::float
+  / NULLIF(COUNT(*), 0) AS response_rate
+FROM audit_sessions s
+JOIN audit_responses r ON r.session_id = s.id
+WHERE s.mode = 'LOCATION'
+GROUP BY s.id;
+
+-- 5. תלמידים שתמיד מסומנים "ללא אישור"
+SELECT student_id, COUNT(*) AS times
+FROM audit_responses
+WHERE category = 'OUT_NO_PERMIT'
+GROUP BY student_id
+ORDER BY times DESC
+LIMIT 20;
+
+-- 6. כיתות עם הכי הרבה אזעקות
+SELECT class_id, COUNT(*) AS alerts_count
+FROM audit_responses r
+JOIN audit_alerts a ON a.student_id = r.student_id AND a.session_id = r.session_id
+GROUP BY class_id
+ORDER BY alerts_count DESC;
+
+-- 7. ניקוי ביקורות ישנות (שמירה ל-3 חודשים בלבד)
+DELETE FROM audit_sessions
+WHERE status IN ('CLOSED', 'TIMED_OUT', 'ABORTED')
+  AND closed_at < NOW() - INTERVAL '90 days';
+
+-- 8. בדיקת push success rate
+SELECT
+  DATE_TRUNC('day', sent_at) AS day,
+  COUNT(*) FILTER (WHERE success) AS sent,
+  COUNT(*) FILTER (WHERE NOT success) AS failed
+FROM audit_push_log
+WHERE sent_at > NOW() - INTERVAL '30 days'
+GROUP BY day
+ORDER BY day DESC;
+
+-- 9. תלמידים ללא push_token
+SELECT COUNT(*) FROM students WHERE push_token IS NULL;
+
+-- 10. השלמת ביקורת לפי כיתה ב-7 הימים האחרונים
+SELECT class_id,
+       AVG(CASE WHEN category <> 'PENDING' THEN 1.0 ELSE 0 END) AS marked_rate
+FROM audit_responses r
+JOIN audit_sessions s ON s.id = r.session_id
+WHERE s.started_at > NOW() - INTERVAL '7 days'
+GROUP BY class_id
+ORDER BY marked_rate ASC;
+```
+
+---
+
+# חלק ע"ז — Naming Conventions reference
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Table | snake_case, plural | `audit_responses` |
+| Column | snake_case | `gps_accuracy_m` |
+| RPC | snake_case verb_noun | `submit_audit_response` |
+| Trigger | `tr_<table>_<action>` | `tr_audit_responses_log_change` |
+| Trigger function | `tg_<table>_<action>` | `tg_audit_responses_alert` |
+| Helper function | `fn_<purpose>` | `fn_haversine_m` |
+| Index | `ix_<table>_<columns>` | `ix_audit_responses_session_class` |
+| Unique constraint | `uq_<table>_<columns>` | `uq_audit_responses_student_session` |
+| Check constraint | `chk_<purpose>` | `chk_gps_pair` |
+| TypeScript file | camelCase | `auditStore.ts` |
+| TypeScript type | PascalCase | `AuditSession` |
+| React component file | PascalCase.tsx | `AuditKpiRow.tsx` |
+| Hook | useXxx | `useAuditStats` |
+| Zustand store | useXxxStore | `useAuditStore` |
+| CSS variable | --audit-xxx | `--audit-red` |
+| Tailwind class | bg-audit-xxx | `bg-audit-green` |
+| Test file | xxx.test.ts | `haversine.test.ts` |
+| Stories file | xxx.stories.tsx | `AuditClassCard.stories.tsx` |
+
+---
+
+# חלק ע"ח — Branching & Workflow
+
+```
+main                            ← production
+  │
+  ├── claude/internal-audit-v2  ← בתוכנית, יום 1-36
+  │     ├── feature/audit-db        ← יום 1-3
+  │     ├── feature/audit-types     ← יום 4-5
+  │     ├── feature/audit-stores    ← יום 6-7
+  │     ├── feature/audit-components ← יום 8-15
+  │     ├── feature/audit-pages     ← יום 16-22
+  │     ├── feature/audit-polish    ← יום 23-30
+  │     └── feature/audit-tests     ← יום 28-32
+  │
+  └── (hotfix/* — kept separate)
+```
+
+לכל מיני-feature: branch, PR קטן, ביקורת קוד, merge ל-`claude/internal-audit-v2`.
+
+בסוף: 1 PR אחד גדול ל-`main` עם ה-summary של הכל.
+
+---
+
+# חלק ע"ט — מוצרים נוספים שניתן לבנות על גבי
+
+עוד אפשרויות אחרי שיש לנו audit subsystem:
+
+1. **Automatic recurring audits** — cron שכל יום ב-09:00 פותח ביקורת LOCATION אוטומטית
+2. **Audit comparison** — להראות diff בין שני סשנים
+3. **Class trends** — גרף קווי של אחוז נוכחות לכל כיתה לאורך חודש
+4. **Heatmap on real map** — geo-heatmap של איפה התלמידים נוטים להיות
+5. **Predictive alerts** — אם תלמיד לא הגיב 3 פעמים ברצף — שלח לרכז
+6. **Voice notes** — רכז יכול להקליט הערה במקום לכתוב
+7. **Photo upload** — רכז יכול לצלם רשימה ידנית ולהעלות
+8. **QR code check-in** — תלמיד סורק QR ליד הכניסה לישיבה
+9. **NFC tags** — לבעלי מכשירים עם NFC, יכול להחליף את GPS
+10. **Wearables** — אינטגרציה עם שעונים חכמים שמדווחים מיקום אוטומטית
+
+---
+
+# חלק פ' — Glossary מורחב
+
+| Term | DB / Code | Hebrew | Notes |
+|------|-----------|---------|-------|
+| Audit Session | `audit_sessions` row | סשן ביקורת | One audit run |
+| Audit Response | `audit_responses` row | תגובת ביקורת | Per-student response |
+| Audit Alert | `audit_alerts` row | אזעקת ביקורת | "Out of range" event |
+| Push Target | `settings.pushTarget` | מי לקבל push | STUDENTS/SUPERVISORS/BOTH |
+| Bucket | `distance_bucket` | קטגוריית מרחק | GREEN/BLUE/ORANGE/RED |
+| Snap | bucketFromMeters() | מיון מרחק | Function to bucket |
+| Sensitivity | `settings.sensitivity` | רגישות | LOW/MEDIUM/HIGH |
+| Timeout | `settings.timeoutSec` | זמן המתנה | Sec before reminder |
+| Projection | `projectionMode` | מצב הקרנה | Fullscreen for big screen |
+| Realtime channel | `audit_v2:<id>` | ערוץ זמן אמת | Per-session channel |
+| Optimistic update | client trick | עדכון מקומי | UI update before server |
+| Backoff | `Math.pow(2, ...)` | השהיה גוברת | Reconnect strategy |
+| Geofence | not implemented | גדר וירטואלית | Future: polygon instead of circle |
+| GPS accuracy | `gps_accuracy_m` | דיוק GPS | meters, lower=better |
+| ETag | not used | תג גרסה | Future: realtime optimization |
+| Activity feed | UI component | פיד פעילות | Live event stream |
+| Heatmap | UI component | מפת חום | Class-by-class % marked |
+| Audit log | `audit_response_log` | יומן ביקורת | Trail of category changes |
+| Acknowledge | API verb | סמן כנצפה | Mark alert as seen |
+| Acknowledge alert | RPC | אישור אזעקה | Mark seen, audit log |
+| Stale state | UI concept | מצב מיושן | > 30s since realtime |
+| Failover | strategy | חירום | Switch from realtime to polling |
+| RTO | recovery | זמן התאוששות | Time to recover from outage |
+| RPO | recovery | נקודת התאוששות | Acceptable data loss window |
+| SLO | objective | יעד שירות | Service level objective |
+
+---
+
+# חלק פ"א — Final Submission Checklist
+
+לפני שמכריזים "הפיצ'ר מוכן":
+
+## DB
+- [ ] migration רץ בלי שגיאות ב-staging
+- [ ] migration רץ בלי שגיאות ב-production
+- [ ] כל ה-8 RPCs נבדקו idלית
+- [ ] cron schedule מופעל
+- [ ] indices נוצרו
+- [ ] publication מעודכן
+
+## Backend
+- [ ] Edge function `send-audit-push` deployed
+- [ ] VAPID keys מוגדרים
+- [ ] secrets במקום הנכון
+
+## Frontend
+- [ ] כל ה-components נבנו
+- [ ] כל ה-pages עובדים
+- [ ] routing עודכן ב-App.tsx
+- [ ] Service Worker עדכני
+- [ ] CSS variables מוגדרים
+- [ ] Tailwind extensions מוגדרים
+
+## Tests
+- [ ] Unit tests עוברים ≥90% coverage
+- [ ] E2E tests עוברים (manual + location happy path)
+- [ ] Refresh persistence נבדק
+- [ ] Concurrent admin attempts נבדק
+- [ ] Permissions denied נבדק
+- [ ] GPS denied נבדק
+- [ ] Realtime disconnect נבדק
+
+## Polish
+- [ ] עברית בכל מקום
+- [ ] RTL נכון
+- [ ] Dark mode עובד
+- [ ] Mobile עובד
+- [ ] Accessibility ≥95
+- [ ] Performance LCP <2.5s
+- [ ] Sounds עובדים
+- [ ] Animations עובדות
+- [ ] Projection mode עובד
+
+## Documentation
+- [ ] CLAUDE.md מעודכן עם section "Internal Audit 2.0"
+- [ ] README של supabase/migrations מעודכן
+- [ ] Training scripts זמינים
+- [ ] FAQ מעודכן
+
+## Deployment
+- [ ] Vercel production deploy ירוק
+- [ ] Supabase function logs נקיים
+- [ ] Monitoring dashboard מוגדר
+- [ ] Alerting Slack/email מוגדר
+- [ ] Rollback procedure נבדק
+
+## Communication
+- [ ] צוות ההנהלה הוסבר על השינוי
+- [ ] רכזי הכיתות הודרכו
+- [ ] לתלמידים נשלח push הודעה אינפורמטיבית
+- [ ] תיעוד בפיד פנימי
+
+---
+
+# חלק פ"ב — סיום
+
+**זהו המסמך הסופי.**
+
+הוא מכיל את כל מה שצריך כדי לבנות מערכת ביקורת פנימית 2.0 ברמה מקצועית, כולל:
+
+- **תכנון אדריכלי** מקיף
+- **קוד מלא** של 60+ קבצים
+- **5 דפים** מלאים
+- **25+ רכיבים** מלאים
+- **8 RPCs** SQL מלאים
+- **3 Edge functions** מלאים
+- **טבלאות, indices, triggers** מלאים
+- **טסטים** unit + e2e
+- **wireframes** מפורטים
+- **runbook** deployment
+- **monitoring** plan
+- **training scripts** עברית
+- **FAQ** מורחב
+- **glossary**
+- **API contract**
+- **error matrix**
+- **performance budget**
+- **accessibility checklist**
+- **risk register**
+- **roadmap** של 36 ימים
+- **CI/CD** workflows
+- **rollback** procedures
+
+המסמך עומד על ~10,000 שורות.
+
+זהו מסמך עיון יחיד מספק שמאפשר לכל developer לקחת אותו ולבנות את הפיצ'ר בלי תלות בקונטקסט נוסף.
+
+**צוות המוצר רשאי להעלות שאלות.** כל הניסוחים, הצבעים, המספרים, השמות, ההגיון העסקי, ה-UX, ה-flow, ה-edge cases — הכל נדון, הוכרע, ותועד.
+
+**עתה — לקודד.**
+
+**סוף המסמך — מהדורה סופית מ-2026-05-16.**
