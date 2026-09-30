@@ -1,13 +1,13 @@
 {
-  "name": "ישיבת שבי חברון",
-  "short_name": "נוכחות",
-  "description": "מערכת נוכחות לישיבת שבי חברון",
+  "name": "המסע המתוק של יעלי",
+  "short_name": "יעלי",
+  "description": "משחק איסוף הממתקים של יעלי",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait",
-  "background_color": "#EAF4FF",
-  "theme_color": "#3B82F6",
+  "orientation": "any",
+  "background_color": "#FFF8EB",
+  "theme_color": "#FFF8EB",
   "dir": "rtl",
   "lang": "he",
   "icons": [
@@ -24,6 +24,6 @@
       "purpose": "any maskable"
     }
   ],
-  "categories": ["education", "utilities"],
+  "categories": ["games", "entertainment"],
   "prefer_related_applications": false
 }
